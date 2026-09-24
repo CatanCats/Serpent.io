@@ -38,7 +38,7 @@
   #stats .sub { font-size: 14px; color: var(--dim); margin-top: 4px; font-variant-numeric: tabular-nums; }
   #stats .sub b { color: var(--text); font-weight: 600; }
 
-  #board { right: max(16px, env(safe-area-inset-right)); top: max(16px, env(safe-area-inset-top)); width: 220px; padding: 12px 14px; }
+  #board { right: max(16px, env(safe-area-inset-right)); top: max(16px, env(safe-area-inset-top)); width: 240px; padding: 12px 14px; }
   #board h3 { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); font-weight: 600; margin-bottom: 8px; }
   #board ol { list-style: none; padding: 0; font-size: 14px; font-variant-numeric: tabular-nums; }
   #board li { display: flex; gap: 8px; align-items: center; padding: 2px 0; color: #c3cbe0; }
@@ -47,8 +47,11 @@
   #board li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #board li.me { color: #fff; font-weight: 600; }
   #board li.me .nm::after { content: " •"; color: var(--accent); }
+  .tg { flex: none; font-size: 9px; font-weight: 600; letter-spacing: .08em; padding: 1px 5px; border-radius: 6px; }
+  .tg.t2 { color: #fbbf24; background: rgba(251,191,36,.12); }
+  .tg.t3 { color: #fb7185; background: rgba(251,113,133,.14); }
 
-  #mini { right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); width: 132px; height: 132px; border-radius: 50%; padding: 0; overflow: hidden; }
+  #mini { right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); width: 170px; height: 170px; border-radius: 50%; padding: 0; overflow: hidden; }
   #mini canvas { width: 100%; height: 100%; display: block; }
 
   #perf { left: max(16px, env(safe-area-inset-left)); top: max(16px, env(safe-area-inset-top)); padding: 8px 12px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); border-radius: 10px; }
@@ -92,7 +95,7 @@
     #board { width: 164px; padding: 10px 12px; }
     #board li { font-size: 12px; }
     #board li:nth-child(n+6) { display: none; }
-    #mini { width: 96px; height: 96px; }
+    #mini { width: 112px; height: 112px; }
     #stats { padding: 10px 14px; min-width: 0; }
     #stats .big { font-size: 28px; }
     #perf { display: none; }
@@ -109,7 +112,7 @@
   <div class="sub">Rank <b id="rank">–</b> of <b id="total">–</b> · Kills <b id="kills">0</b></div>
 </div>
 <div id="board" class="hud glass"><h3>Leaderboard</h3><ol id="lb"></ol></div>
-<div id="mini" class="hud game glass"><canvas id="mm" width="264" height="264"></canvas></div>
+<div id="mini" class="hud game glass"><canvas id="mm" width="340" height="340"></canvas></div>
 
 <div id="menu" class="screen">
   <div class="card glass">
@@ -420,6 +423,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   addEventListener("blur", () => { keyBoost = mouseBoost = false; keyTurn = 0; });
 
   /* ---------------- HUD (throttled DOM work) ---------------- */
+  const TIERS = ["ROOKIE", "CASUAL", "HUNTER", "ELITE"];
   const lbEl = $("lb"), mm = $("mm").getContext("2d");
   let lastMass = 10, hudT = 0, lastLb = "";
   function updateHud() {
@@ -430,7 +434,8 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     for (let i = 0; i < Math.min(10, rows.length); i++) {
       const s = rows[i][1];
       const nm = (s === 0 ? playerName() : names[s]).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
-      html += `<li class="${s === 0 ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[W.skin(s)][0]}"></span><span class="nm">${nm}</span><span>${Math.floor(rows[i][0] * 10)}</span></li>`;
+      const t = s === 0 ? -1 : W.tier(s), tag = t >= 2 ? `<span class="tg t${t}">${TIERS[t]}</span>` : "";
+      html += `<li class="${s === 0 ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[W.skin(s)][0]}"></span><span class="nm">${nm}</span>${tag}<span>${Math.floor(rows[i][0] * 10)}</span></li>`;
     }
     if (html !== lastLb) { lbEl.innerHTML = html; lastLb = html; }
     if (state === "play") {
@@ -438,26 +443,29 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
       $("rank").textContent = rows.findIndex((r) => r[1] === 0) + 1;
       $("total").textContent = rows.length;
       $("kills").textContent = W.kills(0);
-      // minimap
-      const S = 264, h = S / 2, k = h / WR;
+      // minimap: every snake as a dot sized by mass, the busy middle, your view
+      const S = 340, h = S / 2, k = (h - 4) / WR;
       mm.clearRect(0, 0, S, S);
-      mm.fillStyle = "rgba(255,255,255,.035)"; mm.beginPath(); mm.arc(h, h, h - 1, 0, 7); mm.fill();
-      mm.strokeStyle = "rgba(148,163,184,.12)"; mm.lineWidth = 2; mm.beginPath();
-      mm.moveTo(h, 0); mm.lineTo(h, S); mm.moveTo(0, h); mm.lineTo(S, h); mm.stroke();
-      for (let i = 0; i < Math.min(8, rows.length); i++) {
-        const s = rows[i][1]; if (s === 0) continue;
-        mm.fillStyle = SKINS[W.skin(s)][0] + "88";
-        mm.beginPath(); mm.arc(h + W.headX(s) * k, h + W.headY(s) * k, 3 + Math.sqrt(rows[i][0]) * .12, 0, 7); mm.fill();
+      mm.fillStyle = "rgba(255,255,255,.035)"; mm.beginPath(); mm.arc(h, h, h - 2, 0, 7); mm.fill();
+      mm.fillStyle = "rgba(251,113,133,.07)"; mm.beginPath(); mm.arc(h, h, WR * .35 * k, 0, 7); mm.fill();
+      mm.strokeStyle = "rgba(251,113,133,.45)"; mm.lineWidth = 2; mm.beginPath(); mm.arc(h, h, h - 3, 0, 7); mm.stroke();
+      for (const [m, s] of rows) {
+        if (s === 0) continue;
+        mm.fillStyle = SKINS[W.skin(s)][0] + (W.isNear(s) ? "ee" : "77");
+        mm.beginPath(); mm.arc(h + W.headX(s) * k, h + W.headY(s) * k, 2 + Math.sqrt(m) * .16, 0, 7); mm.fill();
       }
+      mm.strokeStyle = "rgba(255,255,255,.35)"; mm.lineWidth = 1.5;
+      mm.strokeRect(h + (camX - halfWv) * k, h + (camY - camH) * k, halfWv * 2 * k, camH * 2 * k);
       const px = h + W.headX(0) * k, py = h + W.headY(0) * k;
-      mm.fillStyle = "rgba(255,255,255,.25)"; mm.beginPath(); mm.arc(px, py, 9, 0, 7); mm.fill();
-      mm.fillStyle = "#fff"; mm.beginPath(); mm.arc(px, py, 5, 0, 7); mm.fill();
+      mm.fillStyle = "rgba(255,255,255,.3)"; mm.beginPath(); mm.arc(px, py, 10, 0, 7); mm.fill();
+      mm.fillStyle = "#fff"; mm.beginPath(); mm.arc(px, py, 5.5, 0, 7); mm.fill();
     }
   }
 
   /* ---------------- Main loop ---------------- */
   const perfEl = $("perf");
-  let lastVerts = 0, last = performance.now(), fpsAcc = 0, fpsN = 0, simAcc = 0, perfT = 0, instCount = 0, avgDt = 1 / 60, resT = 0;
+  const nearCount = () => { let c = 0; for (let s = 1; s < W.snakeCount(); s++) c += W.isNear(s); return c; };
+  let halfWv = 1000, lastVerts = 0, last = performance.now(), fpsAcc = 0, fpsN = 0, simAcc = 0, perfT = 0, instCount = 0, avgDt = 1 / 60, resT = 0;
   function frame(now) {
     requestAnimationFrame(frame);
     if (state !== "play" && now - last < 30) return; // menu / game-over: ~30 fps is plenty
@@ -475,12 +483,14 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
       else aim = Math.atan2(my - innerHeight / 2, mx - innerWidth / 2);
       W.setInput(aim, mouseBoost || keyBoost || touchBoost);
     }
+    // full simulation only around what the player can see (plus a margin)
+    W.setFocus(camX, camY, Math.hypot(camH * vw / vh, camH) + 700);
     W.update(dt);
 
     // camera
     let tx, ty, tH;
     if (state === "play" && W.alive(0)) {
-      tx = W.headX(0); ty = W.headY(0); tH = 520 + W.radius(0) * 26; lastMass = W.mass(0);
+      tx = W.headX(0); ty = W.headY(0); tH = 560 + (W.radius(0) - 12) * 18; lastMass = W.mass(0);
     } else if (state === "play") {
       onDeath(); tx = camX; ty = camY; tH = camH;
     } else if (state === "dead") {
@@ -494,7 +504,8 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
 
     const halfH = camH, halfW = camH * vw / vh;
     instCount = W.build(camX, camY, halfW, halfH);
-    const vertCount = W.buildRibbons(camX, camY, halfW, halfH);
+    const vertCount = W.buildRibbons(camX, camY, halfW, halfH, halfH * 2 / vh);
+    halfWv = halfW;
     const simMs = performance.now() - t0;
 
     // draw: background pass + one instanced pass
@@ -525,7 +536,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     fpsAcc += dt; fpsN++; simAcc += simMs;
     if ((hudT += dt) > 0.25) { hudT = 0; updateHud(); }
     if ((perfT += dt) > 0.5 && !perfEl.classList.contains("off")) {
-      perfEl.innerHTML = `<b>${Math.round(fpsN / fpsAcc)}</b> fps · sim+build <b>${(simAcc / fpsN).toFixed(2)}</b> ms<br><b>${instCount}</b> food sprites · <b>${lastVerts}</b> snake verts · 3 draw calls · res <b>${Math.round(resScale * 100)}%</b>`;
+      perfEl.innerHTML = `<b>${Math.round(fpsN / fpsAcc)}</b> fps · sim+build <b>${(simAcc / fpsN).toFixed(2)}</b> ms<br><b>${instCount}</b> food sprites · <b>${lastVerts}</b> snake verts · 3 draw calls · res <b>${Math.round(resScale * 100)}%</b><br>full-detail bots <b>${nearCount()}</b> / ${W.snakeCount() - 1} · rest simplified`;
       perfT = 0; fpsAcc = 0; fpsN = 0; simAcc = 0;
     }
   }

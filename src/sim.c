@@ -26,16 +26,16 @@ typedef unsigned char u8;
 #define RING 512         /* trail ring per snake (power of two) */
 #define RMASK (RING - 1)
 #define MAXSEG (RING - 1)
-#define MAXF 10000       /* food pellets */
+#define MAXF 8192        /* food pellets */
 #define WR 4000.f        /* world radius */
 #define CELL 100.f       /* spatial hash cell size (>= max query radius) */
 #define GN 80            /* grid cells per side: 2*WR/CELL */
 #define GC (GN * GN)
-#define MAXI 8192        /* food sprites */
-#define MAXV 12288       /* ribbon vertices */
+#define MAXI 4096        /* food sprites */
+#define MAXV 8192        /* ribbon vertices */
 #define MC 32.f          /* owner-map cell */
 #define MN 250           /* owner-map cells per side: 2*WR/MC */
-#define POOL 32768       /* segment grid nodes */
+#define POOL 16384       /* segment grid nodes */
 #define REBUILD 32       /* steps between grid compactions */
 
 /* freestanding: the compiler may emit calls to these for struct copies */
@@ -79,8 +79,8 @@ static float frand(void) { return (float)(rnd() >> 8) * (1.f / 16777216.f); }
 
 /* ---------- state ---------- */
 typedef struct {
-  float ang, tang, mass, r, spacing, dropT, dropMass, aiT, tx, ty, respawnT, huntT, aggr, hx, hy;
-  i32 n, alive, boost, wantBoost, skin, bot, kills, target;
+  float ang, tang, mass, r, spacing, dropT, dropMass, aiT, tx, ty, respawnT, huntT, hx, hy;
+  i32 n, alive, boost, wantBoost, skin, bot, kills, target, tier, near;
   u32 pc; /* trail points pushed so far (monotonic across lives) */
 } Snake;
 
@@ -88,12 +88,30 @@ static Snake S[MAXS];
 static short trx[MAXS][RING], try_[MAXS][RING]; /* trail, fixed point Q3 */
 static i32 NS = 40;
 
-static float fx[MAXF], fy[MAXF], fr[MAXF], fv[MAXF];
-static u8 fs[MAXF], fa[MAXF], fph[MAXF];
-static i32 freeList[MAXF], nfree, pend[MAXF], npend, foodAlive, foodHigh, foodTarget = 3600;
+/* food: 16-bit fixed-point position, value in 1/16ths -> 8 bytes per pellet */
+static short fx[MAXF], fy[MAXF];
+static u8 fv[MAXF], fs[MAXF], fa[MAXF], fph[MAXF];
+static short freeList[MAXF], pend[MAXF];
+static i32 nfree, npend, foodAlive, foodHigh, foodTarget = 3600;
+static float frT[256]; /* pellet radius by value byte */
+#define FV(i) ((float)fv[i] * (1.f / 16.f))
 
-static i32 gHead[GC], gNext[POOL], gN; static u32 gC[POOL]; static u8 gS[POOL];
-static i32 fHead[GC], fNext[MAXF];
+static short gHead[GC], gNext[POOL], fHead[GC], fNext[MAXF];
+static u32 gC[POOL]; static u8 gS[POOL]; static i32 gN;
+
+/* Level of detail: only snakes near the focus (the camera) get collisions,
+   eating and real AI. Everything else runs a cheap statistical model. */
+static float focX, focY, focR = 2000.f;
+
+/* Bot tiers: rookie, casual, hunter, elite */
+static const i32 T_EVERY[4] = {4, 2, 2, 1};             /* think every N steps */
+static const float T_LOOK[4] = {0.6f, 1.f, 1.2f, 1.45f}; /* probe reach */
+static const float T_AGGR[4] = {0.f, 0.25f, 0.6f, 1.f};  /* hunting appetite */
+static const float T_NOISE[4] = {0.35f, 0.12f, 0.04f, 0.f};
+static const float T_GROW[4] = {0.35f, 0.6f, 0.9f, 1.2f}; /* far-away growth, mass/s */
+static const float T_RISK[4] = {1.f / 50, 1.f / 80, 1.f / 130, 1.f / 200}; /* far-away deaths/s */
+static const float T_CAP[4] = {300.f, 700.f, 1400.f, 2200.f};
+static const float T_MASS[4] = {50.f, 190.f, 470.f, 840.f}; /* spawn mass spread */
 /* Owner map: which snake (id+1) left a trail point in each 32x32 area, 255 =
    several. Bots test danger with a handful of byte reads. Cleared at compaction,
    so a vacated tail area stays "occupied" for at most REBUILD steps (safe side). */
@@ -115,14 +133,15 @@ static short q3(float v) { v *= 8.f; v += v >= 0 ? 0.5f : -0.5f; return (short)(
 #define TX(s, j) UQ(trx[s][(S[s].pc - 1u - (u32)(j)) & RMASK])
 #define TY(s, j) UQ(try_[s][(S[s].pc - 1u - (u32)(j)) & RMASK])
 
-static float radiusFor(float m) { return minf(10.f + sqrtf_(m) * 0.9f, 44.f); }
-static i32 segsFor(float m) { i32 n = 14 + (i32)(5.5f * sqrtf_(m)); return n > MAXSEG ? MAXSEG : n; }
+/* growth curves (slow on purpose: size is earned) */
+static float radiusFor(float m) { return minf(10.f + sqrtf_(m) * 0.6f, 40.f); }
+static i32 segsFor(float m) { i32 n = 14 + (i32)(4.5f * sqrtf_(m)); return n > MAXSEG ? MAXSEG : n; }
 
 /* ---------- spatial hash ---------- */
 static void segInsert(i32 s, u32 c) {
   if (gN >= POOL) return; /* compaction is forced before this can matter */
   i32 i = gN++, cell = cellOf(UQ(trx[s][c & RMASK]), UQ(try_[s][c & RMASK]));
-  gS[i] = (u8)s; gC[i] = c; gNext[i] = gHead[cell]; gHead[cell] = i;
+  gS[i] = (u8)s; gC[i] = c; gNext[i] = gHead[cell]; gHead[cell] = (short)i;
   i32 mx = (i32)((UQ(trx[s][c & RMASK]) + WR) * (1.f / MC)), my = (i32)((UQ(try_[s][c & RMASK]) + WR) * (1.f / MC));
   if ((u32)mx < MN && (u32)my < MN) { u8 *m = &omap[my * MN + mx], v = (u8)(s + 1); *m = *m == 0 || *m == v ? v : 255; }
 }
@@ -131,7 +150,7 @@ static i32 segLive(i32 i) {
   Snake *o = &S[gS[i]];
   return o->alive && o->pc - gC[i] <= (u32)o->n;
 }
-static void foodInsert(i32 i) { i32 c = cellOf(fx[i], fy[i]); fNext[i] = fHead[c]; fHead[c] = i; }
+static void foodInsert(i32 i) { i32 c = cellOf(UQ(fx[i]), UQ(fy[i])); fNext[i] = fHead[c]; fHead[c] = (short)i; }
 
 static void rebuild(void) {
   for (i32 c = 0; c < GC; c++) gHead[c] = -1, fHead[c] = -1;
@@ -143,13 +162,12 @@ static void rebuild(void) {
   for (i32 i = 0; i < foodHigh; i++) if (fa[i]) foodInsert(i);
 }
 
-static void killFood(i32 i) { fa[i] = 0; pend[npend++] = i; foodAlive--; }
+static void killFood(i32 i) { fa[i] = 0; pend[npend++] = (short)i; foodAlive--; }
 static void spawnFood(float x, float y, float v, i32 skin) {
   if (!nfree) return;
   i32 i = freeList[--nfree];
   if (i >= foodHigh) foodHigh = i + 1;
-  fx[i] = x; fy[i] = y; fv[i] = v; fs[i] = (u8)skin; fa[i] = 1; fph[i] = (u8)rnd();
-  fr[i] = minf(3.5f + sqrtf_(v) * 2.6f, 15.f);
+  fx[i] = q3(x); fy[i] = q3(y); fv[i] = (u8)(i32)minf(v * 16.f + 0.5f, 255.f); fs[i] = (u8)skin; fa[i] = 1; fph[i] = (u8)rnd();
   foodInsert(i);
   foodAlive++;
 }
@@ -183,14 +201,29 @@ static void pushTrail(i32 s, float x, float y) {
   k->pc++;
 }
 
+static void randomRing(float r0, float r1, float *x, float *y) {
+  float a = frand() * TAU, d = sqrtf_(r0 * r0 + (r1 * r1 - r0 * r0) * frand());
+  *x = cosf_(a) * d; *y = sinf_(a) * d;
+}
+/* big snakes live in the middle, small ones roam the rest */
+static void homePoint(float mass, float *x, float *y) {
+  if (mass > 250.f) randomDisk(WR * 0.35f, x, y); else randomRing(WR * 0.3f, WR * 0.88f, x, y);
+}
+
 static void spawnSnake(i32 s, float mass, i32 bot, i32 skin) {
   Snake *k = &S[s];
   float x = 0, y = 0;
-  for (i32 t = 0; t < 30; t++) { randomDisk(WR * 0.75f, &x, &y); if (!dangerAt(s, x, y, 260.f)) break; }
+  for (i32 t = 0; t < 40; t++) {
+    if (!bot) randomRing(WR * 0.72f, WR * 0.86f, &x, &y); /* player: outer rim */
+    else homePoint(mass, &x, &y);
+    float dx = x - focX, dy = y - focY;
+    if (bot && t < 30 && dx * dx + dy * dy < (focR + 300.f) * (focR + 300.f)) continue; /* never pop in on screen */
+    if (!dangerAt(s, x, y, 300.f)) break;
+  }
   k->ang = k->tang = frand() * TAU - PI;
   k->mass = mass; k->r = radiusFor(mass); k->spacing = k->r * 0.42f; k->n = segsFor(mass);
   k->bot = bot; k->skin = skin; k->kills = 0; k->boost = k->wantBoost = 0;
-  k->dropT = k->dropMass = 0; k->aiT = 0; k->huntT = 0; k->target = -1; k->aggr = frand();
+  k->dropT = k->dropMass = 0; k->aiT = 0; k->huntT = 0; k->target = -1; k->near = 1;
   k->tx = x; k->ty = y; k->hx = x; k->hy = y;
   /* lay a full ring of trail behind the head; pc keeps counting so nodes from a
      previous life can never look valid again */
@@ -287,9 +320,10 @@ static void eat(i32 s, float dt) {
       if (gx < 0 || gx >= GN) continue;
       for (i32 i = fHead[gy * GN + gx]; i >= 0; i = fNext[i]) {
         if (!fa[i]) continue;
-        float dx = fx[i] - hx, dy = fy[i] - hy, d2 = dx * dx + dy * dy, er = k->r + fr[i] * 0.5f;
-        if (d2 < er * er) { k->mass += fv[i]; killFood(i); }
-        else if (d2 < att2) { fx[i] -= dx * pull; fy[i] -= dy * pull; }
+        float px = UQ(fx[i]), py = UQ(fy[i]);
+        float dx = px - hx, dy = py - hy, d2 = dx * dx + dy * dy, er = k->r + frT[fv[i]] * 0.5f;
+        if (d2 < er * er) { k->mass += FV(i); killFood(i); }
+        else if (d2 < att2) { fx[i] = q3(px - dx * pull); fy[i] = q3(py - dy * pull); }
       }
     }
   }
@@ -315,7 +349,7 @@ static void botThink(i32 s, float dt) {
     k->aiT = 0.25f + frand() * 0.5f;
     k->target = -1;
     /* aggressive bots look for prey */
-    if (frand() < k->aggr * 0.35f) {
+    if (frand() < T_AGGR[k->tier] * 0.35f) {
       float best = 650.f * 650.f;
       for (i32 o = 0; o < NS; o++) {
         if (o == s || !S[o].alive || S[o].mass > k->mass * 1.3f) continue;
@@ -324,31 +358,38 @@ static void botThink(i32 s, float dt) {
       }
       if (k->target >= 0) k->huntT = 1.f + frand() * 1.5f;
     }
-    if (k->target < 0) {
+    if (k->target < 0 && k->mass > 250.f && hx * hx + hy * hy > WR * WR * 0.2f && frand() < 0.5f) {
+      homePoint(k->mass, &k->tx, &k->ty); /* big snakes drift back to the middle */
+      k->aiT = 1.5f;
+    } else if (k->target < 0) {
       /* best food by value / distance, favouring what is in front */
       float ca = cosf_(k->ang), sa = sinf_(k->ang), bestScore = 0;
-      i32 cx = cellX(hx), cy = cellX(hy);
-      for (i32 gy = cy - 2; gy <= cy + 2; gy++) {
+      i32 cx = cellX(hx), cy = cellX(hy), w = k->tier == 0 ? 1 : 2;
+      for (i32 gy = cy - w; gy <= cy + w; gy++) {
         if (gy < 0 || gy >= GN) continue;
-        for (i32 gx = cx - 2; gx <= cx + 2; gx++) {
+        for (i32 gx = cx - w; gx <= cx + w; gx++) {
           if (gx < 0 || gx >= GN) continue;
           for (i32 i = fHead[gy * GN + gx]; i >= 0; i = fNext[i]) {
             if (!fa[i]) continue;
-            float dx = fx[i] - hx, dy = fy[i] - hy, d = sqrtf_(dx * dx + dy * dy) + 1.f;
-            float score = fv[i] / (d + 60.f) * (1.6f + (dx * ca + dy * sa) / d);
-            if (score > bestScore) { bestScore = score; k->tx = fx[i]; k->ty = fy[i]; }
+            float px = UQ(fx[i]), py = UQ(fy[i]);
+            float dx = px - hx, dy = py - hy, d = sqrtf_(dx * dx + dy * dy) + 1.f;
+            float score = FV(i) / (d + 60.f) * (1.6f + (dx * ca + dy * sa) / d);
+            if (score > bestScore) { bestScore = score; k->tx = px; k->ty = py; }
           }
         }
       }
-      if (bestScore == 0) randomDisk(WR * 0.6f, &k->tx, &k->ty);
+      if (bestScore == 0) homePoint(k->mass, &k->tx, &k->ty);
     }
   }
 
   float desired = atan2f_(k->ty - hy, k->tx - hx);
-  float l1 = k->r * 1.6f + 55.f, l2 = k->r * 1.6f + 170.f, pr = k->r * 1.15f;
+  float L = T_LOOK[k->tier];
+  float l1 = (k->r * 1.6f + 55.f) * L, l2 = (k->r * 1.6f + 170.f) * L, pr = k->r * 1.15f;
   float bestA = desired, bestCost = 1e9f;
-  for (i32 c = 0; c < 13; c++) {
-    float a = c < 12 ? k->ang + ((float)c - 5.5f) * 0.3f : desired;
+  i32 nc = k->tier == 0 ? 7 : 13;
+  float spread = k->tier == 0 ? 0.45f : 0.3f;
+  for (i32 c = 0; c < nc; c++) {
+    float a = c < nc - 1 ? k->ang + ((float)c - (float)(nc - 2) * 0.5f) * spread : desired;
     float ca = cosf_(a), sa = sinf_(a);
     float cost = absf(wrapa(a - desired));
     if (cost >= bestCost) continue;
@@ -356,10 +397,29 @@ static void botThink(i32 s, float dt) {
     else if (dangerAt(s, hx + ca * l2, hy + sa * l2, pr)) cost += 20.f;
     if (cost < bestCost) { bestCost = cost; bestA = a; }
   }
-  k->tang = bestA;
+  k->tang = bestA + (frand() - 0.5f) * 2.f * T_NOISE[k->tier];
   float dx = k->tx - hx, dy = k->ty - hy;
-  k->wantBoost = (k->huntT > 0 && k->mass > 30.f && dx * dx + dy * dy < 450.f * 450.f && bestCost < 20.f) ||
-                 (bestCost >= 100.f && k->mass > 40.f && frand() < 0.05f);
+  k->wantBoost = (k->tier >= 2 && k->huntT > 0 && k->mass > 30.f && dx * dx + dy * dy < 450.f * 450.f && bestCost < 20.f) ||
+                 (k->tier >= 1 && bestCost >= 100.f && k->mass > 40.f && frand() < 0.05f);
+}
+
+/* Far from the player: steer to a home point, grow and die statistically. */
+static void farThink(i32 s, float dt) {
+  Snake *k = &S[s];
+  k->wantBoost = 0; k->huntT = 0;
+  float dx = k->tx - k->hx, dy = k->ty - k->hy;
+  if ((k->aiT -= dt) <= 0 || dx * dx + dy * dy < 150.f * 150.f || k->hx * k->hx + k->hy * k->hy > WR * WR * 0.8f) {
+    homePoint(k->mass, &k->tx, &k->ty);
+    k->aiT = 3.f + frand() * 5.f;
+  }
+  k->tang = atan2f_(k->ty - k->hy, k->tx - k->hx);
+}
+
+static void spawnBot(i32 s) {
+  float r = frand(), t = frand();
+  i32 tier = r < 0.35f ? 0 : r < 0.7f ? 1 : r < 0.9f ? 2 : 3;
+  S[s].tier = tier;
+  spawnSnake(s, 10.f + t * t * T_MASS[tier], 1, (i32)(rnd() % 12));
 }
 
 /* ---------- simulation step ---------- */
@@ -368,23 +428,43 @@ static i32 deaths[MAXS * 2];
 static void step(float dt) {
   tick++;
   if (tick % REBUILD == 0 || gN > POOL - 4096 || npend > MAXF / 2) rebuild();
-  for (i32 s = 0; s < NS; s++) if (S[s].alive) moveSnake(s, dt);
+  for (i32 s = 0; s < NS; s++) {
+    Snake *k = &S[s];
+    if (!k->alive) continue;
+    float dx = k->hx - focX, dy = k->hy - focY, R = focR + k->r * 2.f;
+    k->near = s == 0 || dx * dx + dy * dy < R * R;
+    moveSnake(s, dt);
+  }
 
   i32 nd = 0;
   for (i32 s = 0; s < NS; s++) {
-    if (!S[s].alive) continue;
+    if (!S[s].alive || !S[s].near) continue;
     i32 h = hitTest(s);
     if (h != -1) { deaths[nd++] = s; deaths[nd++] = h; }
   }
   for (i32 i = 0; i < nd; i += 2) killSnake(deaths[i], deaths[i + 1] >= 0 ? deaths[i + 1] : -1);
 
-  for (i32 s = 0; s < NS; s++) if (S[s].alive) eat(s, dt);
-  for (i32 s = 1; s < NS; s++) if (S[s].alive && ((tick + (u32)s) & 1u) == 0) botThink(s, dt * 2.f);
-
+  for (i32 s = 0; s < NS; s++) if (S[s].alive && S[s].near) eat(s, dt);
   for (i32 s = 1; s < NS; s++) {
-    if (S[s].alive) continue;
-    S[s].respawnT -= dt;
-    if (S[s].respawnT <= 0) { float t = frand(); spawnSnake(s, 10.f + t * t * t * 520.f, 1, (i32)(rnd() % 12)); }
+    Snake *k = &S[s];
+    if (!k->alive) continue;
+    if (k->near) {
+      i32 e = T_EVERY[k->tier];
+      if ((tick + (u32)s) % (u32)e == 0) botThink(s, dt * (float)e);
+    } else {
+      if ((tick + (u32)s) % 16u == 0) farThink(s, dt * 16.f);
+      if (k->mass < T_CAP[k->tier]) k->mass += T_GROW[k->tier] * dt;
+      if (frand() < T_RISK[k->tier] * dt) killSnake(s, -1);
+    }
+  }
+
+  for (i32 s = 1; s < NS; s++) if (!S[s].alive && (S[s].respawnT -= dt) <= 0) spawnBot(s);
+
+  /* old food far from the player fades so the world never floods */
+  for (i32 t = 0; t < 4 && foodAlive > foodTarget + 800 && foodHigh; t++) {
+    i32 i = (i32)(rnd() % (u32)foodHigh);
+    float dx = UQ(fx[i]) - focX, dy = UQ(fy[i]) - focY;
+    if (fa[i] && dx * dx + dy * dy > focR * focR) killFood(i);
   }
   for (i32 t = 0; t < 24 && foodAlive < foodTarget; t++) {
     float x, y; randomDisk(WR * 0.98f, &x, &y);
@@ -397,17 +477,20 @@ EXPORT("init") void init(u32 seed, i32 bots) {
   rs = seed ? seed : 1u;
   NS = bots + 1 > MAXS ? MAXS : bots + 1;
   nfree = 0; npend = 0; foodAlive = 0; foodHigh = 0; tick = 0; playerKiller = -1;
-  for (i32 i = MAXF - 1; i >= 0; i--) { fa[i] = 0; freeList[nfree++] = i; }
+  for (i32 i = MAXF - 1; i >= 0; i--) { fa[i] = 0; freeList[nfree++] = (short)i; }
   for (i32 s = 0; s < MAXS; s++) S[s].alive = 0;
   rebuild();
-  for (i32 s = 1; s < NS; s++) { float t = frand(); spawnSnake(s, 10.f + t * t * t * 520.f, 1, (i32)(rnd() % 12)); }
+  for (i32 i = 0; i < 256; i++) frT[i] = minf(3.5f + sqrtf_((float)i / 16.f) * 2.6f, 15.f);
+  focX = focY = 0; focR = 2000.f;
+  for (i32 s = 1; s < NS; s++) spawnBot(s);
   while (foodAlive < foodTarget) {
     float x, y; randomDisk(WR * 0.98f, &x, &y);
     float v = frand(); spawnFood(x, y, 0.6f + v * v * 2.4f, (i32)(rnd() % 12));
   }
 }
 
-EXPORT("spawnPlayer") void spawnPlayer(i32 skin) { spawnSnake(0, 10.f, 0, skin); playerKiller = -1; }
+EXPORT("spawnPlayer") void spawnPlayer(i32 skin) { S[0].tier = 3; spawnSnake(0, 10.f, 0, skin); playerKiller = -1; }
+EXPORT("setFocus") void setFocus(float x, float y, float r) { focX = x; focY = y; focR = r; }
 EXPORT("killPlayer") void killPlayer(void) { S[0].alive = 0; }
 
 EXPORT("setInput") void setInput(float ang, i32 boost) { S[0].tang = ang; S[0].wantBoost = boost; }
@@ -435,7 +518,10 @@ EXPORT("build") i32 build(float cx, float cy, float hw, float hh) {
   for (i32 gy = gy0; gy <= gy1; gy++)
     for (i32 gx = gx0; gx <= gx1; gx++)
       for (i32 i = fHead[gy * GN + gx]; i >= 0; i = fNext[i])
-        if (fa[i] && fx[i] > x0 && fx[i] < x1 && fy[i] > y0 && fy[i] < y1) push(fx[i], fy[i], fr[i], 0, fs[i], fph[i], 0, &n);
+        if (fa[i]) {
+          float px = UQ(fx[i]), py = UQ(fy[i]);
+          if (px > x0 && px < x1 && py > y0 && py < y1) push(px, py, frT[fv[i]], 0, fs[i], fph[i], 0, &n);
+        }
   return n;
 }
 
@@ -456,7 +542,7 @@ static void vput(float x, float y, float t, u8 skin, u8 fl, u8 rq, float tx, flo
   v->dx = (signed char)(i32)(tx * 127.f); v->dy = (signed char)(i32)(ty * 127.f); /* tangent, snorm8 */
 }
 
-EXPORT("buildRibbons") i32 buildRibbons(float cx, float cy, float hw, float hh) {
+EXPORT("buildRibbons") i32 buildRibbons(float cx, float cy, float hw, float hh, float px) {
   nv = 0;
   for (i32 o = 1; o <= NS; o++) {
     i32 s = o == NS ? 0 : o;
@@ -479,7 +565,10 @@ EXPORT("buildRibbons") i32 buildRibbons(float cx, float cy, float hw, float hh) 
     float dx = k->hx - TX(s, 0), dy = k->hy - TY(s, 0);
     float u = 1.f - minf(sqrtf_(dx * dx + dy * dy) / k->spacing, 1.f);
     i32 q = 1;
-    for (i32 i = n - 1; i >= 1; i--) {
+    /* level of detail: when segments are ~1px apart, sample fewer of them */
+    float spx = k->spacing / px;
+    i32 stride = spx < 1.2f ? 4 : spx < 2.5f ? 2 : 1;
+    for (i32 i = n - 1; i >= 1; i -= (i - stride >= 1 ? stride : (i > 1 ? i - 1 : 1))) {
       float ax = TX(s, i - 1), ay = TY(s, i - 1);
       qx[q] = ax + (TX(s, i) - ax) * u; qy[q] = ay + (TY(s, i) - ay) * u; qt[q] = (float)i; q++;
     }
@@ -529,3 +618,5 @@ EXPORT("skin") i32 skin(i32 s) { return S[s].skin; }
 EXPORT("segments") i32 segments(i32 s) { return S[s].n; }
 EXPORT("foodCount") i32 foodCount(void) { return foodAlive; }
 EXPORT("killer") i32 killer(void) { return playerKiller; }
+EXPORT("tier") i32 tier(i32 s) { return S[s].tier; }
+EXPORT("isNear") i32 isNear(i32 s) { return S[s].alive && S[s].near; }
