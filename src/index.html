@@ -54,9 +54,19 @@
   #mini { right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); width: 170px; height: 170px; border-radius: 50%; padding: 0; overflow: hidden; }
   #mini canvas { width: 100%; height: 100%; display: block; }
 
-  #perf { left: max(16px, env(safe-area-inset-left)); top: max(16px, env(safe-area-inset-top)); padding: 8px 12px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); border-radius: 10px; }
+  #perf { left: max(16px, env(safe-area-inset-left)); top: max(16px, env(safe-area-inset-top)); padding: 8px 12px; max-width: calc(100vw - 300px); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); border-radius: 10px; }
   #perf b { color: var(--text); font-weight: 500; }
   #perf.off { display: none; }
+
+  /* Name + level labels */
+  .lbl { position: fixed; left: 0; top: 0; transform: translate(-9999px,0); pointer-events: none; white-space: nowrap; display: flex; flex-direction: column; align-items: center; gap: 2px;
+    font-size: 14px; font-weight: 600; color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,.8); opacity: 0; transition: opacity .4s; will-change: transform, opacity; }
+  .lbl.on { opacity: 1; }
+  .lbl .lv { font-size: 9.5px; font-weight: 600; letter-spacing: .1em; padding: 1px 6px; border-radius: 6px; text-shadow: none; }
+  .lv.t0 { color: #a7f3d0; background: rgba(52,211,153,.18); }
+  .lv.t1 { color: #bae6fd; background: rgba(56,189,248,.18); }
+  .lv.t2 { color: #fde68a; background: rgba(251,191,36,.2); }
+  .lv.t3 { color: #fecdd3; background: rgba(251,113,133,.25); }
 
   /* Menus */
   .screen { position: fixed; inset: 0; display: grid; place-items: center; padding: 16px; transition: opacity .35s, visibility .35s; }
@@ -122,7 +132,7 @@
     <div class="skins" id="skins" role="group" aria-label="Skin"></div>
     <button class="play" id="play">PLAY</button>
     <div class="keys"><kbd>Mouse</kbd> steer · <kbd>Click</kbd>/<kbd>Space</kbd> boost<br><kbd>←</kbd><kbd>→</kbd> steer with keys · Touch: drag to steer, 2 fingers boost · <kbd>P</kbd> perf</div>
-    <div class="tech">WebAssembly sim · WebGL2 · 3 draw calls</div>
+    <div class="tech">WebAssembly sim · GPU-built snakes · 3 draw calls</div>
   </div>
 </div>
 
@@ -167,8 +177,6 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const BOTS = 40;
   W.init((Math.random() * 4294967295) >>> 0, BOTS);
   const WR = W.worldRadius();
-  // Memory never grows (all static), so this view stays valid forever.
-  const instBytes = new Uint8Array(W.memory.buffer, W.instPtr(), W.maxInst() * 16);
 
   /* ---------------- WebGL2 ---------------- */
   const canvas = $("gl");
@@ -179,81 +187,101 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const PAL = SKINS.map(([a, b]) => [a, b].map((h) => [1, 3, 5].map((i) => (parseInt(h.substr(i, 2), 16) / 255).toFixed(4)).join(",")));
   const palGLSL = `const vec3 SKA[12]=vec3[](${PAL.map((p) => `vec3(${p[0]})`).join(",")});
 const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
+  // Per-frame values shared by every program: ONE uniform-buffer upload per frame.
+  const FRAME = `layout(std140) uniform Frame { vec4 uCamHalf; vec4 uPxTime; vec4 uResWR; };`;
 
   const BG_VS = `#version 300 es
   void main(){ vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2)); gl_Position=vec4(p*2.-1.,0,1); }`;
   const BG_FS = `#version 300 es
   precision highp float;
-  uniform vec2 uCam, uHalf, uRes; uniform float uWR, uTime;
+  ${FRAME}
   out vec4 o;
   float hexD(vec2 p){ p=abs(p); return max(dot(p,vec2(.8660254,.5)),p.y); }
   void main(){
-    vec2 ndc=gl_FragCoord.xy/uRes*2.-1.;
-    vec2 w=uCam+vec2(ndc.x,-ndc.y)*uHalf;
-    // hex tiling
+    vec2 ndc=gl_FragCoord.xy/uResWR.xy*2.-1.;
+    vec2 w=uCamHalf.xy+vec2(ndc.x,-ndc.y)*uCamHalf.zw;
     vec2 uv=w/46.; const vec2 R=vec2(1.7320508,1.); vec2 H=R*.5;
     vec2 a=mod(uv,R)-H, b=mod(uv-H,R)-H; vec2 g=dot(a,a)<dot(b,b)?a:b;
-    float e=.5-hexD(g);                       // distance to hex edge
-    float px=uHalf.y*2./uRes.y/46.;
+    float e=.5-hexD(g);
+    float px=uCamHalf.w*2./uResWR.y/46.;
     float line=1.-smoothstep(.0,px*1.6+.015,e);
     vec3 col=mix(vec3(.052,.066,.108),vec3(.07,.088,.14),smoothstep(.0,.5,e));
     col=mix(col,vec3(.028,.035,.06),line*.85);
-    // world border
-    float r=length(w), out_=smoothstep(uWR-2.,uWR+2.,r);
+    float WRr=uResWR.z, r=length(w), out_=smoothstep(WRr-2.,WRr+2.,r);
     col=mix(col,col*vec3(.55,.22,.28)+vec3(.05,0,.01),out_);
-    float ring=exp(-abs(r-uWR)/(14.+px*46.))*(.7+.3*sin(uTime*3.));
-    col+=vec3(1.,.25,.35)*ring*.55;
-    // vignette
+    col+=vec3(1.,.25,.35)*exp(-abs(r-WRr)/(14.+px*46.))*(.7+.3*sin(uPxTime.y*3.))*.55;
+    // faint glow over the crowded centre zone
+    col+=vec3(.9,.3,.4)*.035*smoothstep(WRr*.37,WRr*.3,r);
     col*=1.-.35*dot(ndc*.72,ndc*.72);
     o=vec4(col,1);
   }`;
 
   // Food: instanced glowing orbs.
   const VS = `#version 300 es
+  ${FRAME}
   layout(location=0) in vec3 aP; layout(location=1) in uvec4 aI;
-  uniform vec2 uCam, uHalf;
   out vec2 vL; out float vR; flat out uvec4 vI;
   void main(){
     vec2 q = vec2(float(gl_VertexID&1), float(gl_VertexID>>1))*2.-1.;
     vec2 l = q*aP.z*2.2;
-    vec2 c = (aP.xy+l-uCam)/uHalf;
+    vec2 c = (aP.xy+l-uCamHalf.xy)/uCamHalf.zw;
     gl_Position = vec4(c.x,-c.y,0,1);
     vL=l; vR=aP.z; vI=aI;
   }`;
   const FS = `#version 300 es
   precision highp float;
   ${palGLSL}
-  uniform float uPx, uTime;
+  ${FRAME}
   in vec2 vL; in float vR; flat in uvec4 vI;
   out vec4 o;
   void main(){
-    float d=length(vL), r=vR, aa=uPx*1.2;
+    float d=length(vL), r=vR, aa=uPxTime.x*1.2;
     vec3 c=SKA[vI.y%12u];
-    float pulse=.75+.25*sin(uTime*4.+float(vI.z)*.0245);
+    float pulse=.75+.25*sin(uPxTime.y*4.+float(vI.z)*.0245);
     float core=1.-smoothstep(r*.7-aa,r*.7+aa,d);
     float glow=exp(-d*d/(r*r*1.1))*.9*pulse;
     o=vec4(c*glow + mix(c,vec3(1),.55*(1.-d/(r*.7)))*core, core);
   }`;
 
-  // Snakes: one triangle strip per body. The fragment shader finds which
-  // segment circle is on top at this pixel (topmost = nearest the head) and
-  // shades it exactly like a sprite would: same look, ~1x overdraw instead of ~5x.
+  // Snakes: the GPU builds the ribbons itself ("vertex pulling"). Each instance
+  // is one visible snake; its vertices read trail points straight out of an
+  // RG16I texture that is a byte copy of WebAssembly memory. CPU work per snake:
+  // one 48-byte header.
   const RVS = `#version 300 es
-  layout(location=0) in vec3 aP; layout(location=1) in uvec4 aI; layout(location=2) in uint aN; layout(location=3) in vec2 aD;
-  uniform vec2 uCam, uHalf;
+  precision highp float; precision highp int; precision highp isampler2D;
+  ${FRAME}
+  uniform highp isampler2D uTrail;
+  layout(location=0) in vec4 aH0;  // head x, y, u, radius
+  layout(location=1) in vec4 aH1;  // spacing, stride, angle, width factor
+  layout(location=2) in uvec4 aH2; // row, newest trail index, segments, skin|flags<<8
   out float vT, vV; out vec2 vDir; flat out uint vSk, vFl; flat out float vR, vNl;
+  const float CR=1./.42;
+  vec2 T(int k){ return vec2(texelFetch(uTrail, ivec2((int(aH2.y)-k)&${W.ring() - 1}, int(aH2.x)), 0).rg)*.125; }
+  vec2 body(int i){ return i<=0 ? aH0.xy : mix(T(i-1),T(i),aH0.z); }
+  vec2 fwd(){ return vec2(cos(aH1.z),sin(aH1.z)); }
+  // strip order: tail cap, body samples tail->head, head, head cap
+  vec3 seqPt(int j,int n,int st,int K){
+    if(j<=0){ vec2 a=body(n-1), d=a-body(n-2); float l=length(d); d=l>1e-3?d/l:-fwd(); return vec3(a+d*aH0.w, float(n-1)+CR); }
+    if(j<=K){ int i=max(n-1-(j-1)*st,1); return vec3(body(i),float(i)); }
+    if(j==K+1) return vec3(aH0.xy,0.);
+    return vec3(aH0.xy+fwd()*aH0.w,-CR);
+  }
   void main(){
-    vec2 c=(aP.xy-uCam)/uHalf;
+    int n=int(aH2.z), st=int(aH1.y), K=(n-1+st-1)/st, last=K+2;
+    int j=min(gl_VertexID>>1,last); bool side=(gl_VertexID&1)==0;
+    vec3 p=seqPt(j,n,st,K);
+    vec2 tg=seqPt(min(j+1,last),n,st,K).xy-seqPt(max(j-1,0),n,st,K).xy;
+    float tl=length(tg); tg=tl>1e-4?tg/tl:fwd();
+    vec2 nrm=vec2(-tg.y,tg.x)*aH0.w*aH1.w;
+    vec2 c=(p.xy+(side?nrm:-nrm)-uCamHalf.xy)/uCamHalf.zw;
     gl_Position=vec4(c.x,-c.y,0,1);
-    float W=(aI.y&1u)!=0u ? 1.9 : 1.08;
-    vT=aP.z; vV=(aI.y&128u)!=0u ? W : -W;
-    vDir=aD;
-    vSk=aI.x%12u; vFl=aI.y; vR=float(aI.z)/5.; vNl=float(aN);
+    vT=p.z; vV=side?aH1.w:-aH1.w; vDir=tg;
+    vSk=(aH2.w&255u)%12u; vFl=aH2.w>>8; vR=aH0.w; vNl=float(n-1);
   }`;
   const RFS = `#version 300 es
   precision highp float;
   ${palGLSL}
-  uniform float uPx, uTime;
+  ${FRAME}
   in float vT, vV; in vec2 vDir; flat in uint vSk, vFl; flat in float vR, vNl;
   out vec4 o;
   const float SP=.42, CR=1./.42;
@@ -265,7 +293,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     c+=vec3(.28)*exp(-dot(sp,sp)*7.);
     c=mix(c*.55,c,smoothstep(1.,.82,nd));
     if(ki==0u){ // head: eyes
-      vec2 sd=vec2(-f.y,f.x); float aa=uPx*1.2/vR;
+      vec2 sd=vec2(-f.y,f.x); float aa=uPxTime.x*1.2/vR;
       for(int e=0;e<2;e++){
         vec2 ec=f*.32+sd*(e==0?.45:-.45);
         c=mix(c,vec3(.97),1.-smoothstep(.3-aa,.3+aa,length(l-ec)));
@@ -275,17 +303,15 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     return c;
   }
   void main(){
-    float aa=uPx*1.2/vR, av=abs(vV);
+    float aa=uPxTime.x*1.2/vR, av=abs(vV);
     vec2 f=normalize(vDir), side=vec2(-f.y,f.x);
     float h=av<1. ? sqrt(1.-av*av)*CR : 0.;
     float k0=clamp(av<1. ? ceil(vT-h) : floor(vT+.5), 0., vNl), k1=min(k0+1.,vNl);
-    // local circle coords in world orientation (r units); t grows toward the tail
     vec2 l0=-f*(vT-k0)*SP+side*vV, l1=-f*(vT-k1)*SP+side*vV;
     float n0=length(l0), n1=length(l1);
     float e0=1.-smoothstep(1.-aa,1.+aa,n0), e1=(1.-smoothstep(1.-aa,1.+aa,n1))*(1.-e0);
-    float a=e0+e1;
-    float glow=0.;
-    if((vFl&1u)!=0u) glow=exp(-pow(max(av-.8,0.)/.45,2.))*(.55+.25*sin(uTime*18.))*(1.-a);
+    float a=e0+e1, glow=0.;
+    if((vFl&1u)!=0u) glow=exp(-pow(max(av-.8,0.)/.45,2.))*(.55+.25*sin(uPxTime.y*18.))*(1.-a);
     if(a<=0. && glow<=.003) discard;
     vec3 c=(e0>0. ? shade(k0,l0,n0,f)*e0 : vec3(0)) + (e1>0. ? shade(k1,l1,n1,f)*e1 : vec3(0));
     o=vec4(c+SKA[vSk]*1.2*glow, a);
@@ -300,39 +326,53 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     }
     gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
-    const u = {}; const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
-    for (let i = 0; i < n; i++) { const name = gl.getActiveUniform(p, i).name; u[name] = gl.getUniformLocation(p, name); }
-    return { p, u };
+    gl.uniformBlockBinding(p, gl.getUniformBlockIndex(p, "Frame"), 0);
+    return p;
   }
-  const bgP = prog(BG_VS, BG_FS), inP = prog(VS, FS), ribP = prog(RVS, RFS);
+  const bgP = prog(BG_VS, BG_FS), foodP = prog(VS, FS), ribP = prog(RVS, RFS);
+  gl.useProgram(ribP); gl.uniform1i(gl.getUniformLocation(ribP, "uTrail"), 0);
 
-  const vao = gl.createVertexArray();
-  gl.bindVertexArray(vao);
-  const vbo = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-  gl.bufferData(gl.ARRAY_BUFFER, instBytes.byteLength, gl.STREAM_DRAW);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 16, 0);
-  gl.vertexAttribDivisor(0, 1);
-  gl.enableVertexAttribArray(1);
-  gl.vertexAttribIPointer(1, 4, gl.UNSIGNED_BYTE, 16, 12);
-  gl.vertexAttribDivisor(1, 1);
-  const ribBytes = new Uint8Array(W.memory.buffer, W.ribPtr(), W.maxVerts() * 20);
-  const ribVao = gl.createVertexArray();
-  gl.bindVertexArray(ribVao);
-  const ribVbo = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, ribVbo);
-  gl.bufferData(gl.ARRAY_BUFFER, ribBytes.byteLength, gl.STREAM_DRAW);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
-  gl.enableVertexAttribArray(1);
-  gl.vertexAttribIPointer(1, 4, gl.UNSIGNED_BYTE, 20, 12);
-  gl.enableVertexAttribArray(2);
-  gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_SHORT, 20, 16);
-  gl.enableVertexAttribArray(3);
-  gl.vertexAttribPointer(3, 2, gl.BYTE, true, 20, 18);
+  // Zero-copy views into WebAssembly memory (it never grows, so they stay valid).
+  const mem = W.memory.buffer, NS = W.snakeCount(), RING = W.ring();
+  const instBytes = new Uint8Array(mem, W.instPtr(), W.maxInst() * 16);
+  const hdrBytes = new Uint8Array(mem, W.hdrPtr(), NS * 48);
+  const trail = new Int16Array(mem, W.trailPtr(), NS * RING * 2);
+  const hdrU32 = new Uint32Array(mem, W.hdrPtr(), NS * 12);
+  const snap = new Float32Array(mem, W.snapPtr(), NS * 10); // alive,x,y,mass,r,skin,tier,near,onScreen,kills
+  const frameU = new Float32Array(12);
+
+  // Everything dynamic is double-buffered: the CPU writes one copy while the
+  // GPU may still be reading last frame's (avoids implicit sync stalls).
+  const foodVao = [], hdrVao = [], foodVbo = [], hdrVbo = [], trailTex = [], ubo = [];
+  for (let i = 0; i < 2; i++) {
+    foodVao[i] = gl.createVertexArray(); gl.bindVertexArray(foodVao[i]);
+    foodVbo[i] = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, foodVbo[i]);
+    gl.bufferData(gl.ARRAY_BUFFER, instBytes.byteLength, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 16, 0); gl.vertexAttribDivisor(0, 1);
+    gl.enableVertexAttribArray(1); gl.vertexAttribIPointer(1, 4, gl.UNSIGNED_BYTE, 16, 12); gl.vertexAttribDivisor(1, 1);
+
+    hdrVao[i] = gl.createVertexArray(); gl.bindVertexArray(hdrVao[i]);
+    hdrVbo[i] = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, hdrVbo[i]);
+    gl.bufferData(gl.ARRAY_BUFFER, hdrBytes.byteLength, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 48, 0); gl.vertexAttribDivisor(0, 1);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 48, 16); gl.vertexAttribDivisor(1, 1);
+    gl.enableVertexAttribArray(2); gl.vertexAttribIPointer(2, 4, gl.UNSIGNED_INT, 48, 32); gl.vertexAttribDivisor(2, 1);
+
+    trailTex[i] = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, trailTex[i]);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG16I, RING, NS);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+    ubo[i] = gl.createBuffer(); gl.bindBuffer(gl.UNIFORM_BUFFER, ubo[i]);
+    gl.bufferData(gl.UNIFORM_BUFFER, frameU.byteLength, gl.DYNAMIC_DRAW);
+  }
   const emptyVao = gl.createVertexArray();
+  gl.bindVertexArray(null);
   gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); // premultiplied
+
+  // GPU timing where the browser exposes it (EXT_disjoint_timer_query_webgl2).
+  const tq = gl.getExtension("EXT_disjoint_timer_query_webgl2");
+  const queries = []; let gpuMs = -1;
 
   let vw = 0, vh = 0, resScale = 1;
   function resize() {
@@ -422,125 +462,191 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   });
   addEventListener("blur", () => { keyBoost = mouseBoost = false; keyTurn = 0; });
 
-  /* ---------------- HUD (throttled DOM work) ---------------- */
+  /* ---------------- HUD (throttled DOM work, reads the WASM snapshot) ---------------- */
   const TIERS = ["ROOKIE", "CASUAL", "HUNTER", "ELITE"];
   const lbEl = $("lb"), mm = $("mm").getContext("2d");
-  let lastMass = 10, hudT = 0, lastLb = "";
+  const esc = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+  let lastMass = 10, lastLb = "", halfWv = 1000;
   function updateHud() {
-    const n = W.snakeCount(), rows = [];
-    for (let s = 0; s < n; s++) if (W.alive(s)) rows.push([W.mass(s), s]);
+    const rows = [];
+    for (let s = 0; s < NS; s++) if (snap[s * 10]) rows.push([snap[s * 10 + 3], s]);
     rows.sort((a, b) => b[0] - a[0]);
     let html = "";
     for (let i = 0; i < Math.min(10, rows.length); i++) {
-      const s = rows[i][1];
-      const nm = (s === 0 ? playerName() : names[s]).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
-      const t = s === 0 ? -1 : W.tier(s), tag = t >= 2 ? `<span class="tg t${t}">${TIERS[t]}</span>` : "";
-      html += `<li class="${s === 0 ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[W.skin(s)][0]}"></span><span class="nm">${nm}</span>${tag}<span>${Math.floor(rows[i][0] * 10)}</span></li>`;
+      const s = rows[i][1], t = s === 0 ? -1 : snap[s * 10 + 6];
+      const tag = t >= 2 ? `<span class="tg t${t}">${TIERS[t]}</span>` : "";
+      html += `<li class="${s === 0 ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[snap[s * 10 + 5]][0]}"></span><span class="nm">${esc(s === 0 ? playerName() : names[s])}</span>${tag}<span>${Math.floor(rows[i][0] * 10)}</span></li>`;
     }
     if (html !== lastLb) { lbEl.innerHTML = html; lastLb = html; }
-    if (state === "play") {
-      $("len").textContent = Math.floor(W.mass(0) * 10);
-      $("rank").textContent = rows.findIndex((r) => r[1] === 0) + 1;
-      $("total").textContent = rows.length;
-      $("kills").textContent = W.kills(0);
-      // minimap: every snake as a dot sized by mass, the busy middle, your view
-      const S = 340, h = S / 2, k = (h - 4) / WR;
-      mm.clearRect(0, 0, S, S);
-      mm.fillStyle = "rgba(255,255,255,.035)"; mm.beginPath(); mm.arc(h, h, h - 2, 0, 7); mm.fill();
-      mm.fillStyle = "rgba(251,113,133,.07)"; mm.beginPath(); mm.arc(h, h, WR * .35 * k, 0, 7); mm.fill();
-      mm.strokeStyle = "rgba(251,113,133,.45)"; mm.lineWidth = 2; mm.beginPath(); mm.arc(h, h, h - 3, 0, 7); mm.stroke();
-      for (const [m, s] of rows) {
-        if (s === 0) continue;
-        mm.fillStyle = SKINS[W.skin(s)][0] + (W.isNear(s) ? "ee" : "77");
-        mm.beginPath(); mm.arc(h + W.headX(s) * k, h + W.headY(s) * k, 2 + Math.sqrt(m) * .16, 0, 7); mm.fill();
+    if (state !== "play") return;
+    $("len").textContent = Math.floor(snap[3] * 10);
+    $("rank").textContent = rows.findIndex((r) => r[1] === 0) + 1;
+    $("total").textContent = rows.length;
+    $("kills").textContent = snap[9];
+    // minimap: every snake as a dot sized by mass, the busy middle, your view
+    const S = 340, h = S / 2, k = (h - 4) / WR;
+    mm.clearRect(0, 0, S, S);
+    mm.fillStyle = "rgba(255,255,255,.035)"; mm.beginPath(); mm.arc(h, h, h - 2, 0, 7); mm.fill();
+    mm.fillStyle = "rgba(251,113,133,.07)"; mm.beginPath(); mm.arc(h, h, WR * .35 * k, 0, 7); mm.fill();
+    mm.strokeStyle = "rgba(251,113,133,.45)"; mm.lineWidth = 2; mm.beginPath(); mm.arc(h, h, h - 3, 0, 7); mm.stroke();
+    for (const [m, s] of rows) {
+      if (s === 0) continue;
+      const b = s * 10;
+      mm.fillStyle = SKINS[snap[b + 5]][0] + (snap[b + 7] ? "ee" : "77");
+      mm.beginPath(); mm.arc(h + snap[b + 1] * k, h + snap[b + 2] * k, 2 + Math.sqrt(m) * .16, 0, 7); mm.fill();
+    }
+    mm.strokeStyle = "rgba(255,255,255,.35)"; mm.lineWidth = 1.5;
+    mm.strokeRect(h + (camX - halfWv) * k, h + (camY - camH) * k, halfWv * 2 * k, camH * 2 * k);
+    const px = h + snap[1] * k, py = h + snap[2] * k;
+    mm.fillStyle = "rgba(255,255,255,.3)"; mm.beginPath(); mm.arc(px, py, 10, 0, 7); mm.fill();
+    mm.fillStyle = "#fff"; mm.beginPath(); mm.arc(px, py, 5.5, 0, 7); mm.fill();
+  }
+
+  /* ---------------- Name + level labels ----------------
+     A bot that comes into view shows its name and level for ~3 s, then fades.
+     Small pool of DOM nodes moved with compositor-only transforms. */
+  const LABEL_MS = 3200, LABEL_COOLDOWN = 15000;
+  const labelPool = [], activeLabels = [], wasOn = new Uint8Array(NS), lastShown = new Float64Array(NS).fill(-1e9);
+  for (let i = 0; i < 8; i++) {
+    const el = document.createElement("div"); el.className = "lbl"; document.body.appendChild(el); labelPool.push(el);
+  }
+  function updateLabels(now, halfW, halfH) {
+    const sx = innerWidth / (2 * halfW), sy = innerHeight / (2 * halfH);
+    for (let s = 1; s < NS; s++) {
+      const b = s * 10, on = snap[b] && snap[b + 8] ? 1 : 0;
+      if (on && !wasOn[s] && now - lastShown[s] > LABEL_COOLDOWN && labelPool.length && state !== "menu") {
+        const el = labelPool.pop(), t = snap[b + 6];
+        el.innerHTML = `${esc(names[s])}<span class="lv t${t}">LV ${t + 1} · ${TIERS[t]}</span>`;
+        el.classList.add("on");
+        activeLabels.push({ s, el, until: now + LABEL_MS });
+        lastShown[s] = now;
       }
-      mm.strokeStyle = "rgba(255,255,255,.35)"; mm.lineWidth = 1.5;
-      mm.strokeRect(h + (camX - halfWv) * k, h + (camY - camH) * k, halfWv * 2 * k, camH * 2 * k);
-      const px = h + W.headX(0) * k, py = h + W.headY(0) * k;
-      mm.fillStyle = "rgba(255,255,255,.3)"; mm.beginPath(); mm.arc(px, py, 10, 0, 7); mm.fill();
-      mm.fillStyle = "#fff"; mm.beginPath(); mm.arc(px, py, 5.5, 0, 7); mm.fill();
+      wasOn[s] = on;
+    }
+    for (let i = activeLabels.length - 1; i >= 0; i--) {
+      const L = activeLabels[i], b = L.s * 10;
+      if (now > L.until || !snap[b] || state === "menu") {
+        L.el.classList.remove("on"); L.el.style.transform = "translate(-9999px,0)";
+        labelPool.push(L.el); activeLabels.splice(i, 1); continue;
+      }
+      if (now > L.until - 450) L.el.classList.remove("on"); // fade out
+      const x = (snap[b + 1] - camX) * sx + innerWidth / 2, y = (snap[b + 2] - snap[b + 4] * 1.7 - camY) * sy + innerHeight / 2;
+      const cx = Math.min(Math.max(x, 70), innerWidth - 70), cy = Math.min(Math.max(y, 44), innerHeight - 8);
+      L.el.style.transform = `translate(${cx.toFixed(1)}px,${cy.toFixed(1)}px) translate(-50%,-100%)`;
     }
   }
 
   /* ---------------- Main loop ---------------- */
   const perfEl = $("perf");
-  const nearCount = () => { let c = 0; for (let s = 1; s < W.snakeCount(); s++) c += W.isNear(s); return c; };
-  let halfWv = 1000, lastVerts = 0, last = performance.now(), fpsAcc = 0, fpsN = 0, simAcc = 0, perfT = 0, instCount = 0, avgDt = 1 / 60, resT = 0;
+  const T = { sim: 0, prep: 0, gl: 0, hud: 0, n: 0 };
+  let frameNo = 0, lastVis = 0, last = performance.now(), fpsAcc = 0, perfT = 0, hudT = 0, instCount = 0, avgDt = 1 / 60, resT = 0;
   function frame(now) {
     requestAnimationFrame(frame);
     if (state !== "play" && now - last < 30) return; // menu / game-over: ~30 fps is plenty
-    const dt = Math.min((now - last) / 1000, 0.1); last = now;
+    const dt = Math.min((now - last) / 1000, 0.25); last = now;
     // dynamic resolution: drop pixels before dropping frames, recover when there is headroom
     if (state === "play") {
-      avgDt += (dt - avgDt) * 0.05; resT += dt;
+      avgDt += (Math.min(dt, 0.1) - avgDt) * 0.05; resT += dt;
       if (resT > 0.5 && avgDt > 1 / 50 && resScale > 0.55) { resScale = Math.max(0.5, resScale - 0.1); resT = 0; resize(); }
       else if (resT > 4 && avgDt < 1 / 58 && resScale < 1) { resScale = Math.min(1, resScale + 0.1); resT = 0; resize(); }
     }
-    const t0 = performance.now();
 
+    // --- simulation: fixed 60 Hz steps inside WASM, then interpolated snapshot
+    const t0 = performance.now();
     if (state === "play") {
       if (usingKeys) aim += keyTurn * dt * 4.2;
       else aim = Math.atan2(my - innerHeight / 2, mx - innerWidth / 2);
       W.setInput(aim, mouseBoost || keyBoost || touchBoost);
     }
-    // full simulation only around what the player can see (plus a margin)
-    W.setFocus(camX, camY, Math.hypot(camH * vw / vh, camH) + 700);
+    W.setFocus(camX, camY, Math.hypot(camH * vw / vh, camH) + 700); // full detail only around the view
     W.update(dt);
+    W.snapshot();
+    const t1 = performance.now();
 
-    // camera
+    // --- camera (from interpolated positions: smooth at any refresh rate)
     let tx, ty, tH;
-    if (state === "play" && W.alive(0)) {
-      tx = W.headX(0); ty = W.headY(0); tH = 560 + (W.radius(0) - 12) * 18; lastMass = W.mass(0);
+    if (state === "play" && snap[0]) {
+      tx = snap[1]; ty = snap[2]; tH = 560 + (snap[4] - 12) * 18; lastMass = snap[3];
     } else if (state === "play") {
       onDeath(); tx = camX; ty = camY; tH = camH;
     } else if (state === "dead") {
       tx = camX; ty = camY; tH = camH * 1.002;
     } else {
-      if (!W.alive(spectate) || Math.random() < 0.0008) { let b = 0, bs = 1; for (let s = 1; s < W.snakeCount(); s++) if (W.alive(s) && W.mass(s) > b) { b = W.mass(s); bs = s; } spectate = bs; }
-      tx = W.headX(spectate); ty = W.headY(spectate); tH = 900;
+      if (!snap[spectate * 10] || Math.random() < 0.0008) {
+        let b = 0; for (let s = 1; s < NS; s++) if (snap[s * 10] && snap[s * 10 + 3] > b) { b = snap[s * 10 + 3]; spectate = s; }
+      }
+      tx = snap[spectate * 10 + 1]; ty = snap[spectate * 10 + 2]; tH = 900;
     }
     const k = 1 - Math.exp(-dt * (state === "play" ? 14 : 2.5));
     camX += (tx - camX) * k; camY += (ty - camY) * k; camH += (tH - camH) * (1 - Math.exp(-dt * 2));
-
-    const halfH = camH, halfW = camH * vw / vh;
-    instCount = W.build(camX, camY, halfW, halfH);
-    const vertCount = W.buildRibbons(camX, camY, halfW, halfH, halfH * 2 / vh);
+    const halfH = camH, halfW = camH * vw / vh, px = halfH * 2 / vh;
     halfWv = halfW;
-    const simMs = performance.now() - t0;
 
-    // draw: background pass + one instanced pass
+    // --- render prep in WASM: culled food sprites + one header per visible snake
+    instCount = W.build(camX, camY, halfW, halfH);
+    const nVis = W.renderPrep(camX, camY, halfW, halfH, px), maxK = W.maxK();
+    lastVis = nVis;
+    const t2 = performance.now();
+
+    // --- GPU: 3 draw calls, all buffers double-buffered
+    const f = frameNo++ & 1;
+    let q = null;
+    if (tq && !perfEl.classList.contains("off") && queries.length < 3) { q = gl.createQuery(); gl.beginQuery(tq.TIME_ELAPSED_EXT, q); }
+    frameU[0] = camX; frameU[1] = camY; frameU[2] = halfW; frameU[3] = halfH;
+    frameU[4] = px; frameU[5] = (now / 1000) % 3600; frameU[8] = vw; frameU[9] = vh; frameU[10] = WR;
+    gl.bindBuffer(gl.UNIFORM_BUFFER, ubo[f]); gl.bufferSubData(gl.UNIFORM_BUFFER, 0, frameU);
+    gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, ubo[f]);
     gl.viewport(0, 0, vw, vh);
+
     gl.disable(gl.BLEND);
-    gl.useProgram(bgP.p); gl.bindVertexArray(emptyVao);
-    gl.uniform2f(bgP.u.uCam, camX, camY); gl.uniform2f(bgP.u.uHalf, halfW, halfH);
-    gl.uniform2f(bgP.u.uRes, vw, vh); gl.uniform1f(bgP.u.uWR, WR); gl.uniform1f(bgP.u.uTime, now / 1000);
+    gl.useProgram(bgP); gl.bindVertexArray(emptyVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     gl.enable(gl.BLEND);
-    gl.useProgram(inP.p); gl.bindVertexArray(vao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, instBytes, 0, instCount * 16);
-    gl.uniform2f(inP.u.uCam, camX, camY); gl.uniform2f(inP.u.uHalf, halfW, halfH);
-    gl.uniform1f(inP.u.uPx, halfH * 2 / vh); gl.uniform1f(inP.u.uTime, now / 1000);
-    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instCount);
+    if (instCount) {
+      gl.useProgram(foodP); gl.bindVertexArray(foodVao[f]);
+      gl.bindBuffer(gl.ARRAY_BUFFER, foodVbo[f]);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, instBytes, 0, instCount * 16);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instCount);
+    }
+    if (nVis) {
+      // upload only the trail rows of snakes on screen (2 KB each)
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, trailTex[f]);
+      for (let i = 0; i < nVis; i++) {
+        const row = hdrU32[i * 12 + 8];
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row, RING, 1, gl.RG_INTEGER, gl.SHORT, trail, row * RING * 2);
+      }
+      gl.useProgram(ribP); gl.bindVertexArray(hdrVao[f]);
+      gl.bindBuffer(gl.ARRAY_BUFFER, hdrVbo[f]);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, hdrBytes, 0, nVis * 48);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 2 * (maxK + 3), nVis);
+    }
+    if (q) { gl.endQuery(tq.TIME_ELAPSED_EXT); queries.push(q); }
+    // read finished GPU timings without stalling (results arrive a few frames later)
+    while (queries.length && gl.getQueryParameter(queries[0], gl.QUERY_RESULT_AVAILABLE)) {
+      const q0 = queries.shift();
+      if (!gl.getParameter(tq.GPU_DISJOINT_EXT)) gpuMs = gl.getQueryParameter(q0, gl.QUERY_RESULT) / 1e6;
+      gl.deleteQuery(q0);
+    }
+    const t3 = performance.now();
 
-    gl.useProgram(ribP.p); gl.bindVertexArray(ribVao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, ribVbo);
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, ribBytes, 0, vertCount * 20);
-    gl.uniform2f(ribP.u.uCam, camX, camY); gl.uniform2f(ribP.u.uHalf, halfW, halfH);
-    gl.uniform1f(ribP.u.uPx, halfH * 2 / vh); gl.uniform1f(ribP.u.uTime, now / 1000);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertCount);
-    lastVerts = vertCount;
-
-    // stats
-    fpsAcc += dt; fpsN++; simAcc += simMs;
+    // --- DOM: labels every frame (≤8 transforms), HUD 4x per second
+    updateLabels(now, halfW, halfH);
     if ((hudT += dt) > 0.25) { hudT = 0; updateHud(); }
+    const t4 = performance.now();
+
+    T.sim += t1 - t0; T.prep += t2 - t1; T.gl += t3 - t2; T.hud += t4 - t3; T.n++; fpsAcc += dt;
     if ((perfT += dt) > 0.5 && !perfEl.classList.contains("off")) {
-      perfEl.innerHTML = `<b>${Math.round(fpsN / fpsAcc)}</b> fps · sim+build <b>${(simAcc / fpsN).toFixed(2)}</b> ms<br><b>${instCount}</b> food sprites · <b>${lastVerts}</b> snake verts · 3 draw calls · res <b>${Math.round(resScale * 100)}%</b><br>full-detail bots <b>${nearCount()}</b> / ${W.snakeCount() - 1} · rest simplified`;
-      perfT = 0; fpsAcc = 0; fpsN = 0; simAcc = 0;
+      const a = (v) => (v / T.n).toFixed(2);
+      let near = 0; for (let s = 1; s < NS; s++) near += snap[s * 10] && snap[s * 10 + 7] ? 1 : 0;
+      perfEl.innerHTML = `<b>${Math.round(T.n / fpsAcc)}</b> fps · CPU/frame: sim <b>${a(T.sim)}</b> · prep <b>${a(T.prep)}</b> · gl <b>${a(T.gl)}</b> · dom <b>${a(T.hud)}</b> ms` +
+        `<br>GPU <b>${gpuMs >= 0 ? gpuMs.toFixed(2) + " ms" : tq ? "…" : "n/a"}</b> · ${instCount} food · ${lastVis} snakes drawn · 3 draw calls · res <b>${Math.round(resScale * 100)}%</b>` +
+        `<br>full-detail bots <b>${near}</b> / ${NS - 1} · rest simplified · fixed 60 Hz sim`;
+      perfT = 0; fpsAcc = 0; T.sim = T.prep = T.gl = T.hud = T.n = 0;
     }
   }
-  updateHud();
+  W.snapshot(); updateHud();
+  window.__serpent = { W, snap, names }; // debugging / automated tests
   requestAnimationFrame((t) => { last = t; frame(t); });
 })();
 </script>

@@ -32,7 +32,6 @@ typedef unsigned char u8;
 #define GN 80            /* grid cells per side: 2*WR/CELL */
 #define GC (GN * GN)
 #define MAXI 4096        /* food sprites */
-#define MAXV 8192        /* ribbon vertices */
 #define MC 32.f          /* owner-map cell */
 #define MN 250           /* owner-map cells per side: 2*WR/MC */
 #define POOL 16384       /* segment grid nodes */
@@ -82,10 +81,12 @@ typedef struct {
   float ang, tang, mass, r, spacing, dropT, dropMass, aiT, tx, ty, respawnT, huntT, hx, hy;
   i32 n, alive, boost, wantBoost, skin, bot, kills, target, tier, near;
   u32 pc; /* trail points pushed so far (monotonic across lives) */
+  float phx, phy; u32 ppc; /* state before the last fixed step (render interpolation) */
 } Snake;
 
 static Snake S[MAXS];
-static short trx[MAXS][RING], try_[MAXS][RING]; /* trail, fixed point Q3 */
+/* trail, fixed point Q3, interleaved x,y: uploaded as-is to an RG16I texture */
+static short tr[MAXS][RING][2];
 static i32 NS = 40;
 
 /* food: 16-bit fixed-point position, value in 1/16ths -> 8 bytes per pellet */
@@ -130,8 +131,8 @@ static i32 cellOf(float x, float y) { return cellX(y) * GN + cellX(x); }
 static short q3(float v) { v *= 8.f; v += v >= 0 ? 0.5f : -0.5f; return (short)(v > 32767.f ? 32767.f : v < -32767.f ? -32767.f : v); }
 #define UQ(v) ((float)(v) * 0.125f)
 /* trail point j (0 = newest) */
-#define TX(s, j) UQ(trx[s][(S[s].pc - 1u - (u32)(j)) & RMASK])
-#define TY(s, j) UQ(try_[s][(S[s].pc - 1u - (u32)(j)) & RMASK])
+#define TX(s, j) UQ(tr[s][(S[s].pc - 1u - (u32)(j)) & RMASK][0])
+#define TY(s, j) UQ(tr[s][(S[s].pc - 1u - (u32)(j)) & RMASK][1])
 
 /* growth curves (slow on purpose: size is earned) */
 static float radiusFor(float m) { return minf(10.f + sqrtf_(m) * 0.6f, 40.f); }
@@ -140,9 +141,9 @@ static i32 segsFor(float m) { i32 n = 14 + (i32)(4.5f * sqrtf_(m)); return n > M
 /* ---------- spatial hash ---------- */
 static void segInsert(i32 s, u32 c) {
   if (gN >= POOL) return; /* compaction is forced before this can matter */
-  i32 i = gN++, cell = cellOf(UQ(trx[s][c & RMASK]), UQ(try_[s][c & RMASK]));
+  i32 i = gN++, cell = cellOf(UQ(tr[s][c & RMASK][0]), UQ(tr[s][c & RMASK][1]));
   gS[i] = (u8)s; gC[i] = c; gNext[i] = gHead[cell]; gHead[cell] = (short)i;
-  i32 mx = (i32)((UQ(trx[s][c & RMASK]) + WR) * (1.f / MC)), my = (i32)((UQ(try_[s][c & RMASK]) + WR) * (1.f / MC));
+  i32 mx = (i32)((UQ(tr[s][c & RMASK][0]) + WR) * (1.f / MC)), my = (i32)((UQ(tr[s][c & RMASK][1]) + WR) * (1.f / MC));
   if ((u32)mx < MN && (u32)my < MN) { u8 *m = &omap[my * MN + mx], v = (u8)(s + 1); *m = *m == 0 || *m == v ? v : 255; }
 }
 /* node -> valid segment of a live snake? */
@@ -196,7 +197,7 @@ static i32 dangerAt(i32 self, float x, float y, float rad) {
 static void pushTrail(i32 s, float x, float y) {
   Snake *k = &S[s];
   u32 i = k->pc & RMASK;
-  trx[s][i] = q3(x); try_[s][i] = q3(y);
+  tr[s][i][0] = q3(x); tr[s][i][1] = q3(y);
   segInsert(s, k->pc);
   k->pc++;
 }
@@ -231,9 +232,9 @@ static void spawnSnake(i32 s, float mass, i32 bot, i32 skin) {
   k->pc += RING;
   for (u32 j = 0; j < RING; j++) {
     u32 i = (k->pc - 1u - j) & RMASK;
-    trx[s][i] = q3(x - cx * k->spacing * (float)j); try_[s][i] = q3(y - sy * k->spacing * (float)j);
+    tr[s][i][0] = q3(x - cx * k->spacing * (float)j); tr[s][i][1] = q3(y - sy * k->spacing * (float)j);
   }
-  k->alive = 1;
+  k->alive = 1; k->phx = x; k->phy = y; k->ppc = k->pc;
   for (i32 j = k->n - 1; j >= 0; j--) segInsert(s, k->pc - 1u - (u32)j);
 }
 
@@ -301,7 +302,7 @@ static i32 hitTest(i32 s) {
         i32 o = gS[i];
         if (o == s || !segLive(i)) continue;
         u32 j = gC[i] & RMASK;
-        float dx = UQ(trx[o][j]) - hx, dy = UQ(try_[o][j]) - hy, t = (k->r + S[o].r) * 0.66f;
+        float dx = UQ(tr[o][j][0]) - hx, dy = UQ(tr[o][j][1]) - hy, t = (k->r + S[o].r) * 0.66f;
         if (dx * dx + dy * dy < t * t) return o;
       }
     }
@@ -495,12 +496,20 @@ EXPORT("killPlayer") void killPlayer(void) { S[0].alive = 0; }
 
 EXPORT("setInput") void setInput(float ang, i32 boost) { S[0].tang = ang; S[0].wantBoost = boost; }
 
+/* Fixed 60 Hz simulation (Fiedler, "Fix Your Timestep"): identical behaviour at
+   any refresh rate; rendering interpolates between the last two states. */
+#define DT (1.f / 60.f)
+static float acc, alpha;
 EXPORT("update") void update(float dt) {
-  if (dt > 0.1f) dt = 0.1f;
-  i32 steps = (i32)(dt * 60.f + 0.95f);
-  if (steps < 1) steps = 1;
-  float h = dt / (float)steps;
-  for (i32 i = 0; i < steps; i++) step(h);
+  if (dt > 0.25f) dt = 0.25f; /* tab was asleep: don't fast-forward */
+  acc += dt;
+  for (i32 n = 0; acc >= DT && n < 8; n++) {
+    for (i32 s = 0; s < NS; s++) { S[s].phx = S[s].hx; S[s].phy = S[s].hy; S[s].ppc = S[s].pc; }
+    step(DT);
+    acc -= DT;
+  }
+  if (acc > DT) acc = DT;
+  alpha = acc / DT;
 }
 
 static void push(float x, float y, float r, u32 kind, u32 skin, u32 extra, u32 flags, i32 *n) {
@@ -525,84 +534,81 @@ EXPORT("build") i32 build(float cx, float cy, float hw, float hh) {
   return n;
 }
 
-/* ---------- snake ribbons ----------
-   Each snake is ONE triangle strip along its body (all snakes joined with
-   degenerate triangles -> one draw call). The fragment shader reconstructs the
-   classic overlapping-circle scales analytically, so the look is unchanged but
-   every pixel is shaded once instead of ~5 times. */
-typedef struct { float x, y, t; u8 skin, flags, rq, spare; unsigned short nlast; signed char dx, dy; } Vert;
-static Vert rib[MAXV];
-static float qx[MAXSEG + 3], qy[MAXSEG + 3], qt[MAXSEG + 3];
-static i32 nv;
+/* ---------- snake ribbons (built on the GPU) ----------
+   The vertex shader pulls trail points straight from an RG16I texture that is
+   a byte-for-byte copy of tr[][][], and generates the ribbon strip itself
+   (one instance per visible snake). The CPU only writes a 48-byte header per
+   visible snake. The fragment shader then reconstructs the overlapping-circle
+   scales analytically (~1x overdraw). */
+typedef struct { float hx, hy, u, r, spacing, stride, ang, W; u32 row, newest, n, info; } Head;
+static Head hdr[MAXS];
+static i32 nvis, maxK;
+/* per-snake snapshot for JS (camera, HUD, minimap, labels): one read, no calls */
+typedef struct { float alive, x, y, mass, r, skin, tier, near, onScreen, kills; } Snap;
+static Snap snap[MAXS];
 
-static void vput(float x, float y, float t, u8 skin, u8 fl, u8 rq, float tx, float ty, u32 nl) {
-  if (nv >= MAXV) return;
-  Vert *v = &rib[nv++];
-  v->x = x; v->y = y; v->t = t; v->skin = skin; v->flags = fl; v->rq = rq; v->spare = 0; v->nlast = (unsigned short)nl;
-  v->dx = (signed char)(i32)(tx * 127.f); v->dy = (signed char)(i32)(ty * 127.f); /* tangent, snorm8 */
+static float ihx[MAXS], ihy[MAXS], iu[MAXS]; static u32 inew[MAXS];
+
+/* Interpolated state for this frame (call after update). */
+EXPORT("snapshot") void snapshot(void) {
+  for (i32 s = 0; s < NS; s++) {
+    Snake *k = &S[s];
+    Snap *sn = &snap[s];
+    sn->alive = (float)k->alive;
+    if (!k->alive) { sn->onScreen = 0; continue; }
+    /* interpolated head; if the last step pushed trail points the head is now
+       "behind" them, so step back to the newest point it is still ahead of */
+    float hx = k->phx + (k->hx - k->phx) * alpha, hy = k->phy + (k->hy - k->phy) * alpha;
+    float ca = cosf_(k->ang), sa = sinf_(k->ang);
+    u32 j0 = 0, pushes = k->pc - k->ppc;
+    if (pushes > 4) pushes = 4;
+    while (j0 < pushes && (hx - TX(s, j0)) * ca + (hy - TY(s, j0)) * sa < 0) j0++;
+    float dx = hx - TX(s, j0), dy = hy - TY(s, j0);
+    ihx[s] = hx; ihy[s] = hy; inew[s] = (k->pc - 1u - j0) & RMASK;
+    iu[s] = 1.f - minf(sqrtf_(dx * dx + dy * dy) / k->spacing, 1.f);
+    sn->x = hx; sn->y = hy; sn->mass = k->mass; sn->r = k->r; sn->skin = (float)k->skin;
+    sn->tier = (float)k->tier; sn->near = (float)k->near; sn->kills = (float)k->kills;
+  }
 }
 
-EXPORT("buildRibbons") i32 buildRibbons(float cx, float cy, float hw, float hh, float px) {
-  nv = 0;
+/* Cull against the camera, write one GPU header per visible snake. */
+EXPORT("renderPrep") i32 renderPrep(float cx, float cy, float hw, float hh, float px) {
+  nvis = 0; maxK = 0;
   for (i32 o = 1; o <= NS; o++) {
     i32 s = o == NS ? 0 : o;
     Snake *k = &S[s];
     if (!k->alive) continue;
-    float r = k->r, W = k->boost ? 1.9f : 1.08f, hr = r * W, R = 1.f / 0.42f, m = hr * 2.f + 20.f;
-    float x0 = cx - hw - m, x1 = cx + hw + m, y0 = cy - hh - m, y1 = cy + hh + m;
+    float hx = ihx[s], hy = ihy[s];
+    snap[s].onScreen = (float)(hx > cx - hw && hx < cx + hw && hy > cy - hh && hy < cy + hh);
     i32 n = k->n;
-    /* integer pre-cull on the raw 16-bit trail: skip snakes wholly off-screen */
-    {
-      i32 qx0 = (i32)(x0 * 8.f), qx1 = (i32)(x1 * 8.f), qy0 = (i32)(y0 * 8.f), qy1 = (i32)(y1 * 8.f), any = 0;
-      const short *X = trx[s], *Y = try_[s];
+    float W = k->boost ? 1.9f : 1.08f, m = k->r * W * 2.f + 20.f;
+    float x0 = cx - hw - m, x1 = cx + hw + m, y0 = cy - hh - m, y1 = cy + hh + m;
+    /* integer cull on the raw 16-bit trail */
+    i32 any = hx > x0 && hx < x1 && hy > y0 && hy < y1;
+    if (!any) {
+      i32 qx0 = (i32)(x0 * 8.f), qx1 = (i32)(x1 * 8.f), qy0 = (i32)(y0 * 8.f), qy1 = (i32)(y1 * 8.f);
       for (i32 i = 0; i < n && !any; i++) {
-        u32 j = (k->pc - 1u - (u32)i) & RMASK;
-        any = X[j] > qx0 && X[j] < qx1 && Y[j] > qy0 && Y[j] < qy1;
+        const short *t = tr[s][(k->pc - 1u - (u32)i) & RMASK];
+        any = t[0] > qx0 && t[0] < qx1 && t[1] > qy0 && t[1] < qy1;
       }
-      if (!any && !(k->hx > x0 && k->hx < x1 && k->hy > y0 && k->hy < y1)) continue;
     }
-    /* sample the path tail -> head, with a cap point beyond each end */
-    float dx = k->hx - TX(s, 0), dy = k->hy - TY(s, 0);
-    float u = 1.f - minf(sqrtf_(dx * dx + dy * dy) / k->spacing, 1.f);
-    i32 q = 1;
-    /* level of detail: when segments are ~1px apart, sample fewer of them */
+    if (!any) continue;
     float spx = k->spacing / px;
     i32 stride = spx < 1.2f ? 4 : spx < 2.5f ? 2 : 1;
-    for (i32 i = n - 1; i >= 1; i -= (i - stride >= 1 ? stride : (i > 1 ? i - 1 : 1))) {
-      float ax = TX(s, i - 1), ay = TY(s, i - 1);
-      qx[q] = ax + (TX(s, i) - ax) * u; qy[q] = ay + (TY(s, i) - ay) * u; qt[q] = (float)i; q++;
-    }
-    qx[q] = k->hx; qy[q] = k->hy; qt[q] = 0; q++;
-    float ca = cosf_(k->ang), sa = sinf_(k->ang);
-    qx[q] = k->hx + ca * r; qy[q] = k->hy + sa * r; qt[q] = -R; q++;
-    { float ex = qx[1] - qx[2], ey = qy[1] - qy[2], el = sqrtf_(ex * ex + ey * ey);
-      if (el < 1e-3f) { ex = -ca; ey = -sa; el = 1; }
-      qx[0] = qx[1] + ex / el * r; qy[0] = qy[1] + ey / el * r; qt[0] = (float)(n - 1) + R; }
-    u8 fl = (u8)(k->boost | (s == 0 ? 2 : 0)), rq = (u8)(i32)(r * 5.f + 0.5f), sk = (u8)k->skin;
-    i32 open = 0;
-    for (i32 j = 0; j < q; j++) {
-      i32 a = j > 0 ? j - 1 : j, b = j < q - 1 ? j + 1 : j;
-      i32 vis = (qx[j] > x0 && qx[j] < x1 && qy[j] > y0 && qy[j] < y1) ||
-                (qx[a] > x0 && qx[a] < x1 && qy[a] > y0 && qy[a] < y1) ||
-                (qx[b] > x0 && qx[b] < x1 && qy[b] > y0 && qy[b] < y1);
-      if (!vis) { open = 0; continue; }
-      float tx = qx[b] - qx[a], ty = qy[b] - qy[a], tl = sqrtf_(tx * tx + ty * ty);
-      if (tl < 1e-4f) { tx = ca; ty = sa; tl = 1; }
-      tx /= tl; ty /= tl;
-      float nx = -ty * hr, ny = tx * hr;
-      if (!open && nv > 0 && nv + 2 < MAXV) { /* degenerate join */
-        rib[nv] = rib[nv - 1]; nv++;
-        vput(qx[j] + nx, qy[j] + ny, qt[j], sk, fl | 128, rq, tx, ty, (u32)(n - 1));
-      }
-      open = 1;
-      vput(qx[j] + nx, qy[j] + ny, qt[j], sk, fl | 128, rq, tx, ty, (u32)(n - 1));
-      vput(qx[j] - nx, qy[j] - ny, qt[j], sk, fl, rq, tx, ty, (u32)(n - 1));
-    }
+    i32 K = (n - 1 + stride - 1) / stride;
+    if (K > maxK) maxK = K;
+    Head *h = &hdr[nvis++];
+    h->hx = hx; h->hy = hy; h->u = iu[s]; h->r = k->r; h->spacing = k->spacing; h->stride = (float)stride;
+    h->ang = k->ang; h->W = W; h->row = (u32)s; h->newest = inew[s]; h->n = (u32)n;
+    h->info = (u32)k->skin | ((u32)(k->boost | (s == 0 ? 2 : 0)) << 8);
   }
-  return nv;
+  return nvis;
 }
-EXPORT("ribPtr") Vert *ribPtr(void) { return rib; }
-EXPORT("maxVerts") i32 maxVerts(void) { return MAXV; }
+EXPORT("hdrPtr") Head *hdrPtr(void) { return hdr; }
+EXPORT("maxK") i32 maxKOut(void) { return maxK; }
+EXPORT("snapPtr") Snap *snapPtr(void) { return snap; }
+EXPORT("trailPtr") short *trailPtr(void) { return &tr[0][0][0]; }
+EXPORT("ring") i32 ringSize(void) { return RING; }
 
 EXPORT("instPtr") Inst *instPtr(void) { return inst; }
 EXPORT("maxInst") i32 maxInst(void) { return MAXI; }
