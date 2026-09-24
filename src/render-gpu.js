@@ -11,8 +11,9 @@ async function createGPU(canvas, E) {
   if (!adapter) return null;
   const canTime = adapter.features.has("timestamp-query"), F16 = adapter.features.has("shader-f16");
   const device = await adapter.requestDevice({ requiredFeatures: [...(canTime ? ["timestamp-query"] : []), ...(F16 ? ["shader-f16"] : [])] });
-  // A/B measured: pre-recorded bundles + indirect counts cost the least CPU per frame
-  const direct = E.drawMode === "direct";
+  // A/B measured (3 runs each, reused descriptors): direct draws slightly cheaper on the CPU,
+  // and they skip the browser's GPU-side validation of indirect buffers. ?draws=indirect to compare.
+  const direct = E.drawMode !== "indirect";
   const ctx = canvas.getContext("webgpu");
   if (!ctx) return null;
   const format = navigator.gpu.getPreferredCanvasFormat();
