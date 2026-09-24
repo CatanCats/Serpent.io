@@ -132,6 +132,8 @@ static Inst inst[MAXI];
 static u32 tick;
 static i32 playerKiller = -1;
 
+#define DT (1.f / 60.f)
+
 /* ---------- helpers ---------- */
 static i32 cellX(float x) { i32 c = (i32)((x + WR) * (1.f / CELL)); return c < 0 ? 0 : c >= GN ? GN - 1 : c; }
 static i32 cellOf(float x, float y) { return cellX(y) * GN + cellX(x); }
@@ -368,12 +370,21 @@ static void eat(i32 s, float dt) {
 
 /* ---------- bot brain ---------- */
 /* Elite+ also avoid where other heads will be in ~0.4 s (no head-on crashes). */
-static i32 headDanger(i32 self, float x, float y, float rad) {
+/* where every near head will be in 0.4 s: computed once per step, not per probe */
+static float phX[MAXS], phY[MAXS], phR[MAXS]; static i32 phId[MAXS], nph;
+static void predictHeads(void) {
+  nph = 0;
   for (i32 o = 0; o < NS; o++) {
     Snake *q = &S[o];
-    if (o == self || !q->alive || !q->near) continue;
-    float v = q->boost ? 430.f : 195.f;
-    float dx = q->hx + cosf_(q->ang) * v * 0.4f - x, dy = q->hy + sinf_(q->ang) * v * 0.4f - y, t = rad + q->r * 2.f;
+    if (!q->alive || !q->near) continue;
+    float v = (q->boost ? 430.f : 195.f) * 0.4f;
+    phX[nph] = q->hx + cosf_(q->ang) * v; phY[nph] = q->hy + sinf_(q->ang) * v; phR[nph] = q->r * 2.f; phId[nph++] = o;
+  }
+}
+static i32 headDanger(i32 self, float x, float y, float rad) {
+  for (i32 i = 0; i < nph; i++) {
+    if (phId[i] == self) continue;
+    float dx = phX[i] - x, dy = phY[i] - y, t = rad + phR[i];
     if (dx * dx + dy * dy < t * t) return 1;
   }
   return 0;
@@ -548,6 +559,7 @@ static void step(float dt) {
   for (i32 i = 0; i < nd; i += 2) killSnake(deaths[i], deaths[i + 1] >= 0 ? deaths[i + 1] : -1);
 
   for (i32 s = 0; s < NS; s++) if (S[s].alive && S[s].near) eat(s, dt);
+  predictHeads();
   for (i32 s = 1; s < NS; s++) {
     Snake *k = &S[s];
     if (!k->alive) continue;
@@ -596,7 +608,6 @@ EXPORT("setInput") void setInput(float ang, i32 boost) { S[0].tang = ang; S[0].w
 
 /* Fixed 60 Hz simulation (Fiedler, "Fix Your Timestep"): identical behaviour at
    any refresh rate; rendering interpolates between the last two states. */
-#define DT (1.f / 60.f)
 static float acc, alpha;
 EXPORT("update") void update(float dt) {
   if (dt > 0.25f) dt = 0.25f; /* tab was asleep: don't fast-forward */
@@ -781,6 +792,16 @@ static float camH = 900.f, specT = 99.f;
 static i32 spectate = 1;
 static float frameBlk[12];     /* camX camY halfW halfH | px time lblScale 0 | vw vh WR 0 */
 static i32 frameOut[8];        /* food sprites, snakes drawn, maxK, runs, minimap items */
+/* WebGPU drawIndirect args, 4 x u32 per draw: floor, food, snakes, labels, minimap */
+static u32 indirect[20];
+EXPORT("indirectPtr") u32 *indirectPtr(void) { return indirect; }
+/* Accurate simulation cost on this device: time many steps in one go, so the
+   browser's coarse/jittered timer doesn't matter. Advances the game. */
+EXPORT("bench") float bench(i32 steps) {
+  double t = nowMs();
+  for (i32 i = 0; i < steps; i++) step(DT);
+  return (float)((nowMs() - t) * 1000.0 / steps); /* microseconds per step */
+}
 static float frameMs[2];       /* sim, render prep */
 EXPORT("frameBlkPtr") float *frameBlkPtr(void) { return frameBlk; }
 EXPORT("frameOutPtr") i32 *frameOutPtr(void) { return frameOut; }
@@ -813,6 +834,12 @@ EXPORT("frame") void frame(float dt, float aim, i32 boost, i32 mode, float vw, f
   frameOut[1] = renderPrep(camX, camY, hw, hh, px);
   frameOut[2] = maxK; frameOut[3] = (i32)nruns;
   frameOut[4] = miniPrep(camX, camY, hw, hh);
+  u32 *d = indirect;
+  d[0] = 3; d[1] = 1;                                    /* floor: fullscreen triangle */
+  d[4] = 4; d[5] = (u32)frameOut[0];                     /* food quads */
+  d[8] = 2u * (u32)(maxK + 3); d[9] = (u32)frameOut[1];  /* snake ribbons */
+  d[12] = 4; d[13] = (u32)frameOut[1];                   /* labels */
+  d[16] = 4; d[17] = mode == 0 ? (u32)frameOut[4] : 0u;  /* minimap */
   frameBlk[0] = camX; frameBlk[1] = camY; frameBlk[2] = hw; frameBlk[3] = hh;
   frameBlk[4] = px; frameBlk[5] = time; frameBlk[6] = vw / cssW; frameBlk[7] = 0;
   frameBlk[8] = vw; frameBlk[9] = vh; frameBlk[10] = WR; frameBlk[11] = 0;

@@ -25,6 +25,15 @@ Measured headless: about 0.3 ms of simulation per frame with 40 bots and about 3
 - **GPU-built snakes:** the vertex shader builds each snake's ribbon straight from a texture that's a byte copy of the WASM trail memory. The CPU writes 48 bytes per visible snake.
 - **Fixed 60 Hz simulation** with render interpolation, so the game behaves the same at any refresh rate.
 
+- **Two renderers, same look:** WebGPU when available (pre-recorded render bundles, with draw counts written by WebAssembly into an indirect-draw buffer, so a frame is about 10 JavaScript calls), otherwise WebGL 2. Add `?renderer=webgl` to force the backup.
+- **Measuring:** press **P** for fps, CPU time per part and GPU time per pass (floor, food, snakes, labels, map). On the menu, press **B** to benchmark the simulation; it times 600 steps in one go, so privacy-blurred browser timers can't distort the result.
+
+## Source layout
+- `src/sim.c`: the whole game simulation, compiled to WebAssembly.
+- `src/app.js`: UI, input, HUD, labels and the main loop.
+- `src/render-gpu.js` / `src/render-gl.js`: the WebGPU and WebGL 2 renderers.
+- `src/index.html`: the page. `node build.mjs` inlines everything into `index.html`.
+
 ## Rebuilding
 Edit `src/sim.c` or `src/index.html`, then run:
 ```sh

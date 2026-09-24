@@ -1,5 +1,5 @@
 // Builds the self-contained index.html: compiles src/sim.c to WebAssembly with
-// clang and inlines it (base64) into src/index.html.  Usage: node build.mjs
+// clang, then inlines it (base64) and the renderer/app scripts into src/index.html.  Usage: node build.mjs
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
@@ -11,6 +11,11 @@ execFileSync("clang", [
 ], { stdio: "inherit" });
 
 const wasm = readFileSync("build/sim.wasm");
-const html = readFileSync("src/index.html", "utf8").replace("__WASM_BASE64__", wasm.toString("base64"));
+const inline = (f) => readFileSync(f, "utf8").replace(/<\/script/gi, "<\\/script");
+const html = readFileSync("src/index.html", "utf8")
+  .replace("/*__RENDER_GL__*/", () => inline("src/render-gl.js"))
+  .replace("/*__RENDER_GPU__*/", () => inline("src/render-gpu.js"))
+  .replace("/*__APP__*/", () => inline("src/app.js"))
+  .replace("__WASM_BASE64__", wasm.toString("base64"));
 writeFileSync("index.html", html);
 console.log(`sim.wasm ${wasm.length} B -> index.html ${html.length} B`);
