@@ -894,6 +894,8 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   const counts = new Uint32Array([3, 1, 4, 0, 0, 0, 4, 0, 4, 0]); // (vertices, instances) x5
   const mainAtt = { view: null, loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 1] };
   const mainDesc = { colorAttachments: [mainAtt] };
+  // pairs (vertices, instances): floor, food, snakes, labels, minimap
+  const setCounts = (food, maxK, nVis, nMini) => { counts[3] = food; counts[4] = 2 * (maxK + 3); counts[5] = nVis; counts[7] = nVis; counts[9] = nMini; };
   const encodeDirect = (pass, i) => {
     const [p, off] = DRAWS[i], vc = counts[i * 2], ic = counts[i * 2 + 1];
     if (!ic) return;
@@ -944,12 +946,12 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
         const pass = enc.beginRenderPass(mainDesc);
         if (direct) {
           pass.setBindGroup(0, bind);
-          counts[1] = instCount; counts[2] = 2 * (maxK + 3); counts[3] = nVis; counts[5] = nVis; counts[7] = nVis; counts[9] = nMini;
+          setCounts(instCount, maxK, nVis, nMini);
           for (let i = 0; i < 5; i++) encodeDirect(pass, i);
         } else pass.executeBundles(bundles);
         pass.end();
       } else { // measuring: one pass per draw, each timestamped
-        counts[1] = instCount; counts[2] = 2 * (maxK + 3); counts[3] = nVis; counts[5] = nVis; counts[7] = nVis; counts[9] = nMini;
+        setCounts(instCount, maxK, nVis, nMini);
         for (let i = 0; i < 5; i++) {
           const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: i ? "load" : "clear", storeOp: "store", clearValue: [0, 0, 0, 1] }],
             timestampWrites: { querySet: qset, beginningOfPassWriteIndex: i * 2, endOfPassWriteIndex: i * 2 + 1 } });
