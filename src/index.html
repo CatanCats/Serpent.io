@@ -240,7 +240,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     if((vI.w&1u)!=0u) glow=exp(-pow(max(d-r*.8,0.)/(r*.45),2.))*(.55+.25*sin(uTime*18.))*(1.-edge);
     if(edge<=0. && glow<=.003) discard;
     uint idx=vI.z;
-    vec3 base = kind==2u ? SKA[sk] : (((idx/3u)&1u)==0u ? SKA[sk] : SKB[sk]);
+    vec3 base = kind==2u ? SKA[sk] : (((idx>>2u)&1u)==0u ? SKA[sk] : SKB[sk]);
     float nd=d/r;
     vec3 c=base*(1.05-.55*nd*nd);                         // spherical shading
     c+=vec3(1)*.28*exp(-dot(vL/r-vec2(-.28,-.36),vL/r-vec2(-.28,-.36))*7.); // specular
