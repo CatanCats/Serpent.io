@@ -47,28 +47,23 @@
   #board li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #board li.me { color: #fff; font-weight: 600; }
   #board li.me .nm::after { content: " •"; color: var(--accent); }
-  .tg { flex: none; font-size: 9px; font-weight: 600; letter-spacing: .08em; padding: 1px 5px; border-radius: 6px; }
+  .tg { flex: none; font-size: 8.5px; font-weight: 600; letter-spacing: .08em; padding: 1px 5px; border-radius: 6px; }
+  .tg.t0 { color: #6ee7b7; background: rgba(52,211,153,.12); }
+  .tg.t1 { color: #7dd3fc; background: rgba(56,189,248,.12); }
+  .tg.you { color: #04130d; background: linear-gradient(90deg,#34d399,#38bdf8); }
+  #board li .sc { min-width: 42px; text-align: right; }
   .tg.t2 { color: #fbbf24; background: rgba(251,191,36,.12); }
   .tg.t3 { color: #fb7185; background: rgba(251,113,133,.14); }
   .tg.t4 { color: #1c1400; background: linear-gradient(90deg,#fde68a,#f59e0b); }
 
   #mini { right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); width: 170px; height: 170px; border-radius: 50%; padding: 0; overflow: hidden; }
-  #mini canvas { width: 100%; height: 100%; display: block; }
+  /* the minimap itself is drawn by WebGL underneath this ring */
+  #mini { border: 1px solid var(--line); box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+  body:not(.playing) #mini { opacity: 0; }
 
   #perf { left: max(16px, env(safe-area-inset-left)); top: max(16px, env(safe-area-inset-top)); padding: 8px 12px; max-width: calc(100vw - 300px); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); border-radius: 10px; }
   #perf b { color: var(--text); font-weight: 500; }
   #perf.off { display: none; }
-
-  /* Name + level labels */
-  .lbl { position: fixed; left: 0; top: 0; transform: translate(-9999px,0); pointer-events: none; white-space: nowrap; display: flex; flex-direction: column; align-items: center; gap: 2px;
-    font-size: 14px; font-weight: 600; color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,.8); opacity: 0; transition: opacity .4s; will-change: transform, opacity; }
-  .lbl.on { opacity: 1; }
-  .lbl .lv { font-size: 9.5px; font-weight: 600; letter-spacing: .1em; padding: 1px 6px; border-radius: 6px; text-shadow: none; }
-  .lv.t0 { color: #a7f3d0; background: rgba(52,211,153,.18); }
-  .lv.t1 { color: #bae6fd; background: rgba(56,189,248,.18); }
-  .lv.t2 { color: #fde68a; background: rgba(251,191,36,.2); }
-  .lv.t3 { color: #fecdd3; background: rgba(251,113,133,.25); }
-  .lv.t4 { color: #1c1400; background: linear-gradient(90deg,#fde68a,#f59e0b); box-shadow: 0 0 12px rgba(251,191,36,.6); }
 
   /* Menus */
   .screen { position: fixed; inset: 0; display: grid; place-items: center; padding: 16px; transition: opacity .35s, visibility .35s; }
@@ -124,7 +119,7 @@
   <div class="sub">Rank <b id="rank">–</b> of <b id="total">–</b> · Kills <b id="kills">0</b></div>
 </div>
 <div id="board" class="hud glass"><h3>Leaderboard</h3><ol id="lb"></ol></div>
-<div id="mini" class="hud game glass"><canvas id="mm" width="340" height="340"></canvas></div>
+<div id="mini" class="hud game"></div>
 
 <div id="menu" class="screen">
   <div class="card glass">
@@ -134,7 +129,7 @@
     <div class="skins" id="skins" role="group" aria-label="Skin"></div>
     <button class="play" id="play">PLAY</button>
     <div class="keys"><kbd>Mouse</kbd> steer · <kbd>Click</kbd>/<kbd>Space</kbd> boost<br><kbd>←</kbd><kbd>→</kbd> steer with keys · Touch: drag to steer, 2 fingers boost · <kbd>P</kbd> perf</div>
-    <div class="tech">WebAssembly sim · GPU-built snakes · 3 draw calls</div>
+    <div class="tech">WebAssembly sim · GPU-built snakes · 5 draw calls</div>
   </div>
 </div>
 
@@ -174,7 +169,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
 
   /* ---------------- WebAssembly ---------------- */
   const bin = Uint8Array.from(atob(WASM_BASE64), (c) => c.charCodeAt(0));
-  const { instance } = await WebAssembly.instantiate(bin, {});
+  const { instance } = await WebAssembly.instantiate(bin, { env: { now: () => performance.now() } });
   const W = instance.exports;
   const BOTS = 60;
   W.init((Math.random() * 4294967295) >>> 0, BOTS);
@@ -335,6 +330,66 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     o=vec4(c+gc*glow, a);
   }`;
 
+  // Name + level labels: pre-drawn once per snake into a texture atlas, drawn
+  // as one instanced quad per visible snake at a constant on-screen size.
+  const LVS = `#version 300 es
+  ${FRAME}
+  layout(location=0) in vec4 aH0; layout(location=2) in uvec4 aH2;
+  uniform vec2 uSlot, uCells; // slot size in CSS px, atlas grid
+  out vec2 vUV;
+  void main(){
+    vec2 q=vec2(float(gl_VertexID&1), float(gl_VertexID>>1));     // 0..1, y down
+    vec2 c=(aH0.xy-vec2(0.,aH0.w*1.25)-uCamHalf.xy)/uCamHalf.zw;   // anchor just above the head
+    vec2 off=vec2(q.x-.5, q.y-1.)*uSlot*uPxTime.z;                // screen px, y down
+    gl_Position=vec4(c.x+off.x*2./uResWR.x, -c.y-off.y*2./uResWR.y, 0, 1);
+    float slot=float(aH2.x);
+    vUV=(vec2(mod(slot,uCells.x), floor(slot/uCells.x))+q)/uCells;
+  }`;
+  const LFS = `#version 300 es
+  precision mediump float;
+  uniform sampler2D uAtlas; in vec2 vUV; out vec4 o;
+  void main(){ o=texture(uAtlas,vUV); }`;
+
+  // Minimap: one instanced draw in a corner of the same canvas (no Canvas2D).
+  const MVS = `#version 300 es
+  layout(location=0) in vec3 aP; layout(location=1) in uint aI;
+  uniform vec3 uMini; // centre (clip) and radius in device px
+  uniform vec2 uRes;
+  out vec2 vL; out vec2 vS; flat out uint vI;
+  void main(){
+    uint kind=aI&255u;
+    vec2 q=vec2(float(gl_VertexID&1), float(gl_VertexID>>1))*2.-1.;
+    vec2 ext = kind==3u ? vec2(aP.z, float(aI>>8)/16777215.) + 6./uMini.z : vec2(aP.z*(kind==0u?1.03:1.) + 1.5/uMini.z);
+    vec2 m=aP.xy+q*ext;                       // minimap units (disc radius 1), y down
+    gl_Position=vec4(uMini.xy+vec2(m.x,-m.y)*uMini.z*2./uRes,0,1);
+    vL=q*ext; vS=ext; vI=aI;
+  }`;
+  const MFS = `#version 300 es
+  precision highp float;
+  ${palGLSL}
+  uniform vec3 uMini;
+  in vec2 vL; in vec2 vS; flat in uint vI; out vec4 o;
+  vec4 over(vec4 a, vec4 b){ return a+b*(1.-a.a); } // premultiplied "a over b"
+  void main(){
+    uint kind=vI&255u; float aa=1./uMini.z; vec4 c=vec4(0);
+    if(kind==0u){ // backdrop + centre zone + rim
+      float d=length(vL), in_=1.-smoothstep(1.-aa,1.+aa,d);
+      c=vec4(vec3(.047,.066,.118)*.9,.9)*in_;
+      c=over(vec4(vec3(.98,.44,.52)*.07,.07)*(1.-smoothstep(.35-aa,.35+aa,d)), c);
+      c=over(vec4(vec3(.98,.44,.52)*.5,.5)*(1.-smoothstep(0.,2.*aa,abs(d-(1.-2.*aa)))), c);
+    } else if(kind==1u){
+      float r=vS.x-1.5*aa, a=(1.-smoothstep(r-aa,r+aa,length(vL)))*float((vI>>16)&255u)/255.;
+      c=vec4(SKA[(vI>>8)&255u]*a,a);
+    } else if(kind==2u){ // you
+      float d=length(vL), r=vS.x-1.5*aa;
+      c=over(vec4(vec3(1),1)*(1.-smoothstep(r*.55-aa,r*.55+aa,d)), vec4(vec3(.3),.3)*(1.-smoothstep(r-aa,r+aa,d)));
+    } else { // view rectangle outline
+      vec2 h=vS-6.*aa, e=abs(vL)-h; float d=abs(max(e.x,e.y));
+      float a=(1.-smoothstep(.5*aa,1.5*aa,d))*.4; c=vec4(vec3(a),a);
+    }
+    o=c;
+  }`;
+
   function prog(vs, fs) {
     const p = gl.createProgram();
     for (const [t, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
@@ -347,7 +402,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     gl.uniformBlockBinding(p, gl.getUniformBlockIndex(p, "Frame"), 0);
     return p;
   }
-  const bgP = prog(BG_VS, BG_FS), foodP = prog(VS, FS), ribP = prog(RVS, RFS);
+  const bgP = prog(BG_VS, BG_FS), foodP = prog(VS, FS), ribP = prog(RVS, RFS), lblP = prog(LVS, LFS), miniP = prog(MVS, MFS);
   // bake the hex tile (one period) into a mipmapped texture
   const tileTex = gl.createTexture();
   {
@@ -377,8 +432,11 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   const trail = new Int16Array(mem, W.trailPtr(), NS * RING * 2);
   const hdrU32 = new Uint32Array(mem, W.hdrPtr(), NS * 12);
   const snap = new Float32Array(mem, W.snapPtr(), NS * 10);
-  const rowsVis = new Uint32Array(NS); // alive,x,y,mass,r,skin,tier,near,onScreen,kills
-  const frameU = new Float32Array(12);
+  const runs = new Uint32Array(mem, W.runsPtr(), 128);
+  const lb = new Int32Array(mem, W.rankPrep(), 12); // alive,x,y,mass,r,skin,tier,near,onScreen,kills
+  const frameBlk = new Float32Array(mem, W.frameBlkPtr(), 12);  // std140 Frame block, written by WASM
+  const frameOut = new Int32Array(mem, W.frameOutPtr(), 8);     // counts for this frame
+  const frameMs = new Float32Array(mem, W.frameMsPtr(), 2);     // WASM-side timings
 
   // Everything dynamic is double-buffered: the CPU writes one copy while the
   // GPU may still be reading last frame's (avoids implicit sync stalls).
@@ -403,7 +461,15 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
     ubo[i] = gl.createBuffer(); gl.bindBuffer(gl.UNIFORM_BUFFER, ubo[i]);
-    gl.bufferData(gl.UNIFORM_BUFFER, frameU.byteLength, gl.DYNAMIC_DRAW);
+    gl.bufferData(gl.UNIFORM_BUFFER, 48, gl.DYNAMIC_DRAW);
+  }
+  const miniBytes = new Uint8Array(mem, W.miniPtr(), (NS + 4) * 16), miniVao = [], miniVbo = [];
+  for (let i = 0; i < 2; i++) {
+    miniVao[i] = gl.createVertexArray(); gl.bindVertexArray(miniVao[i]);
+    miniVbo[i] = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, miniVbo[i]);
+    gl.bufferData(gl.ARRAY_BUFFER, miniBytes.byteLength, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 16, 0); gl.vertexAttribDivisor(0, 1);
+    gl.enableVertexAttribArray(1); gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_INT, 16, 12); gl.vertexAttribDivisor(1, 1);
   }
   const emptyVao = gl.createVertexArray();
   gl.bindVertexArray(null);
@@ -418,6 +484,14 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     const dpr = Math.min(window.devicePixelRatio || 1, 2) * resScale;
     vw = Math.round(innerWidth * dpr); vh = Math.round(innerHeight * dpr);
     if (canvas.width !== vw || canvas.height !== vh) { canvas.width = vw; canvas.height = vh; }
+    placeMini();
+  }
+  const miniEl = $("mini"), miniU = gl.getUniformLocation(miniP, "uMini"), miniRes = gl.getUniformLocation(miniP, "uRes");
+  function placeMini() {
+    const r = miniEl.getBoundingClientRect(), k = vw / innerWidth;
+    gl.useProgram(miniP);
+    gl.uniform3f(miniU, ((r.left + r.width / 2) / innerWidth) * 2 - 1, 1 - ((r.top + r.height / 2) / innerHeight) * 2, (r.width / 2 - 3) * k);
+    gl.uniform2f(miniRes, vw, vh);
   }
   addEventListener("resize", resize); resize();
 
@@ -438,14 +512,12 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   const playerName = () => nameEl.value.trim() || "You";
 
   let state = "menu"; // menu | play | dead
-  let camX = 0, camY = 0, camH = 900, spectate = 1;
+  let camX = 0, camY = 0, camH = 900; // mirrored from WASM each frame
   let deathTime = 0;
 
   function start() {
     store.set("serpent.name", nameEl.value.trim());
-    W.spawnPlayer(skinSel);
-    camX = W.headX(0); camY = W.headY(0);
-    W.setFocus(camX, camY, Math.hypot(camH * vw / vh, camH) + 700); W.refillFood();
+    W.spawnPlayer(skinSel); // also moves the camera there and fills food around it
     state = "play"; document.body.classList.add("playing");
     $("menu").classList.add("hidden"); $("over").classList.add("hidden");
     nameEl.blur();
@@ -502,141 +574,113 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   });
   addEventListener("blur", () => { keyBoost = mouseBoost = false; keyTurn = 0; });
 
-  /* ---------------- HUD (throttled DOM work, reads the WASM snapshot) ---------------- */
+  /* ---------------- HUD (throttled DOM work; ranking done in WASM) ---------------- */
   const TIERS = ["ROOKIE", "CASUAL", "HUNTER", "ELITE", "LEGEND"];
-  const lbEl = $("lb"), mm = $("mm").getContext("2d");
+  const TIER_COL = ["#6ee7b7", "#7dd3fc", "#fcd34d", "#fda4af", "#fbbf24"];
+  const lbEl = $("lb");
   const esc = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
   let lastMass = 10, lastLb = "", halfWv = 1000;
   function updateHud() {
-    const rows = [];
-    for (let s = 0; s < NS; s++) if (snap[s * 10]) rows.push([snap[s * 10 + 3], s]);
-    rows.sort((a, b) => b[0] - a[0]);
+    W.rankPrep(); // fills lb: [alive, player rank, top 10 ids...]
     let html = "";
-    for (let i = 0; i < Math.min(10, rows.length); i++) {
-      const s = rows[i][1], t = s === 0 ? -1 : snap[s * 10 + 6];
-      const tag = t >= 2 ? `<span class="tg t${t}">${TIERS[t]}</span>` : "";
-      html += `<li class="${s === 0 ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[snap[s * 10 + 5]][0]}"></span><span class="nm">${esc(s === 0 ? playerName() : names[s])}</span>${tag}<span>${Math.floor(rows[i][0] * 10)}</span></li>`;
+    for (let i = 0; i < 10 && lb[2 + i] >= 0; i++) {
+      const s = lb[2 + i], b = s * 10, t = snap[b + 6];
+      const tag = s === 0 ? `<span class="tg you">YOU</span>` : `<span class="tg t${t}">${TIERS[t]}</span>`;
+      html += `<li class="${s === 0 ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[snap[b + 5]][0]}"></span><span class="nm">${esc(s === 0 ? playerName() : names[s])}</span>${tag}<span class="sc">${Math.floor(snap[b + 3] * 10)}</span></li>`;
     }
     if (html !== lastLb) { lbEl.innerHTML = html; lastLb = html; }
+    // keep label atlas slots in sync (bots change level when they respawn)
+    for (let s = 0; s < NS; s++) {
+      const key = s === 0 ? "p:" + playerName() : snap[s * 10] ? "t" + snap[s * 10 + 6] : slotKey[s];
+      if (key !== slotKey[s]) drawSlot(s, key);
+    }
+    if (atlasDirty) { gl.bindTexture(gl.TEXTURE_2D, atlas); gl.generateMipmap(gl.TEXTURE_2D); atlasDirty = false; }
     if (state !== "play") return;
     $("len").textContent = Math.floor(snap[3] * 10);
-    $("rank").textContent = rows.findIndex((r) => r[1] === 0) + 1;
-    $("total").textContent = rows.length;
+    $("rank").textContent = lb[1];
+    $("total").textContent = lb[0];
     $("kills").textContent = snap[9];
-    // minimap: every snake as a dot sized by mass, the busy middle, your view
-    const S = 340, h = S / 2, k = (h - 4) / WR;
-    mm.clearRect(0, 0, S, S);
-    mm.fillStyle = "rgba(255,255,255,.035)"; mm.beginPath(); mm.arc(h, h, h - 2, 0, 7); mm.fill();
-    mm.fillStyle = "rgba(251,113,133,.07)"; mm.beginPath(); mm.arc(h, h, WR * .35 * k, 0, 7); mm.fill();
-    mm.strokeStyle = "rgba(251,113,133,.45)"; mm.lineWidth = 2; mm.beginPath(); mm.arc(h, h, h - 3, 0, 7); mm.stroke();
-    for (const [m, s] of rows) {
-      if (s === 0) continue;
-      const b = s * 10;
-      mm.fillStyle = SKINS[snap[b + 5]][0] + (snap[b + 7] ? "ee" : "77");
-      mm.beginPath(); mm.arc(h + snap[b + 1] * k, h + snap[b + 2] * k, 2 + Math.sqrt(m) * .16, 0, 7); mm.fill();
-    }
-    mm.strokeStyle = "rgba(255,255,255,.35)"; mm.lineWidth = 1.5;
-    mm.strokeRect(h + (camX - halfWv) * k, h + (camY - camH) * k, halfWv * 2 * k, camH * 2 * k);
-    const px = h + snap[1] * k, py = h + snap[2] * k;
-    mm.fillStyle = "rgba(255,255,255,.3)"; mm.beginPath(); mm.arc(px, py, 10, 0, 7); mm.fill();
-    mm.fillStyle = "#fff"; mm.beginPath(); mm.arc(px, py, 5.5, 0, 7); mm.fill();
   }
 
-  /* ---------------- Name + level labels ----------------
-     A bot that comes into view shows its name and level for ~3 s, then fades.
-     Small pool of DOM nodes moved with compositor-only transforms. */
-  const LABEL_MS = 3200, LABEL_COOLDOWN = 15000;
-  const labelPool = [], activeLabels = [], wasOn = new Uint8Array(NS), lastShown = new Float64Array(NS).fill(-1e9);
-  for (let i = 0; i < 8; i++) {
-    const el = document.createElement("div"); el.className = "lbl"; document.body.appendChild(el); labelPool.push(el);
-  }
-  function updateLabels(now, halfW, halfH) {
-    const sx = innerWidth / (2 * halfW), sy = innerHeight / (2 * halfH);
-    for (let s = 1; s < NS; s++) {
-      const b = s * 10, on = snap[b] && snap[b + 8] ? 1 : 0;
-      if (on && !wasOn[s] && now - lastShown[s] > LABEL_COOLDOWN && labelPool.length && state !== "menu") {
-        const el = labelPool.pop(), t = snap[b + 6];
-        el.innerHTML = `${esc(names[s])}<span class="lv t${t}">LV ${t + 1} · ${TIERS[t]}</span>`;
-        el.classList.add("on");
-        activeLabels.push({ s, el, until: now + LABEL_MS });
-        lastShown[s] = now;
-      }
-      wasOn[s] = on;
+  /* ---------------- Name + level labels (GPU) ----------------
+     Each snake owns one slot of a texture atlas. A slot is re-drawn with Canvas2D
+     only when its text changes (bot respawns with another level); every frame
+     the labels are a single instanced draw that reuses the snake headers. */
+  const SLOT_W = 150, SLOT_H = 34, LS = 2, CELLS_X = 8, CELLS_Y = Math.ceil(NS / CELLS_X);
+  const slotKey = new Array(NS).fill("");
+  const slotCanvas = document.createElement("canvas");
+  slotCanvas.width = SLOT_W * LS; slotCanvas.height = SLOT_H * LS;
+  const sc = slotCanvas.getContext("2d");
+  const atlas = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, atlas);
+  const AW = SLOT_W * LS * CELLS_X, AH = SLOT_H * LS * CELLS_Y;
+  gl.texStorage2D(gl.TEXTURE_2D, 1 + Math.floor(Math.log2(Math.max(AW, AH))), gl.RGBA8, AW, AH);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); // smooth at any resolution scale
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const FONT = 'Outfit, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+  function drawSlot(s, key) {
+    slotKey[s] = key;
+    sc.setTransform(LS, 0, 0, LS, 0, 0);
+    sc.clearRect(0, 0, SLOT_W, SLOT_H);
+    sc.textAlign = "center"; sc.textBaseline = "alphabetic";
+    sc.shadowColor = "rgba(0,0,0,.6)"; sc.shadowBlur = 2.5; sc.shadowOffsetY = 0.5;
+    sc.font = `600 12px ${FONT}`; sc.fillStyle = "rgba(255,255,255,.92)";
+    const name = s === 0 ? playerName() : names[s];
+    if (s === 0) { sc.fillText(name, SLOT_W / 2, SLOT_H - 6); }
+    else {
+      const t = +key.slice(1);
+      sc.fillText(name, SLOT_W / 2, SLOT_H - 17);
+      sc.font = `600 9.5px ${FONT}`; sc.fillStyle = TIER_COL[t]; sc.letterSpacing = "0.6px";
+      sc.fillText(`LV ${t + 1} · ${TIERS[t]}`, SLOT_W / 2, SLOT_H - 6);
+      sc.letterSpacing = "0px";
     }
-    for (let i = activeLabels.length - 1; i >= 0; i--) {
-      const L = activeLabels[i], b = L.s * 10;
-      if (now > L.until || !snap[b] || state === "menu") {
-        L.el.classList.remove("on"); L.el.style.transform = "translate(-9999px,0)";
-        labelPool.push(L.el); activeLabels.splice(i, 1); continue;
-      }
-      if (now > L.until - 450) L.el.classList.remove("on"); // fade out
-      const x = (snap[b + 1] - camX) * sx + innerWidth / 2, y = (snap[b + 2] - snap[b + 4] * 1.7 - camY) * sy + innerHeight / 2;
-      const cx = Math.min(Math.max(x, 70), innerWidth - 70), cy = Math.min(Math.max(y, 44), innerHeight - 8);
-      L.el.style.transform = `translate(${cx.toFixed(1)}px,${cy.toFixed(1)}px) translate(-50%,-100%)`;
-    }
+    gl.bindTexture(gl.TEXTURE_2D, atlas);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, (s % CELLS_X) * SLOT_W * LS, Math.floor(s / CELLS_X) * SLOT_H * LS, gl.RGBA, gl.UNSIGNED_BYTE, slotCanvas);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    atlasDirty = true;
   }
+  let atlasDirty = false;
+  gl.useProgram(lblP);
+  gl.uniform1i(gl.getUniformLocation(lblP, "uAtlas"), 2);
+  gl.uniform2f(gl.getUniformLocation(lblP, "uSlot"), SLOT_W, SLOT_H);
+  gl.uniform2f(gl.getUniformLocation(lblP, "uCells"), CELLS_X, CELLS_Y);
+  // re-draw every label once the web font has loaded
+  document.fonts?.ready.then(() => slotKey.fill(""));
 
-  /* ---------------- Main loop ---------------- */
+  /* ---------------- Main loop ----------------
+     JS only gathers input and issues GL calls; everything else is one WASM call. */
   const perfEl = $("perf");
   const T = { sim: 0, prep: 0, gl: 0, hud: 0, n: 0 };
-  let specT = 99, resDrops = 1, frameNo = 0, lastVis = 0, last = performance.now(), fpsAcc = 0, perfT = 0, hudT = 0, instCount = 0, avgDt = 1 / 60, resT = 0;
+  let resDrops = 1, frameNo = 0, last = performance.now(), fpsAcc = 0, perfT = 0, hudT = 0, avgDt = 1 / 60, resT = 0;
   function frame(now) {
     requestAnimationFrame(frame);
-    if (state !== "play" && now - last < 30) return; // menu / game-over: ~30 fps is plenty
+    const playing = state === "play";
+    if (!playing && now - last < 30) return; // menu / game-over: ~30 fps is plenty
     const dt = Math.min((now - last) / 1000, 0.25); last = now;
-    // dynamic resolution: drop pixels before dropping frames, recover when there is headroom
-    if (state === "play") {
+    // dynamic resolution: drop pixels before dropping frames, recover after a long calm spell
+    if (playing) {
       avgDt += (Math.min(dt, 0.1) - avgDt) * 0.05; resT += dt;
       if (resT > 1 && avgDt > 1 / 48 && resScale > 0.55) { resScale = Math.max(0.5, resScale - 0.1); resT = 0; resDrops++; resize(); }
-      // only try going back up after a long calm spell, and less eagerly each time it failed
       else if (resT > 8 * resDrops && avgDt < 1 / 57 && resScale < 1) { resScale = Math.min(1, resScale + 0.1); resT = 0; resize(); }
     }
-
-    // --- simulation: fixed 60 Hz steps inside WASM, then interpolated snapshot
-    const t0 = performance.now();
-    if (state === "play") {
+    if (playing) {
       if (usingKeys) aim += keyTurn * dt * 4.2;
       else aim = Math.atan2(my - innerHeight / 2, mx - innerWidth / 2);
-      W.setInput(aim, mouseBoost || keyBoost || touchBoost);
     }
-    W.setFocus(camX, camY, Math.hypot(camH * vw / vh, camH) + 700); // full detail only around the view
-    W.update(dt);
-    W.snapshot();
-    const t1 = performance.now();
 
-    // --- camera (from interpolated positions: smooth at any refresh rate)
-    let tx, ty, tH;
-    if (state === "play" && snap[0]) {
-      tx = snap[1]; ty = snap[2]; tH = 560 + (snap[4] - 12) * 18; lastMass = snap[3];
-    } else if (state === "play") {
-      onDeath(); tx = camX; ty = camY; tH = camH;
-    } else if (state === "dead") {
-      tx = camX; ty = camY; tH = camH * 1.002;
-    } else {
-      if (!snap[spectate * 10] || (specT += dt) > 8) { // follow the biggest snake
-        specT = 0;
-        let b = 0; for (let s = 1; s < NS; s++) if (snap[s * 10] && snap[s * 10 + 3] > b) { b = snap[s * 10 + 3]; spectate = s; }
-      }
-      tx = snap[spectate * 10 + 1]; ty = snap[spectate * 10 + 2]; tH = 900;
-    }
-    const k = 1 - Math.exp(-dt * (state === "play" ? 14 : 2.5));
-    camX += (tx - camX) * k; camY += (ty - camY) * k; camH += (tH - camH) * (1 - Math.exp(-dt * 2));
-    const halfH = camH, halfW = camH * vw / vh, px = halfH * 2 / vh;
-    halfWv = halfW;
-
-    // --- render prep in WASM: culled food sprites + one header per visible snake
-    instCount = W.build(camX, camY, halfW, halfH);
-    const nVis = W.renderPrep(camX, camY, halfW, halfH, px), maxK = W.maxK();
-    lastVis = nVis;
+    // --- everything but drawing: input, 60 Hz sim, camera, culling, render data
+    W.frame(dt, aim, mouseBoost || keyBoost || touchBoost ? 1 : 0, playing ? 0 : state === "dead" ? 1 : 2, vw, vh, innerWidth, (now / 1000) % 3600);
+    if (playing && !snap[0]) onDeath();
+    camX = frameBlk[0]; camY = frameBlk[1]; camH = frameBlk[3]; lastMass = snap[0] ? snap[3] : lastMass;
+    const instCount = frameOut[0], nVis = frameOut[1], maxK = frameOut[2], nRuns = frameOut[3], nMini = frameOut[4];
     const t2 = performance.now();
 
-    // --- GPU: 3 draw calls, all buffers double-buffered
+    // --- GPU: 5 draw calls, all dynamic buffers double-buffered, uploads straight from WASM memory
     const f = frameNo++ & 1;
     let q = null;
     if (tq && !perfEl.classList.contains("off") && queries.length < 3) { q = gl.createQuery(); gl.beginQuery(tq.TIME_ELAPSED_EXT, q); }
-    frameU[0] = camX; frameU[1] = camY; frameU[2] = halfW; frameU[3] = halfH;
-    frameU[4] = px; frameU[5] = (now / 1000) % 3600; frameU[8] = vw; frameU[9] = vh; frameU[10] = WR;
-    gl.bindBuffer(gl.UNIFORM_BUFFER, ubo[f]); gl.bufferSubData(gl.UNIFORM_BUFFER, 0, frameU);
+    gl.bindBuffer(gl.UNIFORM_BUFFER, ubo[f]); gl.bufferSubData(gl.UNIFORM_BUFFER, 0, frameBlk);
     gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, ubo[f]);
     gl.viewport(0, 0, vw, vh);
 
@@ -653,20 +697,26 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instCount);
     }
     if (nVis) {
-      // upload only the trail rows of snakes on screen (2 KB each)
+      // upload only the trail rows on screen, merged into runs by WASM
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, trailTex[f]);
-      // upload only the rows on screen, merged into contiguous runs (few calls, little data)
-      for (let i = 0; i < nVis; i++) rowsVis[i] = hdrU32[i * 12 + 8];
-      const rv = rowsVis.subarray(0, nVis).sort();
-      for (let i = 0; i < nVis;) {
-        let j = i; while (j + 1 < nVis && rv[j + 1] - rv[j] <= 2) j++;
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, rv[i], RING, rv[j] - rv[i] + 1, gl.RG_INTEGER, gl.SHORT, trail, rv[i] * RING * 2);
-        i = j + 1;
+      for (let i = 0; i < nRuns; i++) {
+        const r0 = runs[i * 2], cnt = runs[i * 2 + 1];
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, r0, RING, cnt, gl.RG_INTEGER, gl.SHORT, trail, r0 * RING * 2);
       }
       gl.useProgram(ribP); gl.bindVertexArray(hdrVao[f]);
       gl.bindBuffer(gl.ARRAY_BUFFER, hdrVbo[f]);
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, hdrBytes, 0, nVis * 48);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 2 * (maxK + 3), nVis);
+      // labels: same headers, one instanced quad each
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, atlas);
+      gl.useProgram(lblP);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, nVis);
+    }
+    if (playing) { // minimap
+      gl.useProgram(miniP); gl.bindVertexArray(miniVao[f]);
+      gl.bindBuffer(gl.ARRAY_BUFFER, miniVbo[f]);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, miniBytes, 0, nMini * 16);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, nMini);
     }
     if (q) { gl.endQuery(tq.TIME_ELAPSED_EXT); queries.push(q); }
     // read finished GPU timings without stalling (results arrive a few frames later)
@@ -677,17 +727,16 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     }
     const t3 = performance.now();
 
-    // --- DOM: labels every frame (≤8 transforms), HUD 4x per second
-    updateLabels(now, halfW, halfH);
+    // --- DOM: HUD 4x per second
     if ((hudT += dt) > 0.25) { hudT = 0; updateHud(); }
     const t4 = performance.now();
 
-    T.sim += t1 - t0; T.prep += t2 - t1; T.gl += t3 - t2; T.hud += t4 - t3; T.n++; fpsAcc += dt;
+    T.sim += frameMs[0]; T.prep += frameMs[1]; T.gl += t3 - t2; T.hud += t4 - t3; T.n++; fpsAcc += dt;
     if ((perfT += dt) > 0.5 && !perfEl.classList.contains("off")) {
       const a = (v) => (v / T.n).toFixed(2);
       let near = 0; for (let s = 1; s < NS; s++) near += snap[s * 10] && snap[s * 10 + 7] ? 1 : 0;
       perfEl.innerHTML = `<b>${Math.round(T.n / fpsAcc)}</b> fps · CPU/frame: sim <b>${a(T.sim)}</b> · prep <b>${a(T.prep)}</b> · gl <b>${a(T.gl)}</b> · dom <b>${a(T.hud)}</b> ms` +
-        `<br>GPU <b>${gpuMs >= 0 ? gpuMs.toFixed(2) + " ms" : tq ? "…" : "n/a"}</b> · ${instCount} food · ${lastVis} snakes drawn · 3 draw calls · res <b>${Math.round(resScale * 100)}%</b>` +
+        `<br>GPU <b>${gpuMs >= 0 ? gpuMs.toFixed(2) + " ms" : tq ? "…" : "n/a"}</b> · ${instCount} food · ${nVis} snakes drawn · 5 draw calls · res <b>${Math.round(resScale * 100)}%</b>` +
         `<br>full-detail bots <b>${near}</b> / ${NS - 1} · rest simplified · fixed 60 Hz sim`;
       perfT = 0; fpsAcc = 0; T.sim = T.prep = T.gl = T.hud = T.n = 0;
     }

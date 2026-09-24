@@ -302,6 +302,7 @@ static void moveSnake(i32 s, float dt) {
   }
 }
 
+static float hitX, hitY, hitT; /* last contact: body point and contact distance */
 static i32 hitTest(i32 s) {
   Snake *k = &S[s];
   float hx = k->hx, hy = k->hy;
@@ -317,11 +318,32 @@ static i32 hitTest(i32 s) {
         if (o == s || !segLive(i)) continue;
         u32 j = gC[i] & RMASK;
         float dx = UQ(tr[o][j][0]) - hx, dy = UQ(tr[o][j][1]) - hy, t = (k->r + S[o].r) * 0.66f;
-        if (dx * dx + dy * dy < t * t) return o;
+        if (dx * dx + dy * dy < t * t) { hitX = hx + dx; hitY = hy + dy; hitT = t; return o; }
       }
     }
   }
   return -1;
+}
+
+/* Legends never crash: push the head back out of the body it touched and turn
+   it to slide along that body (whichever way is closer to its heading). */
+static void legendDodge(i32 s, i32 h) {
+  Snake *k = &S[s];
+  if (h == -2) { /* world edge: step back inside and face the centre */
+    float d = sqrtf_(k->hx * k->hx + k->hy * k->hy), lim = WR - k->r - 4.f;
+    k->hx *= lim / d; k->hy *= lim / d;
+    k->ang = k->tang = atan2f_(-k->hy, -k->hx);
+    return;
+  }
+  float nx = k->hx - hitX, ny = k->hy - hitY, d = sqrtf_(nx * nx + ny * ny);
+  if (d < 1e-3f) { nx = -cosf_(k->ang); ny = -sinf_(k->ang); d = 1.f; }
+  nx /= d; ny /= d;
+  k->hx = hitX + nx * (hitT + 1.f); k->hy = hitY + ny * (hitT + 1.f);
+  float tx = -ny, ty = nx, fx_ = cosf_(k->ang), fy_ = sinf_(k->ang);
+  if (tx * fx_ + ty * fy_ < 0) { tx = -tx; ty = -ty; }
+  float a = atan2f_(ty + nx * 0.35f, tx + ny * 0.35f); /* along the body, veering away */
+  k->ang = k->tang = a;
+  k->aiT = 0; k->huntT = 0.f; /* rethink next step */
 }
 
 static void eat(i32 s, float dt) {
@@ -520,10 +542,7 @@ static void step(float dt) {
     if (!S[s].alive || !S[s].near) continue;
     i32 h = hitTest(s);
     if (h == -1) continue;
-    if (S[s].tier == LEGEND && S[s].bot && h >= 0 && frand() < 0.93f) {
-      S[s].tang = S[s].ang + (frand() < 0.5f ? 2.f : -2.f); /* legends almost always slip away */
-      continue;
-    }
+    if (S[s].tier == LEGEND && S[s].bot) { legendDodge(s, h); continue; } /* 100%: always gets out of the way */
     deaths[nd++] = s; deaths[nd++] = h;
   }
   for (i32 i = 0; i < nd; i += 2) killSnake(deaths[i], deaths[i + 1] >= 0 ? deaths[i + 1] : -1);
@@ -562,7 +581,12 @@ EXPORT("init") void init(u32 seed, i32 bots) {
   refillFood();
 }
 
-EXPORT("spawnPlayer") void spawnPlayer(i32 skin) { S[0].tier = 3; spawnSnake(0, 10.f, 0, skin); playerKiller = -1; }
+static float camX, camY;
+EXPORT("refillFood") void refillFood(void);
+EXPORT("spawnPlayer") void spawnPlayer(i32 skin) {
+  S[0].tier = 3; spawnSnake(0, 10.f, 0, skin); playerKiller = -1;
+  camX = focX = S[0].hx; camY = focY = S[0].hy; refillFood();
+}
 /* Fill food around a new focus at once (spawn, respawn, menu). */
 EXPORT("refillFood") void refillFood(void) { recount = 1; for (i32 t = 0; t < 400; t++) maintainFood(64); }
 EXPORT("setFocus") void setFocus(float x, float y, float r) { focX = x; focY = y; focR = r; }
@@ -648,6 +672,8 @@ EXPORT("snapshot") void snapshot(void) {
   }
 }
 
+static void buildRuns(void);
+
 /* Cull against the camera, write one GPU header per visible snake. */
 EXPORT("renderPrep") i32 renderPrep(float cx, float cy, float hw, float hh, float px) {
   nvis = 0; maxK = 0;
@@ -679,13 +705,119 @@ EXPORT("renderPrep") i32 renderPrep(float cx, float cy, float hw, float hh, floa
     h->ang = k->ang; h->W = W; h->row = (u32)s; h->newest = inew[s]; h->n = (u32)n;
     h->info = (u32)k->skin | ((u32)(k->boost | (s == 0 ? 2 : 0) | (k->tier == LEGEND && k->bot ? 4 : 0)) << 8);
   }
+  buildRuns();
   return nvis;
 }
+/* Trail rows the GPU needs this frame, merged into runs: [start, count]... */
+static u32 runs[MAXS * 2], nruns;
+static void buildRuns(void) {
+  unsigned long long mask = 0;
+  for (i32 i = 0; i < nvis; i++) mask |= 1ull << hdr[i].row;
+  nruns = 0;
+  for (u32 r = 0; r < MAXS; r++) {
+    if (!(mask >> r & 1ull)) continue;
+    u32 e = r; /* extend while the next needed row is at most 2 rows away */
+    while (e + 1 < MAXS && ((mask >> (e + 1)) & 3ull)) e++;
+    runs[nruns * 2] = r; runs[nruns * 2 + 1] = e - r + 1; nruns++;
+    r = e;
+  }
+}
+EXPORT("runsPtr") u32 *runsPtr(void) { return runs; }
+EXPORT("nRuns") u32 nRunsOut(void) { return nruns; }
+
+/* Leaderboard: [alive count, player rank (0 = dead), top 10 snake ids...] */
+static i32 lb[12];
+EXPORT("rankPrep") i32 *rankPrep(void) {
+  i32 ord[MAXS], n = 0;
+  for (i32 s = 0; s < NS; s++) {
+    if (!S[s].alive) continue;
+    i32 j = n++;
+    while (j > 0 && S[ord[j - 1]].mass < S[s].mass) { ord[j] = ord[j - 1]; j--; } /* insertion sort, ~60 items */
+    ord[j] = s;
+  }
+  lb[0] = n; lb[1] = 0;
+  for (i32 i = 0; i < n; i++) if (ord[i] == 0) lb[1] = i + 1;
+  for (i32 i = 0; i < 10; i++) lb[2 + i] = i < n ? ord[i] : -1;
+  return lb;
+}
+
 EXPORT("hdrPtr") Head *hdrPtr(void) { return hdr; }
 EXPORT("maxK") i32 maxKOut(void) { return maxK; }
 EXPORT("snapPtr") Snap *snapPtr(void) { return snap; }
 EXPORT("trailPtr") short *trailPtr(void) { return &tr[0][0][0]; }
 EXPORT("ring") i32 ringSize(void) { return RING; }
+
+/* ---------- minimap (drawn by WebGL, not Canvas2D) ----------
+   Coordinates are normalised to the minimap disc (radius 1). */
+typedef struct { float x, y, size; u32 info; } Mini; /* info: kind | skin<<8 | alpha<<16, rect: kind | halfH<<8 */
+static Mini mini[MAXS + 4];
+static i32 miniPrep(float camX, float camY, float hw, float hh) {
+  i32 n = 0;
+  const float k = 1.f / WR;
+  mini[n++] = (Mini){0.f, 0.f, 1.f, 0u}; /* backdrop, centre zone, rim */
+  for (i32 s = 1; s < NS; s++) {
+    if (!S[s].alive) continue;
+    mini[n++] = (Mini){snap[s].x * k, snap[s].y * k, (2.f + sqrtf_(S[s].mass) * .16f) / 166.f,
+                       1u | ((u32)S[s].skin << 8) | ((S[s].near ? 235u : 120u) << 16)};
+  }
+  mini[n++] = (Mini){camX * k, camY * k, hw * k, 3u | ((u32)(minf(hh * k, 1.f) * 16777215.f) << 8)};
+  if (S[0].alive) mini[n++] = (Mini){snap[0].x * k, snap[0].y * k, 10.f / 166.f, 2u};
+  return n;
+}
+EXPORT("miniPtr") Mini *miniPtr(void) { return mini; }
+
+/* ---------- one call per frame ----------
+   input -> fixed-step sim -> interpolated snapshot -> camera -> culling ->
+   render headers/runs -> minimap -> the std140 "Frame" uniform block that JS
+   uploads as-is. Timings come from an imported clock. */
+extern double nowMs(void) __attribute__((import_module("env"), import_name("now")));
+static float expf_(float x) { /* 2^(x*log2 e), enough for smoothing factors */
+  float t = x * 1.44269504f, fi = (float)(i32)t; if (t < fi) fi -= 1.f;
+  float f = t - fi, p = 1.f + f * (0.6931472f + f * (0.2402265f + f * (0.0555041f + f * 0.0096181f)));
+  i32 e = (i32)fi; if (e < -126) return 0.f;
+  union { float f; u32 u; } v = {p}; v.u += (u32)e << 23; return v.f;
+}
+static float camH = 900.f, specT = 99.f;
+static i32 spectate = 1;
+static float frameBlk[12];     /* camX camY halfW halfH | px time lblScale 0 | vw vh WR 0 */
+static i32 frameOut[8];        /* food sprites, snakes drawn, maxK, runs, minimap items */
+static float frameMs[2];       /* sim, render prep */
+EXPORT("frameBlkPtr") float *frameBlkPtr(void) { return frameBlk; }
+EXPORT("frameOutPtr") i32 *frameOutPtr(void) { return frameOut; }
+EXPORT("frameMsPtr") float *frameMsPtr(void) { return frameMs; }
+
+/* mode: 0 playing, 1 dead (hold + slow zoom out), 2 menu (follow the biggest) */
+EXPORT("frame") void frame(float dt, float aim, i32 boost, i32 mode, float vw, float vh, float cssW, float time) {
+  double t0 = nowMs();
+  if (mode == 0 && S[0].alive) { S[0].tang = aim; S[0].wantBoost = boost; }
+  focX = camX; focY = camY; focR = sqrtf_(camH * camH * (1.f + (vw / vh) * (vw / vh))) + 700.f;
+  update(dt);
+  snapshot();
+  double t1 = nowMs();
+
+  float tx = camX, ty = camY, tH = camH;
+  if (mode == 0 && S[0].alive) { tx = snap[0].x; ty = snap[0].y; tH = 560.f + (S[0].r - 12.f) * 18.f; }
+  else if (mode == 1) tH = camH * (1.f + 0.12f * dt);
+  else if (mode == 2) {
+    if (!S[spectate].alive || (specT += dt) > 8.f) {
+      float best = 0; specT = 0;
+      for (i32 s = 1; s < NS; s++) if (S[s].alive && S[s].mass > best) { best = S[s].mass; spectate = s; }
+    }
+    tx = snap[spectate].x; ty = snap[spectate].y; tH = 900.f;
+  }
+  float kp = 1.f - expf_(-dt * (mode == 0 ? 14.f : 2.5f)), kz = 1.f - expf_(-dt * 2.f);
+  camX += (tx - camX) * kp; camY += (ty - camY) * kp; camH += (tH - camH) * kz;
+
+  float hh = camH, hw = camH * vw / vh, px = hh * 2.f / vh;
+  frameOut[0] = build(camX, camY, hw, hh);
+  frameOut[1] = renderPrep(camX, camY, hw, hh, px);
+  frameOut[2] = maxK; frameOut[3] = (i32)nruns;
+  frameOut[4] = miniPrep(camX, camY, hw, hh);
+  frameBlk[0] = camX; frameBlk[1] = camY; frameBlk[2] = hw; frameBlk[3] = hh;
+  frameBlk[4] = px; frameBlk[5] = time; frameBlk[6] = vw / cssW; frameBlk[7] = 0;
+  frameBlk[8] = vw; frameBlk[9] = vh; frameBlk[10] = WR; frameBlk[11] = 0;
+  frameMs[0] = (float)(t1 - t0); frameMs[1] = (float)(nowMs() - t1);
+}
 
 EXPORT("instPtr") Inst *instPtr(void) { return inst; }
 EXPORT("maxInst") i32 maxInst(void) { return MAXI; }
