@@ -1,6 +1,6 @@
 # serpent.io
 
-A slither.io-style snake game in a single, self-contained `index.html`: 40 AI bots, a big circular world, boosting, and snakes that burst into food when they die.
+A slither.io-style snake game in a single, self-contained `index.html`: 60 AI bots in five tiers (Rookie, Casual, Hunter, Elite and the rare Legend), a big circular world, boosting, and snakes that burst into food when they die.
 
 **Play:** open `index.html` in any modern browser. It needs no server or install.
 
@@ -20,6 +20,10 @@ A slither.io-style snake game in a single, self-contained `index.html`: 40 AI bo
 - The game uses a fixed ≤1/60 s substep. DPR is capped at 2, and DOM updates for the leaderboard and minimap run only 4× per second.
 
 Measured headless: about 0.3 ms of simulation per frame with 40 bots and about 3,600 food pellets.
+
+- **Detail only near the player:** full collisions, eating and AI run only around the camera. Far-away bots use a cheap statistical model: higher tiers grow faster and almost never die. Food and the bot obstacle map exist only around the player, so the cost doesn't depend on map size.
+- **GPU-built snakes:** the vertex shader builds each snake's ribbon straight from a texture that's a byte copy of the WASM trail memory. The CPU writes 48 bytes per visible snake.
+- **Fixed 60 Hz simulation** with render interpolation, so the game behaves the same at any refresh rate.
 
 ## Rebuilding
 Edit `src/sim.c` or `src/index.html`, then run:
