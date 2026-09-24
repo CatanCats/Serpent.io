@@ -75,7 +75,7 @@ static i32 NS = 40;
 
 static float fx[MAXF], fy[MAXF], fr[MAXF], fv[MAXF];
 static u8 fs[MAXF], fa[MAXF], fph[MAXF];
-static i32 freeList[MAXF], nfree, foodAlive, foodTarget = 3600;
+static i32 freeList[MAXF], nfree, foodAlive, foodHigh, foodTarget = 3600;
 
 static i32 gStart[GC + 1], gCur[GC], gItems[MAXS * MAXSEG], gTmp[MAXS * MAXSEG];
 static i32 fStart[GC + 1], fItems[MAXF], fTmp[MAXF];
@@ -98,6 +98,7 @@ static void spawnFood(float x, float y, float v, i32 skin) {
   if (!nfree) return;
   i32 i = freeList[--nfree];
   fx[i] = x; fy[i] = y; fv[i] = v; fs[i] = (u8)skin; fa[i] = 1; fph[i] = (u8)rnd();
+  if (i >= foodHigh) foodHigh = i + 1;
   fr[i] = minf(3.5f + sqrtf_(v) * 2.6f, 15.f);
   foodAlive++;
 }
@@ -121,10 +122,10 @@ static void buildGrids(void) {
     if (!S[s].alive) continue;
     for (i32 i = 0; i < S[s].n; i++) gItems[gCur[gTmp[k++]]++] = (s << 16) | i;
   }
-  for (i32 i = 0; i < MAXF; i++) { i32 c = fa[i] ? cellOf(fx[i], fy[i]) : -1; fTmp[i] = c; if (c >= 0) fStart[c + 1]++; }
+  for (i32 i = 0; i < foodHigh; i++) { i32 c = fa[i] ? cellOf(fx[i], fy[i]) : -1; fTmp[i] = c; if (c >= 0) fStart[c + 1]++; }
   for (i32 c = 0; c < GC; c++) fStart[c + 1] += fStart[c];
   for (i32 c = 0; c < GC; c++) gCur[c] = fStart[c];
-  for (i32 i = 0; i < MAXF; i++) if (fTmp[i] >= 0) fItems[gCur[fTmp[i]]++] = i;
+  for (i32 i = 0; i < foodHigh; i++) if (fTmp[i] >= 0) fItems[gCur[fTmp[i]]++] = i;
 }
 
 /* Is a circle at (x,y,rad) touching the border or any other snake? */
@@ -366,7 +367,7 @@ static void step(float dt) {
 EXPORT("init") void init(u32 seed, i32 bots) {
   rs = seed ? seed : 1u;
   NS = bots + 1 > MAXS ? MAXS : bots + 1;
-  nfree = 0; foodAlive = 0; tick = 0; playerKiller = -1;
+  nfree = 0; foodAlive = 0; foodHigh = 0; tick = 0; playerKiller = -1;
   for (i32 i = MAXF - 1; i >= 0; i--) { fa[i] = 0; freeList[nfree++] = i; }
   for (i32 s = 0; s < MAXS; s++) S[s].alive = 0;
   buildGrids();
@@ -385,7 +386,8 @@ EXPORT("setInput") void setInput(float ang, i32 boost) { S[0].tang = ang; S[0].w
 
 EXPORT("update") void update(float dt) {
   if (dt > 0.1f) dt = 0.1f;
-  i32 steps = (i32)(dt * 60.f) + 1;
+  i32 steps = (i32)(dt * 60.f + 0.95f);
+  if (steps < 1) steps = 1;
   float h = dt / (float)steps;
   for (i32 i = 0; i < steps; i++) step(h);
 }

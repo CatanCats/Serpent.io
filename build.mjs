@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
 mkdirSync("build", { recursive: true });
 execFileSync("clang", [
-  "--target=wasm32", "-O3", "-flto", "-nostdlib", "-mbulk-memory", "-Wall", "-Wextra",
+  "--target=wasm32", "-O3", "-flto", "-nostdlib", "-mbulk-memory", "-msimd128", "-Wall", "-Wextra",
   "-Wl,--no-entry", "-Wl,--strip-all", "-Wl,--lto-O3",
   "src/sim.c", "-o", "build/sim.wasm",
 ], { stdio: "inherit" });

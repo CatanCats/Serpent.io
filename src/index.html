@@ -11,7 +11,7 @@
 <style>
   :root {
     --bg: #070a12;
-    --panel: rgba(14, 19, 33, .72);
+    --panel: rgba(12, 17, 30, .86);
     --line: rgba(148, 163, 184, .14);
     --text: #e6ebf5;
     --dim: #8391aa;
@@ -26,7 +26,6 @@
   canvas#gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
 
   .glass { background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
-    backdrop-filter: blur(14px) saturate(140%); -webkit-backdrop-filter: blur(14px) saturate(140%);
     box-shadow: 0 10px 40px rgba(0,0,0,.35); }
 
   /* HUD */
@@ -194,8 +193,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     float e=.5-hexD(g);                       // distance to hex edge
     float px=uHalf.y*2./uRes.y/46.;
     float line=1.-smoothstep(.0,px*1.6+.015,e);
-    vec2 id=uv-g; float n=fract(sin(dot(floor(id*2.),vec2(12.9898,78.233)))*43758.5453);
-    vec3 col=mix(vec3(.052,.066,.108),vec3(.066,.084,.136),n*.6+smoothstep(.0,.5,e)*.4);
+    vec3 col=mix(vec3(.052,.066,.108),vec3(.07,.088,.14),smoothstep(.0,.5,e));
     col=mix(col,vec3(.028,.035,.06),line*.85);
     // world border
     float r=length(w), out_=smoothstep(uWR-2.,uWR+2.,r);
@@ -212,7 +210,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   uniform vec2 uCam, uHalf;
   out vec2 vL; out float vR; flat out uvec4 vI;
   void main(){
-    float s = aI.x==0u ? 3.2 : ((aI.w&1u)!=0u ? 1.9 : 1.08);
+    float s = aI.x==0u ? 2.2 : ((aI.w&1u)!=0u ? 1.9 : 1.08);
     vec2 q = vec2(float(gl_VertexID&1), float(gl_VertexID>>1))*2.-1.;
     vec2 l = q*aP.z*s;
     vec2 c = (aP.xy+l-uCam)/uHalf;
@@ -233,7 +231,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
       float pulse=.75+.25*sin(uTime*4.+ph);
       vec3 c=SKA[sk];
       float core=1.-smoothstep(r*.7-aa,r*.7+aa,d);
-      float glow=exp(-d*d/(r*r*1.6))*.9*pulse;
+      float glow=exp(-d*d/(r*r*1.1))*.9*pulse;
       vec3 rgb=c*glow + mix(c,vec3(1),.55*(1.-d/(r*.7)))*core;
       o=vec4(rgb,core); return;
     }
@@ -292,9 +290,9 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   const emptyVao = gl.createVertexArray();
   gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); // premultiplied
 
-  let vw = 0, vh = 0;
+  let vw = 0, vh = 0, resScale = 1;
   function resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2) * resScale;
     vw = Math.round(innerWidth * dpr); vh = Math.round(innerHeight * dpr);
     if (canvas.width !== vw || canvas.height !== vh) { canvas.width = vw; canvas.height = vh; }
   }
@@ -382,7 +380,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
 
   /* ---------------- HUD (throttled DOM work) ---------------- */
   const lbEl = $("lb"), mm = $("mm").getContext("2d");
-  let lastMass = 10, hudT = 0;
+  let lastMass = 10, hudT = 0, lastLb = "";
   function updateHud() {
     const n = W.snakeCount(), rows = [];
     for (let s = 0; s < n; s++) if (W.alive(s)) rows.push([W.mass(s), s]);
@@ -393,7 +391,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
       const nm = (s === 0 ? playerName() : names[s]).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
       html += `<li class="${s === 0 ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[W.skin(s)][0]}"></span><span class="nm">${nm}</span><span>${Math.floor(rows[i][0] * 10)}</span></li>`;
     }
-    lbEl.innerHTML = html;
+    if (html !== lastLb) { lbEl.innerHTML = html; lastLb = html; }
     if (state === "play") {
       $("len").textContent = Math.floor(W.mass(0) * 10);
       $("rank").textContent = rows.findIndex((r) => r[1] === 0) + 1;
@@ -410,17 +408,25 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
         mm.fillStyle = SKINS[W.skin(s)][0] + "88";
         mm.beginPath(); mm.arc(h + W.headX(s) * k, h + W.headY(s) * k, 3 + Math.sqrt(rows[i][0]) * .12, 0, 7); mm.fill();
       }
-      mm.fillStyle = "#fff"; mm.shadowColor = "#fff"; mm.shadowBlur = 10;
-      mm.beginPath(); mm.arc(h + W.headX(0) * k, h + W.headY(0) * k, 5, 0, 7); mm.fill(); mm.shadowBlur = 0;
+      const px = h + W.headX(0) * k, py = h + W.headY(0) * k;
+      mm.fillStyle = "rgba(255,255,255,.25)"; mm.beginPath(); mm.arc(px, py, 9, 0, 7); mm.fill();
+      mm.fillStyle = "#fff"; mm.beginPath(); mm.arc(px, py, 5, 0, 7); mm.fill();
     }
   }
 
   /* ---------------- Main loop ---------------- */
   const perfEl = $("perf");
-  let last = performance.now(), fpsAcc = 0, fpsN = 0, simAcc = 0, perfT = 0, instCount = 0;
+  let last = performance.now(), fpsAcc = 0, fpsN = 0, simAcc = 0, perfT = 0, instCount = 0, avgDt = 1 / 60, resT = 0;
   function frame(now) {
     requestAnimationFrame(frame);
+    if (state !== "play" && now - last < 30) return; // menu / game-over: ~30 fps is plenty
     const dt = Math.min((now - last) / 1000, 0.1); last = now;
+    // dynamic resolution: drop pixels before dropping frames, recover when there is headroom
+    if (state === "play") {
+      avgDt += (dt - avgDt) * 0.05; resT += dt;
+      if (resT > 0.5 && avgDt > 1 / 50 && resScale > 0.55) { resScale = Math.max(0.5, resScale - 0.1); resT = 0; resize(); }
+      else if (resT > 4 && avgDt < 1 / 58 && resScale < 1) { resScale = Math.min(1, resScale + 0.1); resT = 0; resize(); }
+    }
     const t0 = performance.now();
 
     if (state === "play") {
@@ -469,7 +475,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     fpsAcc += dt; fpsN++; simAcc += simMs;
     if ((hudT += dt) > 0.25) { hudT = 0; updateHud(); }
     if ((perfT += dt) > 0.5 && !perfEl.classList.contains("off")) {
-      perfEl.innerHTML = `<b>${Math.round(fpsN / fpsAcc)}</b> fps · sim+build <b>${(simAcc / fpsN).toFixed(2)}</b> ms<br><b>${instCount}</b> sprites · 2 draw calls · <b>${W.foodCount()}</b> food`;
+      perfEl.innerHTML = `<b>${Math.round(fpsN / fpsAcc)}</b> fps · sim+build <b>${(simAcc / fpsN).toFixed(2)}</b> ms<br><b>${instCount}</b> sprites · 2 draw calls · <b>${W.foodCount()}</b> food · res <b>${Math.round(resScale * 100)}%</b>`;
       perfT = 0; fpsAcc = 0; fpsN = 0; simAcc = 0;
     }
   }
