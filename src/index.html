@@ -119,7 +119,7 @@
     <div class="skins" id="skins" role="group" aria-label="Skin"></div>
     <button class="play" id="play">PLAY</button>
     <div class="keys"><kbd>Mouse</kbd> steer · <kbd>Click</kbd>/<kbd>Space</kbd> boost<br><kbd>←</kbd><kbd>→</kbd> steer with keys · Touch: drag to steer, 2 fingers boost · <kbd>P</kbd> perf</div>
-    <div class="tech">WebAssembly sim · WebGL2 instanced · 1 draw call</div>
+    <div class="tech">WebAssembly sim · WebGL2 · 3 draw calls</div>
   </div>
 </div>
 
@@ -205,14 +205,14 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     o=vec4(col,1);
   }`;
 
+  // Food: instanced glowing orbs.
   const VS = `#version 300 es
   layout(location=0) in vec3 aP; layout(location=1) in uvec4 aI;
   uniform vec2 uCam, uHalf;
   out vec2 vL; out float vR; flat out uvec4 vI;
   void main(){
-    float s = aI.x==0u ? 2.2 : ((aI.w&1u)!=0u ? 1.9 : 1.08);
     vec2 q = vec2(float(gl_VertexID&1), float(gl_VertexID>>1))*2.-1.;
-    vec2 l = q*aP.z*s;
+    vec2 l = q*aP.z*2.2;
     vec2 c = (aP.xy+l-uCam)/uHalf;
     gl_Position = vec4(c.x,-c.y,0,1);
     vL=l; vR=aP.z; vI=aI;
@@ -225,40 +225,67 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   out vec4 o;
   void main(){
     float d=length(vL), r=vR, aa=uPx*1.2;
-    uint kind=vI.x, sk=vI.y%12u;
-    if(kind==0u){ // food orb with halo
-      float ph=float(vI.z)*.0245;
-      float pulse=.75+.25*sin(uTime*4.+ph);
-      vec3 c=SKA[sk];
-      float core=1.-smoothstep(r*.7-aa,r*.7+aa,d);
-      float glow=exp(-d*d/(r*r*1.1))*.9*pulse;
-      vec3 rgb=c*glow + mix(c,vec3(1),.55*(1.-d/(r*.7)))*core;
-      o=vec4(rgb,core); return;
-    }
-    float edge=1.-smoothstep(r-aa,r+aa,d);
-    float glow=0.;
-    if((vI.w&1u)!=0u) glow=exp(-pow(max(d-r*.8,0.)/(r*.45),2.))*(.55+.25*sin(uTime*18.))*(1.-edge);
-    if(edge<=0. && glow<=.003) discard;
-    uint idx=vI.z;
-    vec3 base = kind==2u ? SKA[sk] : (((idx>>2u)&1u)==0u ? SKA[sk] : SKB[sk]);
-    float nd=d/r;
-    vec3 c=base*(1.05-.55*nd*nd);                         // spherical shading
-    c+=vec3(1)*.28*exp(-dot(vL/r-vec2(-.28,-.36),vL/r-vec2(-.28,-.36))*7.); // specular
-    c=mix(c*.55,c,smoothstep(1.,.82,nd));                 // rim
-    if(kind==2u){ // head: eyes
-      float ang=float(vI.z)/256.*6.2831853-3.14159265;
-      vec2 f=vec2(cos(ang),sin(ang)), side=vec2(-f.y,f.x);
-      for(int k=0;k<2;k++){
-        vec2 ec=(f*.32+side*(k==0?.45:-.45))*r;
-        float ed=length(vL-ec), er=r*.3;
-        float ew=1.-smoothstep(er-aa,er+aa,ed);
-        c=mix(c,vec3(.97),ew);
-        float pd=length(vL-ec-f*r*.11), pr=r*.16;
-        c=mix(c,vec3(.03,.04,.07),1.-smoothstep(pr-aa,pr+aa,pd));
+    vec3 c=SKA[vI.y%12u];
+    float pulse=.75+.25*sin(uTime*4.+float(vI.z)*.0245);
+    float core=1.-smoothstep(r*.7-aa,r*.7+aa,d);
+    float glow=exp(-d*d/(r*r*1.1))*.9*pulse;
+    o=vec4(c*glow + mix(c,vec3(1),.55*(1.-d/(r*.7)))*core, core);
+  }`;
+
+  // Snakes: one triangle strip per body. The fragment shader finds which
+  // segment circle is on top at this pixel (topmost = nearest the head) and
+  // shades it exactly like a sprite would: same look, ~1x overdraw instead of ~5x.
+  const RVS = `#version 300 es
+  layout(location=0) in vec3 aP; layout(location=1) in uvec4 aI; layout(location=2) in uint aN; layout(location=3) in vec2 aD;
+  uniform vec2 uCam, uHalf;
+  out float vT, vV; out vec2 vDir; flat out uint vSk, vFl; flat out float vR, vNl;
+  void main(){
+    vec2 c=(aP.xy-uCam)/uHalf;
+    gl_Position=vec4(c.x,-c.y,0,1);
+    float W=(aI.y&1u)!=0u ? 1.9 : 1.08;
+    vT=aP.z; vV=(aI.y&128u)!=0u ? W : -W;
+    vDir=aD;
+    vSk=aI.x%12u; vFl=aI.y; vR=float(aI.z)/5.; vNl=float(aN);
+  }`;
+  const RFS = `#version 300 es
+  precision highp float;
+  ${palGLSL}
+  uniform float uPx, uTime;
+  in float vT, vV; in vec2 vDir; flat in uint vSk, vFl; flat in float vR, vNl;
+  out vec4 o;
+  const float SP=.42, CR=1./.42;
+  vec3 shade(float k, vec2 l, float nd, vec2 f){
+    uint ki=uint(k);
+    vec3 base = ki==0u ? SKA[vSk] : (((ki>>2u)&1u)==0u ? SKA[vSk] : SKB[vSk]);
+    vec3 c=base*(1.05-.55*nd*nd);
+    vec2 sp=l-vec2(-.28,-.36);
+    c+=vec3(.28)*exp(-dot(sp,sp)*7.);
+    c=mix(c*.55,c,smoothstep(1.,.82,nd));
+    if(ki==0u){ // head: eyes
+      vec2 sd=vec2(-f.y,f.x); float aa=uPx*1.2/vR;
+      for(int e=0;e<2;e++){
+        vec2 ec=f*.32+sd*(e==0?.45:-.45);
+        c=mix(c,vec3(.97),1.-smoothstep(.3-aa,.3+aa,length(l-ec)));
+        c=mix(c,vec3(.03,.04,.07),1.-smoothstep(.16-aa,.16+aa,length(l-ec-f*.11)));
       }
     }
-    vec3 gc=SKA[sk]*1.2;
-    o=vec4(c*edge+gc*glow, edge);
+    return c;
+  }
+  void main(){
+    float aa=uPx*1.2/vR, av=abs(vV);
+    vec2 f=normalize(vDir), side=vec2(-f.y,f.x);
+    float h=av<1. ? sqrt(1.-av*av)*CR : 0.;
+    float k0=clamp(av<1. ? ceil(vT-h) : floor(vT+.5), 0., vNl), k1=min(k0+1.,vNl);
+    // local circle coords in world orientation (r units); t grows toward the tail
+    vec2 l0=-f*(vT-k0)*SP+side*vV, l1=-f*(vT-k1)*SP+side*vV;
+    float n0=length(l0), n1=length(l1);
+    float e0=1.-smoothstep(1.-aa,1.+aa,n0), e1=(1.-smoothstep(1.-aa,1.+aa,n1))*(1.-e0);
+    float a=e0+e1;
+    float glow=0.;
+    if((vFl&1u)!=0u) glow=exp(-pow(max(av-.8,0.)/.45,2.))*(.55+.25*sin(uTime*18.))*(1.-a);
+    if(a<=0. && glow<=.003) discard;
+    vec3 c=(e0>0. ? shade(k0,l0,n0,f)*e0 : vec3(0)) + (e1>0. ? shade(k1,l1,n1,f)*e1 : vec3(0));
+    o=vec4(c+SKA[vSk]*1.2*glow, a);
   }`;
 
   function prog(vs, fs) {
@@ -274,7 +301,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     for (let i = 0; i < n; i++) { const name = gl.getActiveUniform(p, i).name; u[name] = gl.getUniformLocation(p, name); }
     return { p, u };
   }
-  const bgP = prog(BG_VS, BG_FS), inP = prog(VS, FS);
+  const bgP = prog(BG_VS, BG_FS), inP = prog(VS, FS), ribP = prog(RVS, RFS);
 
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
@@ -287,6 +314,20 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   gl.enableVertexAttribArray(1);
   gl.vertexAttribIPointer(1, 4, gl.UNSIGNED_BYTE, 16, 12);
   gl.vertexAttribDivisor(1, 1);
+  const ribBytes = new Uint8Array(W.memory.buffer, W.ribPtr(), W.maxVerts() * 20);
+  const ribVao = gl.createVertexArray();
+  gl.bindVertexArray(ribVao);
+  const ribVbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, ribVbo);
+  gl.bufferData(gl.ARRAY_BUFFER, ribBytes.byteLength, gl.STREAM_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribIPointer(1, 4, gl.UNSIGNED_BYTE, 20, 12);
+  gl.enableVertexAttribArray(2);
+  gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_SHORT, 20, 16);
+  gl.enableVertexAttribArray(3);
+  gl.vertexAttribPointer(3, 2, gl.BYTE, true, 20, 18);
   const emptyVao = gl.createVertexArray();
   gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); // premultiplied
 
@@ -416,7 +457,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
 
   /* ---------------- Main loop ---------------- */
   const perfEl = $("perf");
-  let last = performance.now(), fpsAcc = 0, fpsN = 0, simAcc = 0, perfT = 0, instCount = 0, avgDt = 1 / 60, resT = 0;
+  let lastVerts = 0, last = performance.now(), fpsAcc = 0, fpsN = 0, simAcc = 0, perfT = 0, instCount = 0, avgDt = 1 / 60, resT = 0;
   function frame(now) {
     requestAnimationFrame(frame);
     if (state !== "play" && now - last < 30) return; // menu / game-over: ~30 fps is plenty
@@ -453,6 +494,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
 
     const halfH = camH, halfW = camH * vw / vh;
     instCount = W.build(camX, camY, halfW, halfH);
+    const vertCount = W.buildRibbons(camX, camY, halfW, halfH);
     const simMs = performance.now() - t0;
 
     // draw: background pass + one instanced pass
@@ -471,11 +513,19 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     gl.uniform1f(inP.u.uPx, halfH * 2 / vh); gl.uniform1f(inP.u.uTime, now / 1000);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instCount);
 
+    gl.useProgram(ribP.p); gl.bindVertexArray(ribVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, ribVbo);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, ribBytes, 0, vertCount * 20);
+    gl.uniform2f(ribP.u.uCam, camX, camY); gl.uniform2f(ribP.u.uHalf, halfW, halfH);
+    gl.uniform1f(ribP.u.uPx, halfH * 2 / vh); gl.uniform1f(ribP.u.uTime, now / 1000);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertCount);
+    lastVerts = vertCount;
+
     // stats
     fpsAcc += dt; fpsN++; simAcc += simMs;
     if ((hudT += dt) > 0.25) { hudT = 0; updateHud(); }
     if ((perfT += dt) > 0.5 && !perfEl.classList.contains("off")) {
-      perfEl.innerHTML = `<b>${Math.round(fpsN / fpsAcc)}</b> fps · sim+build <b>${(simAcc / fpsN).toFixed(2)}</b> ms<br><b>${instCount}</b> sprites · 2 draw calls · <b>${W.foodCount()}</b> food · res <b>${Math.round(resScale * 100)}%</b>`;
+      perfEl.innerHTML = `<b>${Math.round(fpsN / fpsAcc)}</b> fps · sim+build <b>${(simAcc / fpsN).toFixed(2)}</b> ms<br><b>${instCount}</b> food sprites · <b>${lastVerts}</b> snake verts · 3 draw calls · res <b>${Math.round(resScale * 100)}%</b>`;
       perfT = 0; fpsAcc = 0; fpsN = 0; simAcc = 0;
     }
   }

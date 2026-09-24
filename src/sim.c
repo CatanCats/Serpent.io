@@ -31,7 +31,10 @@ typedef unsigned char u8;
 #define CELL 100.f       /* spatial hash cell size (>= max query radius) */
 #define GN 80            /* grid cells per side: 2*WR/CELL */
 #define GC (GN * GN)
-#define MAXI 16384       /* render instances */
+#define MAXI 8192        /* food sprites */
+#define MAXV 12288       /* ribbon vertices */
+#define MC 32.f          /* owner-map cell */
+#define MN 250           /* owner-map cells per side: 2*WR/MC */
 #define POOL 32768       /* segment grid nodes */
 #define REBUILD 32       /* steps between grid compactions */
 
@@ -91,6 +94,10 @@ static i32 freeList[MAXF], nfree, pend[MAXF], npend, foodAlive, foodHigh, foodTa
 
 static i32 gHead[GC], gNext[POOL], gN; static u32 gC[POOL]; static u8 gS[POOL];
 static i32 fHead[GC], fNext[MAXF];
+/* Owner map: which snake (id+1) left a trail point in each 32x32 area, 255 =
+   several. Bots test danger with a handful of byte reads. Cleared at compaction,
+   so a vacated tail area stays "occupied" for at most REBUILD steps (safe side). */
+static u8 omap[MN * MN];
 
 typedef struct { float x, y, r; u32 info; } Inst;
 static Inst inst[MAXI];
@@ -116,6 +123,8 @@ static void segInsert(i32 s, u32 c) {
   if (gN >= POOL) return; /* compaction is forced before this can matter */
   i32 i = gN++, cell = cellOf(UQ(trx[s][c & RMASK]), UQ(try_[s][c & RMASK]));
   gS[i] = (u8)s; gC[i] = c; gNext[i] = gHead[cell]; gHead[cell] = i;
+  i32 mx = (i32)((UQ(trx[s][c & RMASK]) + WR) * (1.f / MC)), my = (i32)((UQ(try_[s][c & RMASK]) + WR) * (1.f / MC));
+  if ((u32)mx < MN && (u32)my < MN) { u8 *m = &omap[my * MN + mx], v = (u8)(s + 1); *m = *m == 0 || *m == v ? v : 255; }
 }
 /* node -> valid segment of a live snake? */
 static i32 segLive(i32 i) {
@@ -126,6 +135,7 @@ static void foodInsert(i32 i) { i32 c = cellOf(fx[i], fy[i]); fNext[i] = fHead[c
 
 static void rebuild(void) {
   for (i32 c = 0; c < GC; c++) gHead[c] = -1, fHead[c] = -1;
+  __builtin_memset(omap, 0, sizeof omap);
   gN = 0;
   for (i32 s = 0; s < NS; s++)
     if (S[s].alive) for (i32 j = S[s].n - 1; j >= 0; j--) segInsert(s, S[s].pc - 1u - (u32)j);
@@ -148,23 +158,18 @@ static void randomDisk(float rad, float *x, float *y) {
   *x = cosf_(a) * d; *y = sinf_(a) * d;
 }
 
-/* Is a circle at (x,y,rad) touching the border or any other snake? */
+/* Is a circle at (x,y,rad) near the border or another snake? (coarse, for AI) */
 static i32 dangerAt(i32 self, float x, float y, float rad) {
   float lim = WR - rad - 30.f;
   if (x * x + y * y > lim * lim) return 1;
-  i32 cx = cellX(x), cy = cellX(y);
-  for (i32 gy = cy - 1; gy <= cy + 1; gy++) {
-    if (gy < 0 || gy >= GN) continue;
-    for (i32 gx = cx - 1; gx <= cx + 1; gx++) {
-      if (gx < 0 || gx >= GN) continue;
-      for (i32 i = gHead[gy * GN + gx]; i >= 0; i = gNext[i]) {
-        i32 o = gS[i];
-        if (o == self || !segLive(i)) continue;
-        u32 k = gC[i] & RMASK;
-        float dx = UQ(trx[o][k]) - x, dy = UQ(try_[o][k]) - y, t = rad + S[o].r;
-        if (dx * dx + dy * dy < t * t) return 1;
-      }
-    }
+  float R = rad + 30.f;
+  i32 x0 = (i32)((x - R + WR) * (1.f / MC)), x1 = (i32)((x + R + WR) * (1.f / MC));
+  i32 y0 = (i32)((y - R + WR) * (1.f / MC)), y1 = (i32)((y + R + WR) * (1.f / MC));
+  if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 >= MN) x1 = MN - 1; if (y1 >= MN) y1 = MN - 1;
+  u8 me = (u8)(self + 1);
+  for (i32 my = y0; my <= y1; my++) {
+    const u8 *row = &omap[my * MN];
+    for (i32 mx = x0; mx <= x1; mx++) if (row[mx] && row[mx] != me) return 1;
   }
   return 0;
 }
@@ -422,8 +427,7 @@ static void push(float x, float y, float r, u32 kind, u32 skin, u32 extra, u32 f
   p->info = kind | (skin << 8) | ((extra & 255u) << 16) | (flags << 24);
 }
 
-/* Writes view-culled instances (food, then snakes tail->head, player on top).
-   Segment i is the trail sampled at arc length i*spacing from the head. */
+/* View-culled food sprites. */
 EXPORT("build") i32 build(float cx, float cy, float hw, float hh) {
   i32 n = 0;
   float x0 = cx - hw - 60.f, x1 = cx + hw + 60.f, y0 = cy - hh - 60.f, y1 = cy + hh + 60.f;
@@ -432,26 +436,84 @@ EXPORT("build") i32 build(float cx, float cy, float hw, float hh) {
     for (i32 gx = gx0; gx <= gx1; gx++)
       for (i32 i = fHead[gy * GN + gx]; i >= 0; i = fNext[i])
         if (fa[i] && fx[i] > x0 && fx[i] < x1 && fy[i] > y0 && fy[i] < y1) push(fx[i], fy[i], fr[i], 0, fs[i], fph[i], 0, &n);
-  for (i32 t = 1; t <= NS; t++) {
-    i32 s = t == NS ? 0 : t;
-    Snake *k = &S[s];
-    if (!k->alive) continue;
-    float m = k->r * 2.f;
-    float dx = k->hx - TX(s, 0), dy = k->hy - TY(s, 0);
-    float u = 1.f - minf(sqrtf_(dx * dx + dy * dy) / k->spacing, 1.f);
-    u32 flags = (u32)k->boost | (s == 0 ? 2u : 0u);
-    for (i32 i = k->n - 1; i >= 1; i--) {
-      float ax = TX(s, i - 1), ay = TY(s, i - 1);
-      float x = ax + (TX(s, i) - ax) * u, y = ay + (TY(s, i) - ay) * u;
-      if (x < x0 - m || x > x1 + m || y < y0 - m || y > y1 + m) continue;
-      /* stripe index counts from the tail so stripes stay attached to the body */
-      push(x, y, k->r, 1u, (u32)k->skin, (k->pc - (u32)i), flags, &n);
-    }
-    if (k->hx > x0 - m && k->hx < x1 + m && k->hy > y0 - m && k->hy < y1 + m)
-      push(k->hx, k->hy, k->r, 2u, (u32)k->skin, (u32)((k->ang + PI) * (256.f / TAU)), flags, &n);
-  }
   return n;
 }
+
+/* ---------- snake ribbons ----------
+   Each snake is ONE triangle strip along its body (all snakes joined with
+   degenerate triangles -> one draw call). The fragment shader reconstructs the
+   classic overlapping-circle scales analytically, so the look is unchanged but
+   every pixel is shaded once instead of ~5 times. */
+typedef struct { float x, y, t; u8 skin, flags, rq, spare; unsigned short nlast; signed char dx, dy; } Vert;
+static Vert rib[MAXV];
+static float qx[MAXSEG + 3], qy[MAXSEG + 3], qt[MAXSEG + 3];
+static i32 nv;
+
+static void vput(float x, float y, float t, u8 skin, u8 fl, u8 rq, float tx, float ty, u32 nl) {
+  if (nv >= MAXV) return;
+  Vert *v = &rib[nv++];
+  v->x = x; v->y = y; v->t = t; v->skin = skin; v->flags = fl; v->rq = rq; v->spare = 0; v->nlast = (unsigned short)nl;
+  v->dx = (signed char)(i32)(tx * 127.f); v->dy = (signed char)(i32)(ty * 127.f); /* tangent, snorm8 */
+}
+
+EXPORT("buildRibbons") i32 buildRibbons(float cx, float cy, float hw, float hh) {
+  nv = 0;
+  for (i32 o = 1; o <= NS; o++) {
+    i32 s = o == NS ? 0 : o;
+    Snake *k = &S[s];
+    if (!k->alive) continue;
+    float r = k->r, W = k->boost ? 1.9f : 1.08f, hr = r * W, R = 1.f / 0.42f, m = hr * 2.f + 20.f;
+    float x0 = cx - hw - m, x1 = cx + hw + m, y0 = cy - hh - m, y1 = cy + hh + m;
+    i32 n = k->n;
+    /* integer pre-cull on the raw 16-bit trail: skip snakes wholly off-screen */
+    {
+      i32 qx0 = (i32)(x0 * 8.f), qx1 = (i32)(x1 * 8.f), qy0 = (i32)(y0 * 8.f), qy1 = (i32)(y1 * 8.f), any = 0;
+      const short *X = trx[s], *Y = try_[s];
+      for (i32 i = 0; i < n && !any; i++) {
+        u32 j = (k->pc - 1u - (u32)i) & RMASK;
+        any = X[j] > qx0 && X[j] < qx1 && Y[j] > qy0 && Y[j] < qy1;
+      }
+      if (!any && !(k->hx > x0 && k->hx < x1 && k->hy > y0 && k->hy < y1)) continue;
+    }
+    /* sample the path tail -> head, with a cap point beyond each end */
+    float dx = k->hx - TX(s, 0), dy = k->hy - TY(s, 0);
+    float u = 1.f - minf(sqrtf_(dx * dx + dy * dy) / k->spacing, 1.f);
+    i32 q = 1;
+    for (i32 i = n - 1; i >= 1; i--) {
+      float ax = TX(s, i - 1), ay = TY(s, i - 1);
+      qx[q] = ax + (TX(s, i) - ax) * u; qy[q] = ay + (TY(s, i) - ay) * u; qt[q] = (float)i; q++;
+    }
+    qx[q] = k->hx; qy[q] = k->hy; qt[q] = 0; q++;
+    float ca = cosf_(k->ang), sa = sinf_(k->ang);
+    qx[q] = k->hx + ca * r; qy[q] = k->hy + sa * r; qt[q] = -R; q++;
+    { float ex = qx[1] - qx[2], ey = qy[1] - qy[2], el = sqrtf_(ex * ex + ey * ey);
+      if (el < 1e-3f) { ex = -ca; ey = -sa; el = 1; }
+      qx[0] = qx[1] + ex / el * r; qy[0] = qy[1] + ey / el * r; qt[0] = (float)(n - 1) + R; }
+    u8 fl = (u8)(k->boost | (s == 0 ? 2 : 0)), rq = (u8)(i32)(r * 5.f + 0.5f), sk = (u8)k->skin;
+    i32 open = 0;
+    for (i32 j = 0; j < q; j++) {
+      i32 a = j > 0 ? j - 1 : j, b = j < q - 1 ? j + 1 : j;
+      i32 vis = (qx[j] > x0 && qx[j] < x1 && qy[j] > y0 && qy[j] < y1) ||
+                (qx[a] > x0 && qx[a] < x1 && qy[a] > y0 && qy[a] < y1) ||
+                (qx[b] > x0 && qx[b] < x1 && qy[b] > y0 && qy[b] < y1);
+      if (!vis) { open = 0; continue; }
+      float tx = qx[b] - qx[a], ty = qy[b] - qy[a], tl = sqrtf_(tx * tx + ty * ty);
+      if (tl < 1e-4f) { tx = ca; ty = sa; tl = 1; }
+      tx /= tl; ty /= tl;
+      float nx = -ty * hr, ny = tx * hr;
+      if (!open && nv > 0 && nv + 2 < MAXV) { /* degenerate join */
+        rib[nv] = rib[nv - 1]; nv++;
+        vput(qx[j] + nx, qy[j] + ny, qt[j], sk, fl | 128, rq, tx, ty, (u32)(n - 1));
+      }
+      open = 1;
+      vput(qx[j] + nx, qy[j] + ny, qt[j], sk, fl | 128, rq, tx, ty, (u32)(n - 1));
+      vput(qx[j] - nx, qy[j] - ny, qt[j], sk, fl, rq, tx, ty, (u32)(n - 1));
+    }
+  }
+  return nv;
+}
+EXPORT("ribPtr") Vert *ribPtr(void) { return rib; }
+EXPORT("maxVerts") i32 maxVerts(void) { return MAXV; }
 
 EXPORT("instPtr") Inst *instPtr(void) { return inst; }
 EXPORT("maxInst") i32 maxInst(void) { return MAXI; }
