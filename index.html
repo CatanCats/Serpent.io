@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#070a12">
+<title>Serpent.io</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #070a12;
+    --panel: rgba(14, 19, 33, .72);
+    --line: rgba(148, 163, 184, .14);
+    --text: #e6ebf5;
+    --dim: #8391aa;
+    --accent: #34d399;
+    --accent2: #38bdf8;
+    --danger: #fb7185;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
+    font-family: Outfit, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-user-select: none; user-select: none; touch-action: none; }
+  canvas#gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
+
+  .glass { background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
+    backdrop-filter: blur(14px) saturate(140%); -webkit-backdrop-filter: blur(14px) saturate(140%);
+    box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+
+  /* HUD */
+  .hud { position: fixed; pointer-events: none; transition: opacity .3s; }
+  body:not(.playing) .hud.game { opacity: 0; }
+  #stats { left: max(16px, env(safe-area-inset-left)); bottom: max(16px, env(safe-area-inset-bottom)); padding: 14px 18px; min-width: 180px; }
+  #stats .label { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+  #stats .big { font-size: 36px; font-weight: 800; line-height: 1.05; font-variant-numeric: tabular-nums;
+    background: linear-gradient(90deg, var(--accent), var(--accent2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  #stats .sub { font-size: 14px; color: var(--dim); margin-top: 4px; font-variant-numeric: tabular-nums; }
+  #stats .sub b { color: var(--text); font-weight: 600; }
+
+  #board { right: max(16px, env(safe-area-inset-right)); top: max(16px, env(safe-area-inset-top)); width: 220px; padding: 12px 14px; }
+  #board h3 { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); font-weight: 600; margin-bottom: 8px; }
+  #board ol { list-style: none; padding: 0; font-size: 14px; font-variant-numeric: tabular-nums; }
+  #board li { display: flex; gap: 8px; align-items: center; padding: 2px 0; color: #c3cbe0; }
+  #board li .n { width: 18px; color: var(--dim); font-size: 12px; }
+  #board li .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  #board li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #board li.me { color: #fff; font-weight: 600; }
+  #board li.me .nm::after { content: " •"; color: var(--accent); }
+
+  #mini { right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); width: 132px; height: 132px; border-radius: 50%; padding: 0; overflow: hidden; }
+  #mini canvas { width: 100%; height: 100%; display: block; }
+
+  #perf { left: max(16px, env(safe-area-inset-left)); top: max(16px, env(safe-area-inset-top)); padding: 8px 12px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); border-radius: 10px; }
+  #perf b { color: var(--text); font-weight: 500; }
+  #perf.off { display: none; }
+
+  /* Menus */
+  .screen { position: fixed; inset: 0; display: grid; place-items: center; padding: 16px; transition: opacity .35s, visibility .35s; }
+  .screen.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+  .card { width: min(420px, 100%); padding: 32px 28px 26px; text-align: center; }
+  .logo { font-size: clamp(44px, 11vw, 64px); font-weight: 800; letter-spacing: -.03em; line-height: 1;
+    background: linear-gradient(100deg, #34d399 0%, #38bdf8 45%, #a78bfa 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .logo span { color: var(--text); -webkit-text-fill-color: var(--text); opacity: .9; }
+  .tag { margin: 10px 0 24px; color: var(--dim); font-size: 15px; }
+  input#name { width: 100%; font: inherit; font-size: 17px; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--line);
+    background: rgba(2,6,16,.55); color: var(--text); outline: none; text-align: center; transition: border-color .2s, box-shadow .2s; -webkit-user-select: text; user-select: text; }
+  input#name:focus { border-color: rgba(56,189,248,.6); box-shadow: 0 0 0 4px rgba(56,189,248,.15); }
+  .skins { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin: 18px 0 20px; }
+  .skin { width: 28px; height: 28px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0;
+    box-shadow: inset 0 -4px 8px rgba(0,0,0,.35); transition: transform .15s, border-color .15s; }
+  .skin:hover { transform: scale(1.12); }
+  .skin[aria-pressed="true"] { border-color: #fff; transform: scale(1.15); }
+  button.play { width: 100%; font: inherit; font-weight: 800; font-size: 18px; letter-spacing: .04em; padding: 15px; border: 0; border-radius: 12px; cursor: pointer; color: #04130d;
+    background: linear-gradient(100deg, #34d399, #38bdf8); box-shadow: 0 8px 30px rgba(52,211,153,.3); transition: transform .12s, box-shadow .2s, filter .2s; }
+  button.play:hover { filter: brightness(1.08); box-shadow: 0 10px 36px rgba(56,189,248,.35); }
+  button.play:active { transform: scale(.98); }
+  .keys { margin-top: 18px; color: var(--dim); font-size: 13px; line-height: 1.9; }
+  kbd { font: 12px ui-monospace, monospace; padding: 2px 7px; border-radius: 6px; border: 1px solid var(--line); background: rgba(255,255,255,.04); color: #cbd5e1; }
+  .tech { margin-top: 14px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #56627a; }
+
+  .over h2 { font-size: 34px; font-weight: 800; letter-spacing: -.02em; }
+  .over .by { color: var(--dim); margin: 6px 0 20px; min-height: 1.4em; }
+  .over .by b { color: var(--danger); font-weight: 600; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 22px; }
+  .grid3 div { padding: 12px 6px; border-radius: 12px; background: rgba(2,6,16,.45); border: 1px solid var(--line); }
+  .grid3 b { display: block; font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .grid3 span { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); }
+  .new { color: var(--accent) !important; }
+
+  @media (max-width: 640px) {
+    #board { width: 164px; padding: 10px 12px; }
+    #board li { font-size: 12px; }
+    #board li:nth-child(n+6) { display: none; }
+    #mini { width: 96px; height: 96px; }
+    #stats { padding: 10px 14px; min-width: 0; }
+    #stats .big { font-size: 28px; }
+    #perf { display: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div id="perf" class="hud glass"></div>
+<div id="stats" class="hud game glass">
+  <div class="label">Length</div>
+  <div class="big" id="len">10</div>
+  <div class="sub">Rank <b id="rank">–</b> of <b id="total">–</b> · Kills <b id="kills">0</b></div>
+</div>
+<div id="board" class="hud glass"><h3>Leaderboard</h3><ol id="lb"></ol></div>
+<div id="mini" class="hud game glass"><canvas id="mm" width="264" height="264"></canvas></div>
+
+<div id="menu" class="screen">
+  <div class="card glass">
+    <div class="logo">serpent<span>.io</span></div>
+    <p class="tag">Eat. Grow. Cut them off.</p>
+    <input id="name" maxlength="16" placeholder="Your nickname" autocomplete="off" spellcheck="false">
+    <div class="skins" id="skins" role="group" aria-label="Skin"></div>
+    <button class="play" id="play">PLAY</button>
+    <div class="keys"><kbd>Mouse</kbd> steer · <kbd>Click</kbd>/<kbd>Space</kbd> boost<br><kbd>←</kbd><kbd>→</kbd> steer with keys · Touch: drag to steer, 2 fingers boost · <kbd>P</kbd> perf</div>
+    <div class="tech">WebAssembly sim · WebGL2 instanced · 1 draw call</div>
+  </div>
+</div>
+
+<div id="over" class="screen hidden">
+  <div class="card glass over">
+    <h2>You were eaten</h2>
+    <p class="by" id="by"></p>
+    <div class="grid3">
+      <div><b id="oLen">0</b><span>Length</span></div>
+      <div><b id="oKills">0</b><span>Kills</span></div>
+      <div><b id="oBest">0</b><span>Best</span></div>
+    </div>
+    <button class="play" id="again">PLAY AGAIN</button>
+    <div class="keys"><kbd>Enter</kbd> to respawn · <kbd>Esc</kbd> menu</div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const WASM_BASE64 = "AGFzbQEAAAABRQ1gAX8Bf2AEfX19fQF/YAABf2ABfwF9YAJ/fwBgAABgBH99f38AYAN9f38AYAJ9fwBgAX8AYAF9AGAEf319fQF/YAABfQMZGAABAgMDBAUGBwIFAgADAgMACAACCQoLDAQFAXABAQEFAwEAHQYJAX8BQfD48wALB84BFQZtZW1vcnkCAARpbml0AAULc3Bhd25QbGF5ZXIAFApraWxsUGxheWVyAAoIc2V0SW5wdXQAEQZ1cGRhdGUAFQVidWlsZAABB2luc3RQdHIACQdtYXhJbnN0AA4Ld29ybGRSYWRpdXMAFwpzbmFrZUNvdW50ABMFYWxpdmUAAARtYXNzAA0GcmFkaXVzAA8FaGVhZFgAAwVoZWFkWQAEBWtpbGxzAAwEc2tpbgASCHNlZ21lbnRzABAJZm9vZENvdW50AAIGa2lsbGVyAAsKtoUBGBIAIABB1ABsQaiPg4AAaigCAAv1CAkCfQF/AX0CfwF9A38BfQd/A30CQAJAIAAgApJDAABwQpIiBEMAAHpFkkMK1yM8lCIFi0MAAABPXUUNACAFqCEGDAELQYCAgIB4IQYLAkACQCAAIAKTQwAAcMKSIgdDAAB6RZJDCtcjPJQiAotDAAAAT11FDQAgAqghCAwBC0GAgICAeCEIC0EAIQkCQAJAIAEgA5JDAABwQpIiCkMAAHpFkkMK1yM8lCICi0MAAABPXUUNACACqCELDAELQYCAgIB4IQsLIAtBzwAgC0HPAEgbIgxBACAMQQBKGyENAkACQCABIAOTQwAAcMKSIg5DAAB6RZJDCtcjPJQiAotDAAAAT11FDQAgAqghCwwBC0GAgICAeCELCwJAIAtBzwAgC0HPAEgbIgsgDUoNACAIQc8AIAhBzwBIGyIIIAZBzwAgBkHPAEgbIg9BACAPQQBKG0oNACAIQQAgCEEAShshEEEAIQkgC0EAIAtBAEobIREDQCARQdAAbCESIBAhEwNAAkAgEyASakECdCILQbSug4AAaigCACIGIAtBsK6DgABqKAIAIgtMDQAgBiALayEIIAtBAnRBwPaEgABqIQsDQAJAIAsoAgAiBkGgiICAAGotAABFDQAgCUH//wNKDQAgCUEEdCINQej0m4AAaiAGQQJ0IhRBgKCMgABqKgIAOAIAIA1B5PSbgABqIBRBwOeJgABqKgIAOAIAIA1B4PSbgABqIBRBgK+HgABqKgIAOAIAIA1B7PSbgABqIAZBwNiOgABqLQAAQQh0IAZB0KaPgABqLQAAQRB0cjYCACAJQQFqIQkLIAtBBGohCyAIQX9qIggNAAsLIA8gE0ohCyATQQFqIRMgCw0ACyAMIBFKIQsgEUEBaiERIAsNAAsLAkBBACgChIiAgAAiFUEBSA0AQQEhEwNAAkBBACATIBMgFUYiEBsiBkHUAGwiC0Goj4OAAGooAgBFDQAgC0Gkj4OAAGooAgAiCEEBSA0AIAtB8I6DgABqIQwgBkELdCAIQQJ0akF8aiEGIAhBf2ohCCALQbSPg4AAaiESIBBBAXQhDyALQayPg4AAaiERIAogC0H8joOAAGoqAgAiFiAWkiICkiEXIA4gApMhBSAEIAKSIQEgByACkyEDA0AgCCELAkAgBkHg9I+AAGoqAgAiAiADXQ0AIAIgAV4NACAGQeD0lYAAaioCACIAIAVdDQAgACAXXg0AQQEhDSALIRQCQCALDQACQAJAIAwqAgBD2w9JQJJDg/kiQpQiGEMAAIBPXSAYQwAAAABgcUUNACAYqSEUDAELQQAhFAtBAiENCyAJQf//A0oNACAJQQR0IghB6PSbgABqIBY4AgAgCEHk9JuAAGogADgCACAIQeD0m4AAaiACOAIAIAhB7PSbgABqIBEoAgAgD3JBGHQgFEEQdEGAgPwHcXIgEigCAEEIdCANcnI2AgAgCUEBaiEJCyAGQXxqIQYgC0F/aiEIIAtBAWpBAUsNAAsLIBNBAWohEyAQRQ0ACwsgCQsLAEEAKAKUiICAAAsRACAAQQt0QeD0j4AAaioCAAsRACAAQQt0QeD0lYAAaioCAAvLCgUCfwF9AX8BfQF/I4CAgIAAQRBrIgIkgICAgABBACEDQQBBfzYCiIiAgABBACAAQQEgAEEBSxs2AoCIgIAAQQAgAUEvIAFBL0gbQQFqNgKEiICAAEEAQQA2ApSIgIAAQQBBADYCmIiAgABBoIiAgABBAEGQzgD8CwBBj84AIQADQCADQcDWgIAAaiAAQXxqNgIAIANBvNaAgABqIABBfWo2AgAgA0G41oCAAGogAEF+ajYCACADQbTWgIAAaiAAQX9qNgIAIANBsNaAgABqIAA2AgAgAEF7aiEAIANBFGoiA0HAuAJHDQALQQBBkM4ANgKQiICAAEEAQQA2ApSug4AAQQBBADYCwK2DgABBAEEANgLsrIOAAEEAQQA2Apisg4AAQQBBADYCxKuDgABBAEEANgLwqoOAAEEAQQA2Apyqg4AAQQBBADYCyKmDgABBAEEANgL0qIOAAEEAQQA2AqCog4AAQQBBADYCzKeDgABBAEEANgL4poOAAEEAQQA2AqSmg4AAQQBBADYC0KWDgABBAEEANgL8pIOAAEEAQQA2Aqikg4AAQQBBADYC1KODgABBAEEANgKAo4OAAEEAQQA2Aqyig4AAQQBBADYC2KGDgABBAEEANgKEoYOAAEEAQQA2ArCgg4AAQQBBADYC3J+DgABBAEEANgKIn4OAAEEAQQA2ArSeg4AAQQBBADYC4J2DgABBAEEANgKMnYOAAEEAQQA2Aricg4AAQQBBADYC5JuDgABBAEEANgKQm4OAAEEAQQA2Aryag4AAQQBBADYC6JmDgABBAEEANgKUmYOAAEEAQQA2AsCYg4AAQQBBADYC7JeDgABBAEEANgKYl4OAAEEAQQA2AsSWg4AAQQBBADYC8JWDgABBAEEANgKclYOAAEEAQQA2AsiUg4AAQQBBADYC9JODgABBAEEANgKgk4OAAEEAQQA2AsySg4AAQQBBADYC+JGDgABBAEEANgKkkYOAAEEAQQA2AtCQg4AAQQBBADYC/I+DgABBAEEANgKoj4OAABCGgICAAAJAAkAgAUEBSA0AQQEhAwNAQQBBACgCgIiAgAAiAEENdCAAcyIAQRF2IABzIgBBBXQgAHMiAEENdCAAcyIBQRF2IAFzIgFBBXQgAXMiATYCgIiAgAAgAyAAQQh2s0MAAIAzlCIEIAQgBJSUQwAAAkSUQwAAIEGSQQEgAUEMcBCHgICAACADQQFqIgNBACgChIiAgABIDQALQQAoApSIgIAAQZAcTg0BCwNAQwAAdUUgAkEMaiACQQhqEIiAgIAAQQBBACgCgIiAgAAiA0ENdCADcyIDQRF2IANzIgNBBXQgA3MiAUENdCABcyIDQRF2IANzIgNBBXQgA3MiADYCgIiAgABBACgClIiAgAAhAwJAQQAoApCIgIAAIgVFDQAgAioCCCEEIAIqAgwhBkEAIAVBf2oiBTYCkIiAgABBACADQQFqIgM2ApSIgIAAIAVBAnRBsNaAgABqKAIAIgVBwNiOgABqIABBDHA6AAAgBUGgiICAAGpBAToAACAFQQJ0IgdBgK+HgABqIAY4AgAgB0HA54mAAGogBDgCACAHQbC97YAAaiABQQh2s0MAAIAzlCIEIASUQ5qZGUCUQ5qZGT+SIgQ4AgBBACAAQQ10IABzIgBBEXYgAHMiAEEFdCAAcyIANgKAiICAACAFQdCmj4AAaiAAOgAAIAdBgKCMgABqIASRQ2ZmJkCUQwAAYECSIgRDAABwQSAEQwAAcEFdGzgCAAsgA0GQHEgNAAsLEIaAgIAAIAJBEGokgICAgAAL0AsDB38BfQN/QQAhAEHg9NuAAEEAQYTIAfwLAEGwroOAAEEAQYTIAfwLAAJAQQAoAoSIgIAAIgFBAUgNAEEAIQJBACEAQQAhAwNAAkAgA0HUAGwiBEGoj4OAAGooAgBFDQAgBEGkj4OAAGooAgAiBUEBSA0AIAAgBWohBiAAQQJ0QfC83YAAaiEAIAIhBANAAkACQCAEQeD0j4AAaioCAEMAAHpFkkMK1yM8lCIHi0MAAABPXUUNACAHqCEIDAELQYCAgIB4IQgLIAhBzwAgCEHPAEgbIghBACAIQQBKGyEJAkACQCAEQeD0lYAAaioCAEMAAHpFkkMK1yM8lCIHi0MAAABPXUUNACAHqCEIDAELQYCAgIB4IQgLIAAgCEHPACAIQc8ASBsiCEEAIAhBAEobQdAAbCAJaiIINgIAIAhBAnRB5PTbgABqIgggCCgCAEEBajYCACAEQQRqIQQgAEEEaiEAIAVBf2oiBQ0ACyAGIQALIAJBgBBqIQIgA0EBaiIDIAFHDQALQQAoAuD024AAIQALQYC4fiEEA0AgBEHkvN2AAGoiCCAIKAIAIABqIgA2AgAgBEHovN2AAGoiCCAIKAIAIABqIgA2AgAgBEHsvN2AAGoiCCAIKAIAIABqIgA2AgAgBEHwvN2AAGoiCCAIKAIAIABqIgA2AgAgBEH0vN2AAGoiCCAIKAIAIABqIgA2AgAgBEEUaiIEDQALQfC844AAQeD024AAQYDIAfwKAAACQCABQQFIDQBBACECQQAhBgNAAkAgAkHUAGwiBEGoj4OAAGooAgBFDQAgBEGkj4OAAGooAgAiBEEBSA0AIAJBEHQhCUEAIQACQCAEQQFGDQAgBEEBcSEKIARB/v///wdxIQMgBkECdEHwvN2AAGohBEEAIQADQCAEKAIAQQJ0QfC844AAaiIIIAgoAgAiCEEBajYCACAIQQJ0QfCE5YAAaiAAIAlyIgg2AgAgBEEEaigCAEECdEHwvOOAAGoiBSAFKAIAIgVBAWo2AgAgBUECdEHwhOWAAGogCEEBcjYCACAEQQhqIQQgAyAAQQJqIgBHDQALIAYgAGohBiAKRQ0BCyAGQQJ0QfC83YAAaigCAEECdEHwvOOAAGoiBCAEKAIAIgRBAWo2AgAgBEECdEHwhOWAAGogACAJcjYCACAGQQFqIQYLIAJBAWoiAiABRw0ACwtBwMd9IQRBoIiAgAAhAANAAkACQCAALQAADQBBfyEIDAELAkACQCAEQcDniYAAaioCAEMAAHpFkkMK1yM8lCIHi0MAAABPXUUNACAHqCEIDAELQYCAgIB4IQgLIAhBzwAgCEHPAEgbIghBACAIQQBKGyEFAkACQCAEQYCgjIAAaioCAEMAAHpFkkMK1yM8lCIHi0MAAABPXUUNACAHqCEIDAELQYCAgIB4IQgLIAhBzwAgCEHPAEgbIghBACAIQQBKG0HQAGwgBWoiCEECdEG0roOAAGoiBSAFKAIAQQFqNgIACyAEQbC97YAAaiAINgIAIABBAWohACAEQQRqIgQNAAtBACgCsK6DgAAhAEGAuH4hBANAIARBtPaEgABqIgggCCgCACAAaiIANgIAIARBuPaEgABqIgggCCgCACAAaiIANgIAIARBvPaEgABqIgggCCgCACAAaiIANgIAIARBwPaEgABqIgggCCgCACAAaiIANgIAIARBxPaEgABqIgggCCgCACAAaiIANgIAIARBFGoiBA0AC0HwvOOAAEGwroOAAEGAyAH8CgAAQfCE64AAIQRBASEAA0ACQCAEKAIAIghBAEgNACAIQQJ0QfC844AAaiIIIAgoAgAiCEEBajYCACAIQQJ0QcD2hIAAaiAAQX9qNgIACwJAIARBBGooAgAiCEEASA0AIAhBAnRB8LzjgABqIgggCCgCACIIQQFqNgIAIAhBAnRBwPaEgABqIAA2AgALIARBCGohBCAAQQJqIgBBkc4ARw0ACwuoCQQDfwN9AX8CfSOAgICAAEEQayIEJICAgIAAIARBADYCDCAEQQA2AghBHSEFAkADQCAFIQZDAIA7RSAEQQxqIARBCGoQiICAgAAgACAEKgIMIgcgBCoCCCIIQwAAgkMQloCAgABFDQEgBkF/aiEFIAYNAAsLIABB1ABsIgZBuI+DgABqIAI2AgAgBkGoj4OAAGpBATYCACAGQfiOg4AAaiABOAIAIAZBvI+DgABqQQA2AgAgBkG0j4OAAGogAzYCACAGQbCPg4AAakEANgIAIAZBrI+DgABqQQA2AgAgBkGIj4OAAGpBADYCACAGQcCPg4AAakF/NgIAIAZBnI+DgABqQQA2AgAgBkGMj4OAAGpBADYCACAGQYSPg4AAakEANgIAIAZB/I6DgABqIAGRIgFDZmZmP5RDAAAgQZIiCUMAADBCIAlDAAAwQl0bIgk4AgACQAJAIAFDAACwQJQiAYtDAAAAT11FDQAgAaghAwwBC0GAgICAeCEDCyAGQaSPg4AAaiADQfEDIANB8QNIGyICQQ5qIgo2AgAgBkGAj4OAAGogCUM9Ctc+lCILOAIAIAZB9I6DgABqQQAoAoCIgIAAIgVBDXQgBXMiBUERdiAFcyIFQQV0IAVzIgVBCHazQwAAgDOUQ9sPyUCUQ9sPScCSIgE4AgAgBkHwjoOAAGogATgCAEEAIAVBDXQgBXMiBUERdiAFcyIFQQV0IAVzIgU2AoCIgIAAIAZBkI+DgABqIAc4AgAgBkGUj4OAAGogCDgCACAGQaCPg4AAaiAFQQh2s0MAAIAzlDgCAAJAIAFD2w/JP5IiCUPbD0lAXkUNAANAIAlD2w/JwJIiCUPbD0lAXg0ACwsCQCAJQ9sPScBdRQ0AA0AgCUPbD8lAkiIJQ9sPScBdDQALCwJAAkAgCUPbD8k/XkUNAEPbD0lAIAmTIQkMAQsgCUPbD8m/XUUNAEPbD0nAIAmTIQkLAkAgAUPbD0lAXkUNAANAIAFD2w/JwJIiAUPbD0lAXg0ACwsCQCABQ9sPScBdRQ0AA0AgAUPbD8lAkiIBQ9sPScBdDQALCwJAAkAgAUPbD8k/XkUNAEPbD0lAIAGTIQEMAQsgAUPbD8m/XUUNAEPbD0nAIAGTIQELAkAgA0FzSA0AIAJBAXEhAiALIAkgCZQiDCAMIAwgDEMd7zg2lEMBDVC5kpRDiYgIPJKUQ6uqKr6SlEMAAIA/kiAJjJSUIQkgCyABIAGUIgwgDCAMIAxDHe84NpRDAQ1QuZKUQ4mICDySlEOrqiq+kpRDAACAP5IgAYyUlCEBQQAhBQJAIANBc0YNACAAQQt0IQYgCkF+cSEDQQAhBQNAIAZB4PSVgABqIAEgBbIiC5QgCJI4AgAgBkHg9I+AAGogCSALlCAHkjgCACAGQeT0j4AAaiAJIAVBAWqyIguUIAeSOAIAIAZB5PSVgABqIAEgC5QgCJI4AgAgBkEIaiEGIAVBAmoiBSADRw0ACwsgAkUNACAAQQt0IAVBAnRqIgZB4PSVgABqIAEgBbIiC5QgCJI4AgAgBkHg9I+AAGogCSALlCAHkjgCAAsgBEEQaiSAgICAAAvgAwICfwN9QQBBACgCgIiAgAAiA0ENdCADcyIDQRF2IANzIgNBBXQgA3MiA0ENdCADcyIEQRF2IARzIgRBBXQgBHMiBDYCgIiAgAAgBEEIdrNDAACAM5QhBQJAIANBCHazQwAAgDOUQ9sPyUCUIgZD2w/JP5IiB0PbD0lAXkUNAANAIAdD2w/JwJIiB0PbD0lAXg0ACwsgBZEhBQJAIAdD2w9JwF1FDQADQCAHQ9sPyUCSIgdD2w9JwF0NAAsLIAUgAJQhBQJAAkAgB0PbD8k/XkUNAEPbD0lAIAeTIQcMAQsgB0PbD8m/XUUNAEPbD0nAIAeTIQcLIAEgBSAHIAcgB5QiACAAIAAgAEMd7zg2lEMBDVC5kpRDiYgIPJKUQ6uqKr6SlEMAAIA/kpSUOAIAAkAgBkPbD0lAXkUNAANAIAZD2w/JwJIiBkPbD0lAXg0ACwsCQCAGQ9sPScBdRQ0AA0AgBkPbD8lAkiIGQ9sPScBdDQALCwJAAkAgBkPbD8k/XkUNAEPbD0lAIAaTIQYMAQsgBkPbD8m/XUUNAEPbD0nAIAaTIQYLIAIgBSAGIAYgBpQiByAHIAcgB0Md7zg2lEMBDVC5kpRDiYgIPJKUQ6uqKr6SlEMAAIA/kpSUOAIACwgAQeD0m4AACw0AQQBBADYCqI+DgAALCwBBACgCiIiAgAALEgAgAEHUAGxBvI+DgABqKAIACxIAIABB1ABsQfiOg4AAaioCAAsGAEGAgAQLEgAgAEHUAGxB/I6DgABqKgIACxIAIABB1ABsQaSPg4AAaigCAAsYAEEAIAE2ArCPg4AAQQAgADgC9I6DgAALEgAgAEHUAGxBtI+DgABqKAIACwsAQQAoAoSIgIAACyQAEIaAgIAAQQBDAAAgQUEAIAAQh4CAgABBAEF/NgKIiICAAAuTUAsBfQF/An0CfwF9Cn8CfQZ/BX0FfwZ9AkACQEPNzMw9IAAgAEPNzMw9XhsiAEMAAHBClCIBi0MAAABPXUUNACABqCECDAELQYCAgIB4IQILAkAgAkEASA0AQwAAgD8gACACQQFqspUiA0MAACBBlCIAIABDAACAP14bIQRBACgClIiAgAAhBUEAKAKEiICAACEGIAMgA5IhB0EAIQgDQEEAQQAoApiIgIAAQQFqNgKYiICAAAJAAkAgBkEBSA0AQQAhCUEAKAKAiICAACEKQQQhC0EAIQxBACgCkIiAgAAiDSEOA0ACQCAMQdQAbCIPQaiPg4AAaigCAEUNAENmZqZAIA9B/I6DgABqIhAqAgBDAABAwZJD7FE4PZRDAACAP5KVIQECQCAPQfSOg4AAaioCACAPQfCOg4AAaiIRKgIAIhKTIgBD2w9JQF5FDQADQCAAQ9sPycCSIgBD2w9JQF4NAAsLIAMgAZQhAQJAIABD2w9JwF1FDQADQCAAQ9sPyUCSIgBD2w9JwF0NAAsLAkACQCAAIAFeRQ0AIAEhAAwBCyAAIAGMIgFdRQ0AIAEhAAsCQCASIACSIgBD2w9JQF5FDQADQCAAQ9sPycCSIgBD2w9JQF4NAAsLAkAgAEPbD0nAXUUNAANAIABD2w/JQJIiAEPbD0nAXQ0ACwsgESAAOAIAAkACQCAPQbCPg4AAaigCAA0AQwAAQ0MhE0EBIRRBACERDAELQwAA10NDAABDQyAPQfiOg4AAaioCAEMAAGBBXiIRGyETIBFBAXMhFAsgD0Gsj4OAAGogETYCAAJAIABD2w/JP5IiAUPbD0lAXkUNAANAIAFD2w/JwJIiAUPbD0lAXg0ACwsCQCABQ9sPScBdRQ0AA0AgAUPbD8lAkiIBQ9sPScBdDQALCwJAAkAgAUPbD8k/XkUNAEPbD0lAIAGTIQEMAQsgAUPbD8m/XUUNAEPbD0nAIAGTIQELIAxBC3QiEUHg9I+AAGoiFSATIAEgASABlCISIBIgEiASQx3vODaUQwENULmSlEOJiAg8kpRDq6oqvpKUQwAAgD+SlJQgA5QgFSoCAJI4AgACQCAAQ9sPSUBeRQ0AA0AgAEPbD8nAkiIAQ9sPSUBeDQALCwJAIABD2w9JwF1FDQADQCAAQ9sPyUCSIgBD2w9JwF0NAAsLAkACQCAAQ9sPyT9eRQ0AQ9sPSUAgAJMhAAwBCyAAQ9sPyb9dRQ0AQ9sPScAgAJMhAAsgEUHg9JWAAGoiFiATIAAgACAAlCIBIAEgASABQx3vODaUQwENULmSlEOJiAg8kpRDq6oqvpKUQwAAgD+SlJQgA5QgFioCAJI4AgAgD0H4joOAAGoiFyoCACEAAkAgFA0AIBcgACADIABDppvEO5RDAADAQJKUIgGTIgA4AgAgD0GIj4OAAGoiFCABIBQqAgCSIhI4AgAgD0GEj4OAAGoiFyADIBcqAgCSIgE4AgAgAUPNzMw9XkUNAAJAAkAgDg0AQQAhDgwBC0EAIA5Bf2oiDTYCkIiAgABBACAFQQFqIgU2ApSIgIAAIA1BAnRBsNaAgABqKAIAIhhBwNiOgABqIA9BtI+DgABqKAIAOgAAIBhBoIiAgABqQQE6AAAgGEECdCIZQbC97YAAaiASQ83MTD+UIgE4AgBBACAKQQ10IApzIgpBEXYgCnMiCkEFdCAKcyIKNgKAiICAACAYQdCmj4AAaiAKOgAAIBlBgKCMgABqIAGRQ2ZmJkCUQwAAYECSIgFDAABwQSABQwAAcEFdGzgCACAZQYCvh4AAaiAPQaSPg4AAaigCAEECdCARaiIYQdz0j4AAaioCADgCACAZQcDniYAAaiAYQdz0lYAAaioCADgCACANIQ4LIBRBADYCACAXQQA2AgALIBAgAJEiAENmZmY/lEMAACBBkiIBQwAAMEIgAUMAADBCXRsiATgCACAPQYCPg4AAaiABQz0K1z6UIho4AgACQAJAIABDAACwQJQiAItDAAAAT11FDQAgAKghFAwBC0GAgICAeCEUCwJAAkACQCAPQaSPg4AAaiIYKAIAIhAgFEHxAyAUQfEDSBsiF0EOaiIUTg0AIBcgEGtBDWohGSARQdz0j4AAaiAQQQJ0Ig9qKgIAIQAgEUHc9JWAAGogD2oqAgAhAQJAIBdBAnMgEGtBA3EiEUUNACAQIBFqIRAgCSAPaiEPA0AgD0Hg9JWAAGogATgCACAPQeD0j4AAaiAAOAIAIA9BBGohDyARQX9qIhENAAsLIBlBA0kNASAJIBBBAnRqIQ8gFyAQa0EOaiERA0AgD0Hg9JWAAGogATgCACAPQeD0j4AAaiAAOAIAIA9B5PSPgABqIAA4AgAgD0Hk9JWAAGogATgCACAPQej0j4AAaiAAOAIAIA9B6PSVgABqIAE4AgAgD0Hs9I+AAGogADgCACAPQez0lYAAaiABOAIAIA9BEGohDyARQXxqIhENAAwCCwsgECAUTA0BCyAYIBQ2AgAgFCEQCyAQQQJIDQAgGiAalCEbIBBBf2ohESAWKgIAIQAgFSoCACEBIAshDwNAAkAgD0Hg9I+AAGoiECoCACISIAGTIhMgE5QgD0Hg9JWAAGoiFCoCACIcIACTIh0gHZSSIh4gG15FDQAgFCAdIBogHpGVIhKUIACSIhw4AgAgECATIBKUIAGSIhI4AgALIA9BBGohDyAcIQAgEiEBIBFBf2oiEQ0ACwsgC0GAEGohCyAJQYAQaiEJIAxBAWoiDCAGRw0ACxCGgICAAEEAIRlBACEQA0ACQCAQQdQAbCIRQaiPg4AAaigCAEUNAEF+IQ8CQCAQQQt0IhRB4PSPgABqKgIAIgAgAJQgFEHg9JWAAGoqAgAiASABlJIgEUH8joOAAGoqAgAiEkMAAAC/lEMAAHpFkiITIBOUXg0AAkACQCABQwAAekWSQwrXIzyUIhOLQwAAAE9dRQ0AIBOoIQ8MAQtBgICAgHghDwsgD0HPACAPQc8ASBsiD0EAIA9BAEobIQ8CQAJAIABDAAB6RZJDCtcjPJQiE4tDAAAAT11FDQAgE6ghHwwBC0GAgICAeCEfCyAPQQFqIRcgH0HPACAfQc8ASBsiEUEAIBFBAEobIiBBAWohISAgQX9qIQ4gD0F/aiEPAkADQAJAIA8iC0HPAEsNACALQdAAbCEWAkACQCAOQdAASQ0AIBYgIGoiGEECdEHg9NuAAGooAgAhDAwBCyAWIA5qQQJ0QeD024AAaigCACIUIBYgIGoiGEECdEHg9NuAAGooAgAiDE4NACAUQQJ0QfCE5YAAaiERA0ACQCARKAIAIglBEHUiDyAQRg0AIA9B1ABsIhVBqI+DgABqKAIARQ0AIA9BC3QgCUH//wNxQQJ0aiIJQeD0j4AAaioCACAAkyITIBOUIAlB4PSVgABqKgIAIAGTIhMgE5SSIBIgFUH8joOAAGoqAgCSQ8P1KD+UIhMgE5RdDQULIBFBBGohESAMIBRBAWoiFEcNAAsLAkAgGEECdEHk9NuAAGooAgAiDyAMTA0AIA8gDGshFCAMQQJ0QfCE5YAAaiERA0ACQCARKAIAIgxBEHUiDyAQRg0AIA9B1ABsIglBqI+DgABqKAIARQ0AIA9BC3QgDEH//wNxQQJ0aiIMQeD0j4AAaioCACAAkyITIBOUIAxB4PSVgABqKgIAIAGTIhMgE5SSIBIgCUH8joOAAGoqAgCSQ8P1KD+UIhMgE5RdDQULIBFBBGohESAUQX9qIhQNAAsLIB9BzgBKDQAgISAWakECdCIPQeT024AAaigCACIRIA9B4PTbgABqKAIAIg9MDQAgESAPayEUIA9BAnRB8ITlgABqIREDQAJAIBEoAgAiDEEQdSIPIBBGDQAgD0HUAGwiCUGoj4OAAGooAgBFDQAgD0ELdCAMQf//A3FBAnRqIgxB4PSPgABqKgIAIACTIhMgE5QgDEHg9JWAAGoqAgAgAZMiEyATlJIgEiAJQfyOg4AAaioCAJJDw/UoP5QiEyATlF0NBAsgEUEEaiERIBRBf2oiFA0ACwsgC0EBaiEPIAsgF0cNAAwDCwsgD0F/Rg0BCyAZQQJ0IhFB9PXvgABqIA82AgAgEUHw9e+AAGogEDYCACAZQQJqIRkLIBBBAWoiECAGRw0ACwJAIBlBAUgNAEEAIRcDQAJAIBdBAnQiD0Hw9e+AAGooAgAiGEHUAGwiFkGoj4OAAGoiESgCAEUNACAPQfT174AAaigCACIfQX9KIQ4gEUEANgIAIBZBpI+DgABqKAIAIgtBAm0hDwJAIAtBAUgNACAWQfiOg4AAaioCAEOamVk/lCAPQQFqspUhEiAYQQt0IQ8gFkG0j4OAAGohFSAWQfyOg4AAaioCAEOamRk/lCEAQQAhCSANIREDQCAKQQ10IApzIgpBEXYgCnMiCkEFdCAKcyIQQQ10IBBzIgpBEXYgCnMiCkEFdCAKcyIUQQ10IBRzIgpBEXYgCnMiCkEFdCAKcyEKAkACQCARDQBBACERDAELQQAgEUF/aiINNgKQiICAAEEAIAVBAWoiBTYClIiAgAAgDUECdEGw1oCAAGooAgAiEUHA2I6AAGogFSgCADoAACARQaCIgIAAakEBOgAAIBFBAnQiDEGAr4eAAGogEEEIdrNDAACAM5RDAAAAv5IgAJQgD0Hg9I+AAGoqAgCSOAIAIAxBwOeJgABqIBRBCHazQwAAgDOUQwAAAL+SIACUIA9B4PSVgABqKgIAkjgCACAMQbC97YAAaiASIApBCHazQwAAgDOUQ83MTD+UQ5qZGT+SlCIBOAIAIBFB0KaPgABqIApBDXQgCnMiCkERdiAKcyIKQQV0IApzIgo6AAAgDEGAoIyAAGogAZFDZmYmQJRDAABgQJIiAUMAAHBBIAFDAABwQV0bOAIAIA0hEQsgD0EIaiEPIAlBAmoiCSALSA0ACwsCQCAORQ0AIB9B1ABsQbyPg4AAaiIPIA8oAgBBAWo2AgALAkAgGA0AQQAgH0F/IA4bNgKIiICAAAtBACAKQQ10IApzIg9BEXYgD3MiD0EFdCAPcyIKNgKAiICAACAWQZiPg4AAaiAKQQh2s0MAAIAzlEMAAEBAlEMAAMA/kjgCAAsgF0ECaiIXIBlIDQALC0EAISIDQAJAICJB1ABsIgpBqI+DgABqKAIARQ0AAkACQCAiQQt0IhFB4PSVgABqKgIAIhJDAAB6RZJDCtcjPJQiAItDAAAAT11FDQAgAKghDwwBC0GAgICAeCEPCyAPQc8AIA9BzwBIGyIPQQAgD0EAShshDwJAAkAgEUHg9I+AAGoqAgAiE0MAAHpFkkMK1yM8lCIAi0MAAABPXUUNACAAqCEgDAELQYCAgIB4ISALIA9BAWohGSAgQc8AICBBzwBIGyIRQQAgEUEAShsiIUEBaiEjICFBf2ohHyAPQX9qIQ8gCkH4joOAAGohCSAKQfyOg4AAaioCACIcQwAAwD+UQwAACEKSIgAgAJQhJCANIRQDQAJAIA8iFkHPAEsNACAWQdAAbCEYAkACQCAfQdAASQ0AIBggIWoiDkECdEGwroOAAGooAgAhDAwBCyAYIB9qQQJ0QbCug4AAaigCACIRIBggIWoiDkECdEGwroOAAGooAgAiDE4NACARQQJ0QcD2hIAAaiEPA0ACQCAPKAIAIhBBoIiAgABqIgstAABFDQACQCAQQQJ0IgpBgK+HgABqIhUqAgAiGyATkyIAIACUIApBwOeJgABqIhcqAgAiGiASkyIBIAGUkiIeIApBgKCMgABqKgIAQwAAAD+UIBySIh0gHZRdRQ0AIAtBADoAAEEAIBRBAWoiDTYCkIiAgABBACAFQX9qIgU2ApSIgIAAIBRBAnRBsNaAgABqIBA2AgAgCSAKQbC97YAAaioCACAJKgIAkjgCACANIRQMAQsgHiAkXUUNACAXIBogASAElJM4AgAgFSAbIAAgBJSTOAIACyAPQQRqIQ8gDCARQQFqIhFHDQALCwJAIA5BAnRBtK6DgABqKAIAIg8gDEwNACAPIAxrIREgDEECdEHA9oSAAGohDwNAAkAgDygCACIQQaCIgIAAaiIMLQAARQ0AAkAgEEECdCIKQYCvh4AAaiILKgIAIhsgE5MiACAAlCAKQcDniYAAaiIVKgIAIhogEpMiASABlJIiHiAKQYCgjIAAaioCAEMAAAA/lCAckiIdIB2UXQ0AIB4gJF1FDQEgFSAaIAEgBJSTOAIAIAsgGyAAIASUkzgCAAwBCyAMQQA6AABBACAUQQFqIg02ApCIgIAAQQAgBUF/aiIFNgKUiICAACAUQQJ0QbDWgIAAaiAQNgIAIAkgCkGwve2AAGoqAgAgCSoCAJI4AgAgDSEUCyAPQQRqIQ8gEUF/aiIRDQALCyAgQc4ASg0AICMgGGpBAnQiD0G0roOAAGooAgAiCiAPQbCug4AAaigCACIPTA0AIAogD2shESAPQQJ0QcD2hIAAaiEPA0ACQCAPKAIAIhBBoIiAgABqIgwtAABFDQACQCAQQQJ0IgpBgK+HgABqIgsqAgAiGyATkyIAIACUIApBwOeJgABqIhUqAgAiGiASkyIBIAGUkiIeIApBgKCMgABqKgIAQwAAAD+UIBySIh0gHZRdDQAgHiAkXUUNASAVIBogASAElJM4AgAgCyAbIAAgBJSTOAIADAELIAxBADoAAEEAIBRBAWoiDTYCkIiAgABBACAFQX9qIgU2ApSIgIAAIBRBAnRBsNaAgABqIBA2AgAgCSAKQbC97YAAaioCACAJKgIAkjgCACANIRQLIA9BBGohDyARQX9qIhENAAsLIBZBAWohDyAWIBlHDQALCyAiQQFqIiIgBkcNAAtBASEJAkAgBkEBRg0AQQEhBQNAAkAgBUHUAGwiFUGoj4OAAGooAgBFDQBBACgCmIiAgAAgBWpBAXENACAVQYyPg4AAaiIPIA8qAgAgB5MiEzgCACAVQfCOg4AAaiELIAVBC3QiCkHg9JWAAGoqAgAhHCAKQeD0j4AAaioCACEdAkACQAJAIBVBnI+DgABqIiMqAgAiEkMAAAAAXkUNACAjIBIgB5MiEjgCAAJAAkAgFUHAj4OAAGooAgAiCkEASA0AIApB1ABsIhFBqI+DgABqKAIADQELICNBADYCACATQwAAAABfDQIMAwsCQCARQfCOg4AAaioCACIAQ9sPyT+SIgFD2w9JQF5FDQADQCABQ9sPycCSIgFD2w9JQF4NAAsLIBFB/I6DgABqKgIAQwAAgECUIR4CQCABQ9sPScBdRQ0AA0AgAUPbD8lAkiIBQ9sPScBdDQALCyAeQwAAjEKSIRsgCkELdCIKQeD0j4AAaioCACEaAkACQCABQ9sPyT9eRQ0AQ9sPSUAgAZMhAQwBCyABQ9sPyb9dRQ0AQ9sPScAgAZMhAQsgFUGQj4OAAGogASABIAGUIh4gHiAeIB5DHe84NpRDAQ1QuZKUQ4mICDySlEOrqiq+kpRDAACAP5KUIBuUIBqSOAIAAkAgAEPbD0lAXkUNAANAIABD2w/JwJIiAEPbD0lAXg0ACwsCQCAAQ9sPScBdRQ0AA0AgAEPbD8lAkiIAQ9sPScBdDQALCyAKQeD0lYAAaioCACEeAkACQCAAQ9sPyT9eRQ0AQ9sPSUAgAJMhAAwBCyAAQ9sPyb9dRQ0AQ9sPScAgAJMhAAsgFUGUj4OAAGogACAAIACUIgEgASABIAFDHe84NpRDAQ1QuZKUQ4mICDySlEOrqiq+kpRDAACAP5KUIBuUIB6SOAIACyASQwAAAABfRQ0BIBNDAAAAAF9FDQELIBVBwI+DgABqIg1BfzYCACAPQQAoAoCIgIAAIgpBDXQgCnMiCkERdiAKcyIKQQV0IApzIgpBCHazQwAAgDOUQwAAAD+UQwAAgD6SOAIAQQAgCkENdCAKcyIPQRF2IA9zIg9BBXQgD3MiFDYCgIiAgAACQCAGQQFIDQAgFEEIdrNDAACAM5QgFUGgj4OAAGoqAgBDMzOzPpRdRQ0AIBVB+I6DgABqIRBDgEzOSCEBQX8hDEGoj4OAACEKQQAhEUEAIQ8DQAJAIAUgD0YNACAKKAIARQ0AIApBUGoqAgAgECoCAENmZqY/lF4NACARQeD0j4AAaioCACAdkyIAIACUIBFB4PSVgABqKgIAIByTIgAgAJSSIgAgAV1FDQAgDSAPNgIAIA8hDCAAIQELIBFBgBBqIREgCkHUAGohCiAGIA9BAWoiD0cNAAsgDEF/TA0AQQAgFEENdCAUcyIPQRF2IA9zIg9BBXQgD3MiDzYCgIiAgAAgIyAPQQh2s0MAAIAzlEMAAMA/lEMAAIA/kjgCAAwBCwJAIAsqAgAiAEPbD8k/kiIBQ9sPSUBeRQ0AA0AgAUPbD8nAkiIBQ9sPSUBeDQALCwJAIAFD2w9JwF1FDQADQCABQ9sPyUCSIgFD2w9JwF0NAAsLAkACQCABQ9sPyT9eRQ0AQ9sPSUAgAZMhAQwBCyABQ9sPyb9dRQ0AQ9sPScAgAZMhAQsgASABlCISIBJDHe84NpRDAQ1QuZKUQ4mICDySIRMCQCAAQ9sPSUBeRQ0AA0AgAEPbD8nAkiIAQ9sPSUBeDQALCyASIBOUIRMCQCAAQ9sPScBdRQ0AA0AgAEPbD8lAkiIAQ9sPScBdDQALCyATQ6uqKr6SIRMCQAJAIABD2w/JP15FDQBD2w9JQCAAkyEADAELIABD2w/Jv11FDQBD2w9JwCAAkyEACyASIBOUIRICQAJAIBxDAAB6RZJDCtcjPJQiE4tDAAAAT11FDQAgE6ghDwwBC0GAgICAeCEPCyASQwAAgD+SIRIgD0HPACAPQc8ASBsiD0EAIA9BAEobIQ8CQAJAIB1DAAB6RZJDCtcjPJQiE4tDAAAAT11FDQAgE6ghCgwBC0GAgICAeCEKCyABIBKUIRMgD0ECaiEWIApBzwAgCkHPAEgbIhFBACARQQBKGyIOQQJqIQYgDkEBaiEgIA5Bf2ohGCAOQX5qIRkgD0F+aiEPIBVBlI+DgABqIRAgFUGQj4OAAGohFCAAIAAgAJQiASABIAEgAUMd7zg2lEMBDVC5kpRDiYgIPJKUQ6uqKr6SlEMAAIA/kpQhHkMAAAAAIQAgCkHOAEohHyAKQc0ASiEhA0ACQCAPIgxBzwBLDQAgDEHQAGwhCQJAIBlBzwBLDQAgCSAZakECdCIPQbSug4AAaigCACIKIA9BsK6DgABqKAIAIg9MDQAgCiAPayEKIA9BAnRBwPaEgABqIQ8DQAJAIA8oAgAiEUGgiICAAGotAABFDQAgEUECdCIRQbC97YAAaioCACARQYCvh4AAaioCACIaIB2TIgEgAZQgEUHA54mAAGoqAgAiJCAckyISIBKUkpFDAACAP5IiG0MAAHBCkpUgASATlCAeIBKUkiAblUPNzMw/kpQiASAAXkUNACAQICQ4AgAgFCAaOAIAIAEhAAsgD0EEaiEPIApBf2oiCg0ACwsCQAJAIBhB0ABJDQAgCSAOaiIXQQJ0QbCug4AAaigCACENDAELIAkgGGpBAnRBsK6DgABqKAIAIgogCSAOaiIXQQJ0QbCug4AAaigCACINTg0AIApBAnRBwPaEgABqIQ8DQAJAIA8oAgAiEUGgiICAAGotAABFDQAgEUECdCIRQbC97YAAaioCACARQYCvh4AAaioCACIaIB2TIgEgAZQgEUHA54mAAGoqAgAiJCAckyISIBKUkpFDAACAP5IiG0MAAHBCkpUgASATlCAeIBKUkiAblUPNzMw/kpQiASAAXkUNACAQICQ4AgAgFCAaOAIAIAEhAAsgD0EEaiEPIA0gCkEBaiIKRw0ACwsCQCAXQQJ0QbSug4AAaigCACIPIA1MDQAgDyANayEKIA1BAnRBwPaEgABqIQ8DQAJAIA8oAgAiEUGgiICAAGotAABFDQAgEUECdCIRQbC97YAAaioCACARQYCvh4AAaioCACIaIB2TIgEgAZQgEUHA54mAAGoqAgAiJCAckyISIBKUkpFDAACAP5IiG0MAAHBCkpUgASATlCAeIBKUkiAblUPNzMw/kpQiASAAXkUNACAQICQ4AgAgFCAaOAIAIAEhAAsgD0EEaiEPIApBf2oiCg0ACwsgHw0AAkAgICAJakECdCIPQbSug4AAaigCACIKIA9BsK6DgABqKAIAIg9MDQAgCiAPayEKIA9BAnRBwPaEgABqIQ8DQAJAIA8oAgAiEUGgiICAAGotAABFDQAgEUECdCIRQbC97YAAaioCACARQYCvh4AAaioCACIaIB2TIgEgAZQgEUHA54mAAGoqAgAiJCAckyISIBKUkpFDAACAP5IiG0MAAHBCkpUgASATlCAeIBKUkiAblUPNzMw/kpQiASAAXkUNACAQICQ4AgAgFCAaOAIAIAEhAAsgD0EEaiEPIApBf2oiCg0ACwsgIQ0AIAYgCWpBAnQiD0G0roOAAGooAgAiCiAPQbCug4AAaigCACIPTA0AIAogD2shCiAPQQJ0QcD2hIAAaiEPA0ACQCAPKAIAIhFBoIiAgABqLQAARQ0AIBFBAnQiEUGwve2AAGoqAgAgEUGAr4eAAGoqAgAiGiAdkyIBIAGUIBFBwOeJgABqKgIAIiQgHJMiEiASlJKRQwAAgD+SIhtDAABwQpKVIAEgE5QgHiASlJIgG5VDzczMP5KUIgEgAF5FDQAgECAkOAIAIBQgGjgCACABIQALIA9BBGohDyAKQX9qIgoNAAsLIAxBAWohDyAMIBZHDQALIABDAAAAAFwNAEMAABZFIBQgEBCIgICAAAtDAAAAACEbAkAgFUGQj4OAAGoqAgAgHZMiJYsiACAVQZSPg4AAaioCACAckyImiyIBIAAgAV4bIhJDAAAAAFsNAEPbD0lAQ9sPyT8gACABIAAgAV0iDxsgEpUiACAAlCIBIAEgAUMWcz69lENEIyM+kpRDLL6nvpKUIACUIACSIgCTIAAgDxsiAJMgACAlQwAAAABdGyIAjCAAICZDAAAAAF0bIRsLIBVB/I6DgABqKgIAIgBDMzOTP5QhJyAAQ83MzD+UIgBDAAAqQ5IhKCAAQwAAXEKSISlDKGtuTiEeQQAhDyAbISQDQCAbIRMCQCAPQQxGDQAgD7JDAACwwJJDmpmZPpQgCyoCAJIhEwsCQCATQ9sPyT+SIgBD2w9JQF5FDQADQCAAQ9sPycCSIgBD2w9JQF4NAAsLAkAgAEPbD0nAXUUNAANAIABD2w/JQJIiAEPbD0nAXQ0ACwsCQAJAIABD2w/JP15FDQBD2w9JQCAAkyEADAELIABD2w/Jv11FDQBD2w9JwCAAkyEACyATIQECQCATQ9sPSUBeRQ0AA0AgAUPbD8nAkiIBQ9sPSUBeDQALCwJAIAFD2w9JwF1FDQADQCABQ9sPyUCSIgFD2w9JwF0NAAsLAkACQCABQ9sPyT9eRQ0AQ9sPSUAgAZMhAQwBCyABQ9sPyb9dRQ0AQ9sPScAgAZMhAQsCQCATIBuTIhJD2w9JQF5FDQADQCASQ9sPycCSIhJD2w9JQF4NAAsLAkAgEkPbD0nAXUUNAANAIBJD2w/JQJIiEkPbD0nAXQ0ACwsCQCASiyIaIB5gDQACQAJAIAUgACAAIACUIhIgEiASIBJDHe84NpRDAQ1QuZKUQ4mICDySlEOrqiq+kpRDAACAP5KUIhIgKZQgHZIgASABIAGUIgAgACAAIABDHe84NpRDAQ1QuZKUQ4mICDySlEOrqiq+kpRDAACAP5KUIgAgKZQgHJIgJxCWgICAAEUNACAaQwAAyEKSIQAMAQsgGkMAAKBBkiAaIAUgEiAolCAdkiAAICiUIBySICcQloCAgAAbIQALIAAgHiAAIB5dIgobIR4gEyAkIAobISQLIA9BAWoiD0ENRw0ACyAVQfSOg4AAaiAkOAIAAkACQCAjKgIAQwAAAABeRQ0AIBVB+I6DgABqKgIAQwAA8EFeRQ0AICUgJZQgJiAmlJJDAMFFSF1FDQBBASEPIB5DAACgQV0NAQtBACEPIB5DAADIQmBFDQAgFUH4joOAAGoqAgBDAAAgQl5FDQBBAEEAKAKAiICAACIPQQ10IA9zIg9BEXYgD3MiD0EFdCAPcyIPNgKAiICAACAPQQh2s0MAAIAzlEPNzEw9XSEPCyAVQbCPg4AAaiAPNgIACyAFQQFqIgVBACgChIiAgAAiBkgNAAsCQCAGQQJODQAgBiEJDAELQQEhCkHsj4OAACEPIAYhCQNAAkAgD0EQaigCAA0AIA8gDyoCACADkyIAOAIAIABDAAAAAF9FDQBBAEEAKAKAiICAACIRQQ10IBFzIhFBEXYgEXMiEUEFdCARcyIRQQ10IBFzIhBBEXYgEHMiEEEFdCAQcyIQNgKAiICAACAKIBFBCHazQwAAgDOUIgAgACAAlJRDAAACRJRDAAAgQZJBASAQQQxwEIeAgIAAQQAoAoSIgIAAIQkLIA9B1ABqIQ8gCkEBaiIKIAlIDQALC0EAKAKUiICAACEFDAELEIaAgIAAIAYhCQsCQCAFQY8cSg0AQQAhEEEAKAKQiICAACERQQAoAoCIgIAAIQ8DQAJAIA9BDXQgD3MiD0ERdiAPcyIPQQV0IA9zIg9BCHazQwAAgDOUQ9sPyUCUIgBD2w/JP5IiAUPbD0lAXkUNAANAIAFD2w/JwJIiAUPbD0lAXg0ACwsCQCABQ9sPScBdRQ0AA0AgAUPbD8lAkiIBQ9sPScBdDQALCwJAAkAgAUPbD8k/XkUNAEPbD0lAIAGTIQEMAQsgAUPbD8m/XUUNAEPbD0nAIAGTIQELAkAgAEPbD0lAXkUNAANAIABD2w/JwJIiAEPbD0lAXg0ACwsCQCAAQ9sPScBdRQ0AA0AgAEPbD8lAkiIAQ9sPScBdDQALCyAPQQ10IA9zIg9BEXYgD3MiD0EFdCAPcyEKAkACQCAAQ9sPyT9eRQ0AQ9sPSUAgAJMhAAwBCyAAQ9sPyb9dRQ0AQ9sPScAgAJMhAAsgCkENdCAKcyIPQRF2IA9zIg9BBXQgD3MiFEENdCAUcyIPQRF2IA9zIg9BBXQgD3MhDwJAAkAgEQ0AQQAhEQwBC0EAIBFBf2oiETYCkIiAgABBACAFQQFqIgU2ApSIgIAAIBFBAnRBsNaAgABqKAIAIg1BwNiOgABqIA9BDHA6AAAgDUGgiICAAGpBAToAACANQQJ0IgxBgK+HgABqIApBCHazQwAAgDOUkUMAAHVFlCITIAEgASABlCISIBIgEiASQx3vODaUQwENULmSlEOJiAg8kpRDq6oqvpKUQwAAgD+SlJQ4AgAgDEGwve2AAGogFEEIdrNDAACAM5QiASABlEOamRlAlEOamRk/kiISOAIAIA1B0KaPgABqIA9BDXQgD3MiD0ERdiAPcyIPQQV0IA9zIg86AAAgDEHA54mAAGogEyAAIAAgAJQiASABIAEgAUMd7zg2lEMBDVC5kpRDiYgIPJKUQ6uqKr6SlEMAAIA/kpSUOAIAIAxBgKCMgABqIBKRQ2ZmJkCUQwAAYECSIgBDAABwQSAAQwAAcEFdGzgCAAsCQCAQQRZLDQAgEEEBaiEQIAVBkBxIDQELC0EAIA82AoCIgIAACyAIIAJGIQ8gCSEGIAhBAWohCCAPRQ0ACwsL3gYDAX8BfQt/QQEhBAJAIAEgAZQgAiAClJJDAAB6RSADk0MAAPDBkiIFIAWUXg0AAkACQCACQwAAekWSQwrXIzyUIgWLQwAAAE9dRQ0AIAWoIQQMAQtBgICAgHghBAsgBEHPACAEQc8ASBsiBEEAIARBAEobIQQCQAJAIAFDAAB6RZJDCtcjPJQiBYtDAAAAT11FDQAgBaghBgwBC0GAgICAeCEGCyAEQQFqIQcgBkHPACAGQc8ASBsiCEEAIAhBAEobIglBAWohCiAJQX9qIQsgBEF/aiEEIAZBzgBKIQwDQAJAIAQiDUHPAEsNACANQdAAbCEOAkACQCALQdAASQ0AIAkgDmohDwwBCyAJIA5qIg9BAnRB4PTbgABqKAIAIgYgCyAOakECdEHg9NuAAGooAgAiBEwNACAGIARrIQYgBEECdEHwhOWAAGohBANAAkAgBCgCACIQQRB1IgggAEYNACAIQQt0IBBB//8DcUECdGoiEEHg9I+AAGoqAgAgAZMiBSAFlCAQQeD0lYAAaioCACACkyIFIAWUkiAIQdQAbEH8joOAAGoqAgAgA5IiBSAFlF1FDQBBAQ8LIARBBGohBCAGQX9qIgYNAAsLAkAgD0ECdCIEQeT024AAaigCACIGIARB4PTbgABqKAIAIgRMDQAgBiAEayEGIARBAnRB8ITlgABqIQQDQAJAIAQoAgAiEEEQdSIIIABGDQAgCEELdCAQQf//A3FBAnRqIhBB4PSPgABqKgIAIAGTIgUgBZQgEEHg9JWAAGoqAgAgApMiBSAFlJIgCEHUAGxB/I6DgABqKgIAIAOSIgUgBZRdRQ0AQQEPCyAEQQRqIQQgBkF/aiIGDQALCyAMDQAgCiAOakECdCIEQeT024AAaigCACIGIARB4PTbgABqKAIAIgRMDQAgBiAEayEGIARBAnRB8ITlgABqIQQDQAJAIAQoAgAiEEEQdSIIIABGDQAgCEELdCAQQf//A3FBAnRqIhBB4PSPgABqKgIAIAGTIgUgBZQgEEHg9JWAAGoqAgAgApMiBSAFlJIgCEHUAGxB/I6DgABqKgIAIAOSIgUgBZRdRQ0AQQEPCyAEQQRqIQQgBkF/aiIGDQALCyANQQFqIQQgDSAHRw0AC0EAIQQLIAQLBwBDAAB6RQsLEwEAQYAICwy5eTeeKAAAAP////8=";
+
+/* Skin palette — must match the shader's table (index = skin id). */
+const SKINS = [
+  ["#34d399", "#059669"], ["#38bdf8", "#0369a1"], ["#a78bfa", "#6d28d9"], ["#f472b6", "#be185d"],
+  ["#fbbf24", "#b45309"], ["#fb7185", "#be123c"], ["#a3e635", "#4d7c0f"], ["#22d3ee", "#0e7490"],
+  ["#fb923c", "#c2410c"], ["#818cf8", "#4338ca"], ["#f1f5f9", "#64748b"], ["#facc15", "#27272a"],
+];
+const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagini", "Zigzag", "Sir Hiss", "Boop", "Cobra Kai",
+  "Pythonista", "Rattler", "Sidewinder", "Jormungandr", "Ouroboros", "Danger Noodle", "Spaghetti", "Slithers", "Taipan",
+  "Adder", "Asp", "Basilisk", "Garter", "Krait", "Anaconda", "Boa", "Copperhead", "Hognose", "Kingsnake", "Milk Snake",
+  "Racer", "Whip", "Coral", "Sssam", "Hisssy", "Zero Cool", "Lil Fang", "Mr. Scales", "Big Tony", "Worm", "Longboi", "Snek", "Nope Rope", "Sneaky", "Wriggle", "Laces"];
+
+(async () => {
+  const $ = (id) => document.getElementById(id);
+  const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+                  set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
+
+  /* ---------------- WebAssembly ---------------- */
+  const bin = Uint8Array.from(atob(WASM_BASE64), (c) => c.charCodeAt(0));
+  const { instance } = await WebAssembly.instantiate(bin, {});
+  const W = instance.exports;
+  const BOTS = 40;
+  W.init((Math.random() * 4294967295) >>> 0, BOTS);
+  const WR = W.worldRadius();
+  // Memory never grows (all static), so this view stays valid forever.
+  const instBytes = new Uint8Array(W.memory.buffer, W.instPtr(), W.maxInst() * 16);
+
+  /* ---------------- WebGL2 ---------------- */
+  const canvas = $("gl");
+  const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, depth: false, stencil: false,
+    premultipliedAlpha: true, powerPreference: "high-performance", desynchronized: true });
+  if (!gl) { document.body.innerHTML = '<p style="padding:40px;font:18px system-ui;color:#fff">WebGL2 is required.</p>'; return; }
+
+  const PAL = SKINS.map(([a, b]) => [a, b].map((h) => [1, 3, 5].map((i) => (parseInt(h.substr(i, 2), 16) / 255).toFixed(4)).join(",")));
+  const palGLSL = `const vec3 SKA[12]=vec3[](${PAL.map((p) => `vec3(${p[0]})`).join(",")});
+const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
+
+  const BG_VS = `#version 300 es
+  void main(){ vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2)); gl_Position=vec4(p*2.-1.,0,1); }`;
+  const BG_FS = `#version 300 es
+  precision highp float;
+  uniform vec2 uCam, uHalf, uRes; uniform float uWR, uTime;
+  out vec4 o;
+  float hexD(vec2 p){ p=abs(p); return max(dot(p,vec2(.8660254,.5)),p.y); }
+  void main(){
+    vec2 ndc=gl_FragCoord.xy/uRes*2.-1.;
+    vec2 w=uCam+vec2(ndc.x,-ndc.y)*uHalf;
+    // hex tiling
+    vec2 uv=w/46.; const vec2 R=vec2(1.7320508,1.); vec2 H=R*.5;
+    vec2 a=mod(uv,R)-H, b=mod(uv-H,R)-H; vec2 g=dot(a,a)<dot(b,b)?a:b;
+    float e=.5-hexD(g);                       // distance to hex edge
+    float px=uHalf.y*2./uRes.y/46.;
+    float line=1.-smoothstep(.0,px*1.6+.015,e);
+    vec2 id=uv-g; float n=fract(sin(dot(floor(id*2.),vec2(12.9898,78.233)))*43758.5453);
+    vec3 col=mix(vec3(.052,.066,.108),vec3(.066,.084,.136),n*.6+smoothstep(.0,.5,e)*.4);
+    col=mix(col,vec3(.028,.035,.06),line*.85);
+    // world border
+    float r=length(w), out_=smoothstep(uWR-2.,uWR+2.,r);
+    col=mix(col,col*vec3(.55,.22,.28)+vec3(.05,0,.01),out_);
+    float ring=exp(-abs(r-uWR)/(14.+px*46.))*(.7+.3*sin(uTime*3.));
+    col+=vec3(1.,.25,.35)*ring*.55;
+    // vignette
+    col*=1.-.35*dot(ndc*.72,ndc*.72);
+    o=vec4(col,1);
+  }`;
+
+  const VS = `#version 300 es
+  layout(location=0) in vec3 aP; layout(location=1) in uvec4 aI;
+  uniform vec2 uCam, uHalf;
+  out vec2 vL; out float vR; flat out uvec4 vI;
+  void main(){
+    float s = aI.x==0u ? 3.2 : ((aI.w&1u)!=0u ? 1.9 : 1.08);
+    vec2 q = vec2(float(gl_VertexID&1), float(gl_VertexID>>1))*2.-1.;
+    vec2 l = q*aP.z*s;
+    vec2 c = (aP.xy+l-uCam)/uHalf;
+    gl_Position = vec4(c.x,-c.y,0,1);
+    vL=l; vR=aP.z; vI=aI;
+  }`;
+  const FS = `#version 300 es
+  precision highp float;
+  ${palGLSL}
+  uniform float uPx, uTime;
+  in vec2 vL; in float vR; flat in uvec4 vI;
+  out vec4 o;
+  void main(){
+    float d=length(vL), r=vR, aa=uPx*1.2;
+    uint kind=vI.x, sk=vI.y%12u;
+    if(kind==0u){ // food orb with halo
+      float ph=float(vI.z)*.0245;
+      float pulse=.75+.25*sin(uTime*4.+ph);
+      vec3 c=SKA[sk];
+      float core=1.-smoothstep(r*.7-aa,r*.7+aa,d);
+      float glow=exp(-d*d/(r*r*1.6))*.9*pulse;
+      vec3 rgb=c*glow + mix(c,vec3(1),.55*(1.-d/(r*.7)))*core;
+      o=vec4(rgb,core); return;
+    }
+    float edge=1.-smoothstep(r-aa,r+aa,d);
+    float glow=0.;
+    if((vI.w&1u)!=0u) glow=exp(-pow(max(d-r*.8,0.)/(r*.45),2.))*(.55+.25*sin(uTime*18.))*(1.-edge);
+    if(edge<=0. && glow<=.003) discard;
+    uint idx=vI.z;
+    vec3 base = kind==2u ? SKA[sk] : (((idx/3u)&1u)==0u ? SKA[sk] : SKB[sk]);
+    float nd=d/r;
+    vec3 c=base*(1.05-.55*nd*nd);                         // spherical shading
+    c+=vec3(1)*.28*exp(-dot(vL/r-vec2(-.28,-.36),vL/r-vec2(-.28,-.36))*7.); // specular
+    c=mix(c*.55,c,smoothstep(1.,.82,nd));                 // rim
+    if(kind==2u){ // head: eyes
+      float ang=float(vI.z)/256.*6.2831853-3.14159265;
+      vec2 f=vec2(cos(ang),sin(ang)), side=vec2(-f.y,f.x);
+      for(int k=0;k<2;k++){
+        vec2 ec=(f*.32+side*(k==0?.45:-.45))*r;
+        float ed=length(vL-ec), er=r*.3;
+        float ew=1.-smoothstep(er-aa,er+aa,ed);
+        c=mix(c,vec3(.97),ew);
+        float pd=length(vL-ec-f*r*.11), pr=r*.16;
+        c=mix(c,vec3(.03,.04,.07),1.-smoothstep(pr-aa,pr+aa,pd));
+      }
+    }
+    vec3 gc=SKA[sk]*1.2;
+    o=vec4(c*edge+gc*glow, edge);
+  }`;
+
+  function prog(vs, fs) {
+    const p = gl.createProgram();
+    for (const [t, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+      const s = gl.createShader(t); gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+      gl.attachShader(p, s);
+    }
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    const u = {}; const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+    for (let i = 0; i < n; i++) { const name = gl.getActiveUniform(p, i).name; u[name] = gl.getUniformLocation(p, name); }
+    return { p, u };
+  }
+  const bgP = prog(BG_VS, BG_FS), inP = prog(VS, FS);
+
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, instBytes.byteLength, gl.STREAM_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 16, 0);
+  gl.vertexAttribDivisor(0, 1);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribIPointer(1, 4, gl.UNSIGNED_BYTE, 16, 12);
+  gl.vertexAttribDivisor(1, 1);
+  const emptyVao = gl.createVertexArray();
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); // premultiplied
+
+  let vw = 0, vh = 0;
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    vw = Math.round(innerWidth * dpr); vh = Math.round(innerHeight * dpr);
+    if (canvas.width !== vw || canvas.height !== vh) { canvas.width = vw; canvas.height = vh; }
+  }
+  addEventListener("resize", resize); resize();
+
+  /* ---------------- UI ---------------- */
+  let skinSel = +(store.get("serpent.skin") ?? 0) % 12;
+  const skinsEl = $("skins");
+  SKINS.forEach(([a, b], i) => {
+    const el = document.createElement("button");
+    el.className = "skin"; el.title = `Skin ${i + 1}`;
+    el.style.background = `repeating-linear-gradient(135deg, ${a} 0 7px, ${b} 7px 14px)`;
+    el.setAttribute("aria-pressed", i === skinSel);
+    el.onclick = () => { skinSel = i; store.set("serpent.skin", i); [...skinsEl.children].forEach((c, j) => c.setAttribute("aria-pressed", j === i)); };
+    skinsEl.appendChild(el);
+  });
+  const nameEl = $("name"); nameEl.value = store.get("serpent.name") ?? "";
+  let best = +(store.get("serpent.best") ?? 0);
+  const names = []; for (let i = 0; i < 48; i++) names.push(BOT_NAMES[(i * 7 + 3) % BOT_NAMES.length]);
+  const playerName = () => nameEl.value.trim() || "You";
+
+  let state = "menu"; // menu | play | dead
+  let camX = 0, camY = 0, camH = 900, spectate = 1;
+  let deathTime = 0;
+
+  function start() {
+    store.set("serpent.name", nameEl.value.trim());
+    W.spawnPlayer(skinSel);
+    camX = W.headX(0); camY = W.headY(0);
+    state = "play"; document.body.classList.add("playing");
+    $("menu").classList.add("hidden"); $("over").classList.add("hidden");
+    nameEl.blur();
+  }
+  function toMenu() {
+    if (state === "play") W.killPlayer();
+    state = "menu"; document.body.classList.remove("playing");
+    $("over").classList.add("hidden"); $("menu").classList.remove("hidden");
+  }
+  function onDeath() {
+    state = "dead"; deathTime = performance.now();
+    const len = Math.floor(lastMass * 10), k = W.kills(0);
+    const isBest = len > best; if (isBest) { best = len; store.set("serpent.best", best); }
+    $("oLen").textContent = len; $("oKills").textContent = k; $("oBest").textContent = best;
+    $("oBest").classList.toggle("new", isBest);
+    const killer = W.killer();
+    $("by").innerHTML = killer > 0 ? `Crashed into <b>${names[killer]}</b>` : "You hit the edge of the world";
+    setTimeout(() => { if (state === "dead") { $("over").classList.remove("hidden"); document.body.classList.remove("playing"); } }, 900);
+  }
+  $("play").onclick = start; $("again").onclick = start;
+  nameEl.addEventListener("keydown", (e) => { if (e.key === "Enter") start(); e.stopPropagation(); });
+
+  /* ---------------- Input ---------------- */
+  let aim = 0, mouseBoost = false, keyBoost = false, touchBoost = false, keyTurn = 0, usingKeys = false;
+  let mx = innerWidth / 2 + 100, my = innerHeight / 2;
+  canvas.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse") { mx = e.clientX; my = e.clientY; usingKeys = false; } });
+  canvas.addEventListener("mousedown", () => { mouseBoost = true; });
+  addEventListener("mouseup", () => { mouseBoost = false; });
+  const touches = new Map();
+  canvas.addEventListener("touchstart", (e) => { for (const t of e.changedTouches) touches.set(t.identifier, t); onTouch(); e.preventDefault(); }, { passive: false });
+  canvas.addEventListener("touchmove", (e) => { for (const t of e.changedTouches) touches.set(t.identifier, t); onTouch(); e.preventDefault(); }, { passive: false });
+  const endT = (e) => { for (const t of e.changedTouches) touches.delete(t.identifier); onTouch(); };
+  canvas.addEventListener("touchend", endT); canvas.addEventListener("touchcancel", endT);
+  function onTouch() {
+    touchBoost = touches.size >= 2;
+    const t = touches.values().next().value;
+    if (t) { mx = t.clientX; my = t.clientY; usingKeys = false; }
+  }
+  addEventListener("keydown", (e) => {
+    if (e.repeat) return;
+    const k = e.key;
+    if (k === " " || k === "Shift" || k === "ArrowUp" || k === "w") { keyBoost = true; e.preventDefault(); }
+    else if (k === "ArrowLeft" || k === "a") { keyTurn = -1; usingKeys = true; }
+    else if (k === "ArrowRight" || k === "d") { keyTurn = 1; usingKeys = true; }
+    else if (k === "p" || k === "P") $("perf").classList.toggle("off");
+    else if (k === "Enter" && state !== "play") start();
+    else if (k === "Escape" && state !== "menu") toMenu();
+  });
+  addEventListener("keyup", (e) => {
+    const k = e.key;
+    if (k === " " || k === "Shift" || k === "ArrowUp" || k === "w") keyBoost = false;
+    else if ((k === "ArrowLeft" || k === "a") && keyTurn < 0) keyTurn = 0;
+    else if ((k === "ArrowRight" || k === "d") && keyTurn > 0) keyTurn = 0;
+  });
+  addEventListener("blur", () => { keyBoost = mouseBoost = false; keyTurn = 0; });
+
+  /* ---------------- HUD (throttled DOM work) ---------------- */
+  const lbEl = $("lb"), mm = $("mm").getContext("2d");
+  let lastMass = 10, hudT = 0;
+  function updateHud() {
+    const n = W.snakeCount(), rows = [];
+    for (let s = 0; s < n; s++) if (W.alive(s)) rows.push([W.mass(s), s]);
+    rows.sort((a, b) => b[0] - a[0]);
+    let html = "";
+    for (let i = 0; i < Math.min(10, rows.length); i++) {
+      const s = rows[i][1];
+      const nm = (s === 0 ? playerName() : names[s]).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+      html += `<li class="${s === 0 ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[W.skin(s)][0]}"></span><span class="nm">${nm}</span><span>${Math.floor(rows[i][0] * 10)}</span></li>`;
+    }
+    lbEl.innerHTML = html;
+    if (state === "play") {
+      $("len").textContent = Math.floor(W.mass(0) * 10);
+      $("rank").textContent = rows.findIndex((r) => r[1] === 0) + 1;
+      $("total").textContent = rows.length;
+      $("kills").textContent = W.kills(0);
+      // minimap
+      const S = 264, h = S / 2, k = h / WR;
+      mm.clearRect(0, 0, S, S);
+      mm.fillStyle = "rgba(255,255,255,.035)"; mm.beginPath(); mm.arc(h, h, h - 1, 0, 7); mm.fill();
+      mm.strokeStyle = "rgba(148,163,184,.12)"; mm.lineWidth = 2; mm.beginPath();
+      mm.moveTo(h, 0); mm.lineTo(h, S); mm.moveTo(0, h); mm.lineTo(S, h); mm.stroke();
+      for (let i = 0; i < Math.min(8, rows.length); i++) {
+        const s = rows[i][1]; if (s === 0) continue;
+        mm.fillStyle = SKINS[W.skin(s)][0] + "88";
+        mm.beginPath(); mm.arc(h + W.headX(s) * k, h + W.headY(s) * k, 3 + Math.sqrt(rows[i][0]) * .12, 0, 7); mm.fill();
+      }
+      mm.fillStyle = "#fff"; mm.shadowColor = "#fff"; mm.shadowBlur = 10;
+      mm.beginPath(); mm.arc(h + W.headX(0) * k, h + W.headY(0) * k, 5, 0, 7); mm.fill(); mm.shadowBlur = 0;
+    }
+  }
+
+  /* ---------------- Main loop ---------------- */
+  const perfEl = $("perf");
+  let last = performance.now(), fpsAcc = 0, fpsN = 0, simAcc = 0, perfT = 0, instCount = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.1); last = now;
+    const t0 = performance.now();
+
+    if (state === "play") {
+      if (usingKeys) aim += keyTurn * dt * 4.2;
+      else aim = Math.atan2(my - innerHeight / 2, mx - innerWidth / 2);
+      W.setInput(aim, mouseBoost || keyBoost || touchBoost);
+    }
+    W.update(dt);
+
+    // camera
+    let tx, ty, tH;
+    if (state === "play" && W.alive(0)) {
+      tx = W.headX(0); ty = W.headY(0); tH = 520 + W.radius(0) * 26; lastMass = W.mass(0);
+    } else if (state === "play") {
+      onDeath(); tx = camX; ty = camY; tH = camH;
+    } else if (state === "dead") {
+      tx = camX; ty = camY; tH = camH * 1.002;
+    } else {
+      if (!W.alive(spectate) || Math.random() < 0.0008) { let b = 0, bs = 1; for (let s = 1; s < W.snakeCount(); s++) if (W.alive(s) && W.mass(s) > b) { b = W.mass(s); bs = s; } spectate = bs; }
+      tx = W.headX(spectate); ty = W.headY(spectate); tH = 900;
+    }
+    const k = 1 - Math.exp(-dt * (state === "play" ? 14 : 2.5));
+    camX += (tx - camX) * k; camY += (ty - camY) * k; camH += (tH - camH) * (1 - Math.exp(-dt * 2));
+
+    const halfH = camH, halfW = camH * vw / vh;
+    instCount = W.build(camX, camY, halfW, halfH);
+    const simMs = performance.now() - t0;
+
+    // draw: background pass + one instanced pass
+    gl.viewport(0, 0, vw, vh);
+    gl.disable(gl.BLEND);
+    gl.useProgram(bgP.p); gl.bindVertexArray(emptyVao);
+    gl.uniform2f(bgP.u.uCam, camX, camY); gl.uniform2f(bgP.u.uHalf, halfW, halfH);
+    gl.uniform2f(bgP.u.uRes, vw, vh); gl.uniform1f(bgP.u.uWR, WR); gl.uniform1f(bgP.u.uTime, now / 1000);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    gl.enable(gl.BLEND);
+    gl.useProgram(inP.p); gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, instBytes, 0, instCount * 16);
+    gl.uniform2f(inP.u.uCam, camX, camY); gl.uniform2f(inP.u.uHalf, halfW, halfH);
+    gl.uniform1f(inP.u.uPx, halfH * 2 / vh); gl.uniform1f(inP.u.uTime, now / 1000);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instCount);
+
+    // stats
+    fpsAcc += dt; fpsN++; simAcc += simMs;
+    if ((hudT += dt) > 0.25) { hudT = 0; updateHud(); }
+    if ((perfT += dt) > 0.5 && !perfEl.classList.contains("off")) {
+      perfEl.innerHTML = `<b>${Math.round(fpsN / fpsAcc)}</b> fps · sim+build <b>${(simAcc / fpsN).toFixed(2)}</b> ms<br><b>${instCount}</b> sprites · 2 draw calls · <b>${W.foodCount()}</b> food`;
+      perfT = 0; fpsAcc = 0; fpsN = 0; simAcc = 0;
+    }
+  }
+  updateHud();
+  requestAnimationFrame((t) => { last = t; frame(t); });
+})();
+</script>
+</body>
+</html>
