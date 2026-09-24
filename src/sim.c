@@ -38,8 +38,9 @@ typedef unsigned char u8;
 #define REBUILD 32       /* steps between grid compactions */
 
 /* freestanding: the compiler may emit calls to these for struct copies */
-void *memcpy(void *d, const void *s, unsigned long n) { u8 *a = d; const u8 *b = s; while (n--) *a++ = *b++; return d; }
-void *memset(void *d, int v, unsigned long n) { u8 *a = d; while (n--) *a++ = (u8)v; return d; }
+/* with -mbulk-memory these compile to the native memory.copy / memory.fill instructions */
+void *memcpy(void *d, const void *s, unsigned long n) { __builtin_memcpy(d, s, n); return d; }
+void *memset(void *d, int v, unsigned long n) { __builtin_memset(d, v, n); return d; }
 
 /* ---------- math (no libm available) ---------- */
 static float sqrtf_(float x) { return __builtin_sqrtf(x); }
@@ -79,6 +80,7 @@ static float frand(void) { return (float)(rnd() >> 8) * (1.f / 16777216.f); }
 /* ---------- state ---------- */
 typedef struct {
   float ang, tang, mass, r, spacing, dropT, dropMass, aiT, tx, ty, respawnT, huntT, hx, hy;
+  float dcx, dcy; /* heading as a unit vector (no trig per step) */
   i32 n, alive, boost, wantBoost, skin, bot, kills, target, tier, near, orbit;
   float rushT;
   u32 pc; /* trail points pushed so far (monotonic across lives) */
@@ -123,11 +125,44 @@ static const float T_MASS[5] = {40.f, 150.f, 450.f, 1200.f, 2500.f}; /*   + spre
 /* recent death (vultures: hunters and above rush to the food) */
 static float deathX, deathY; static u32 deathTick = 0xffff0000u;
 
-static u8 omap[MN * MN];
-static float omX0, omY0; /* world position of the window's corner */
+static u8 omap[MN * MN + 16];
+static float omX0 = -MN * MC * 0.5f, omY0 = -MN * MC * 0.5f; /* world position of the window's corner */
 
 typedef struct { float x, y, r; u32 info; } Inst;
-static Inst inst[MAXI];
+typedef struct { float hx, hy, u, r, spacing, stride, ang, W; u32 row, newest, n, info; } Head;
+typedef struct { float x, y, size; u32 info; } Mini; /* info: kind | skin<<8 | alpha<<16, rect: kind | halfH<<8 */
+/* Everything the GPU needs each frame, contiguous so it goes up in ONE upload:
+   frame uniforms | indirect draw args | snake headers | minimap | food (only
+   the used prefix of the food array is sent). */
+static struct {
+  float frameBlk[12];  /* std140 Frame block: camX camY halfW halfH | px time lblScale 0 | vw vh WR 0 */
+  u32 indirect[20];    /* WebGPU drawIndirect args x5 */
+  Head hdr[MAXS];
+  Mini mini[MAXS + 4];
+  Inst inst[MAXI];
+} AR __attribute__((aligned(16)));
+#define frameBlk AR.frameBlk
+#define indirect AR.indirect
+#define hdr AR.hdr
+#define mini AR.mini
+#define inst AR.inst
+
+/* Trail changes since the last frame, for the GPU to apply itself:
+   (index into the whole trail array, packed x|y<<16). Rows that were rewritten
+   wholesale (a snake respawned) are flagged instead. */
+#define MAXUPD 4096
+static u32 upd[MAXUPD * 2 + 2], nupd; /* upd[0..1] = count, pad */
+static unsigned long long rowsDirty;
+EXPORT("updPtr") u32 *updPtr(void) { return upd; }
+EXPORT("rowsDirtyLo") u32 rowsDirtyLo(void) { return (u32)rowsDirty; }
+EXPORT("rowsDirtyHi") u32 rowsDirtyHi(void) { return (u32)(rowsDirty >> 32); }
+/* JS calls this once it has handed the changes to the GPU */
+EXPORT("updDone") void updDone(void) { nupd = 0; upd[0] = 0; rowsDirty = 0; }
+static void trailChanged(i32 s, u32 i) {
+  if (nupd >= MAXUPD) { rowsDirty |= 1ull << s; return; }
+  u32 *u = &upd[2 + nupd * 2]; upd[0] = ++nupd;
+  u[0] = (u32)s * RING + i; u[1] = (u32)(unsigned short)tr[s][i][0] | ((u32)(unsigned short)tr[s][i][1] << 16);
+}
 
 static u32 tick;
 static i32 playerKiller = -1;
@@ -152,9 +187,13 @@ static i32 segsFor(float m) { i32 n = 14 + (i32)(3.6f * sqrtf_(m)); return n > M
 /* ---------- spatial hash ---------- */
 static void segInsert(i32 s, u32 c) {
   if (gN >= POOL) return; /* compaction is forced before this can matter */
-  i32 i = gN++, cell = cellOf(UQ(tr[s][c & RMASK][0]), UQ(tr[s][c & RMASK][1]));
+  float x = UQ(tr[s][c & RMASK][0]), y = UQ(tr[s][c & RMASK][1]);
+  /* only segments inside the window around the player matter: nothing far away
+     is ever collision-tested (far snakes use the statistical model) */
+  if (x < omX0 || y < omY0 || x >= omX0 + MN * MC || y >= omY0 + MN * MC) return;
+  i32 i = gN++, cell = cellOf(x, y);
   gS[i] = (u8)s; gC[i] = c; gNext[i] = gHead[cell]; gHead[cell] = (short)i;
-  i32 mx = (i32)((UQ(tr[s][c & RMASK][0]) - omX0) * (1.f / MC)), my = (i32)((UQ(tr[s][c & RMASK][1]) - omY0) * (1.f / MC));
+  i32 mx = (i32)((x - omX0) * (1.f / MC)), my = (i32)((y - omY0) * (1.f / MC));
   if ((u32)mx < MN && (u32)my < MN) { u8 *m = &omap[my * MN + mx], v = (u8)(s + 1); *m = *m == 0 || *m == v ? v : 255; }
 }
 /* node -> valid segment of a live snake? */
@@ -211,6 +250,7 @@ static void pushTrail(i32 s, float x, float y) {
   Snake *k = &S[s];
   u32 i = k->pc & RMASK;
   tr[s][i][0] = q3(x); tr[s][i][1] = q3(y);
+  trailChanged(s, i);
   segInsert(s, k->pc);
   k->pc++;
 }
@@ -234,7 +274,7 @@ static void spawnSnake(i32 s, float mass, i32 bot, i32 skin) {
     if (bot && t < 30 && dx * dx + dy * dy < (focR + 300.f) * (focR + 300.f)) continue; /* never pop in on screen */
     if (!dangerAt(s, x, y, 300.f)) break;
   }
-  k->ang = k->tang = frand() * TAU - PI;
+  k->ang = k->tang = frand() * TAU - PI; k->dcx = cosf_(k->ang); k->dcy = sinf_(k->ang);
   k->mass = mass; k->r = radiusFor(mass); k->spacing = k->r * 0.42f; k->n = segsFor(mass);
   k->bot = bot; k->skin = skin; k->kills = 0; k->boost = k->wantBoost = 0;
   k->dropT = k->dropMass = 0; k->aiT = 0; k->huntT = 0; k->target = -1; k->near = 1; k->rushT = 0; k->orbit = 1;
@@ -248,6 +288,7 @@ static void spawnSnake(i32 s, float mass, i32 bot, i32 skin) {
     tr[s][i][0] = q3(x - cx * k->spacing * (float)j); tr[s][i][1] = q3(y - sy * k->spacing * (float)j);
   }
   k->alive = 1; k->phx = x; k->phy = y; k->ppc = k->pc;
+  rowsDirty |= 1ull << s; /* whole ring rewritten: upload the row */
   for (i32 j = k->n - 1; j >= 0; j--) segInsert(s, k->pc - 1u - (u32)j);
 }
 
@@ -271,12 +312,17 @@ static void moveSnake(i32 s, float dt) {
   float turn = 5.2f / (1.f + (k->r - 12.f) * 0.045f) * dt;
   float da = wrapa(k->tang - k->ang);
   if (da > turn) da = turn; else if (da < -turn) da = -turn;
-  k->ang = wrapa(k->ang + da);
+  if (da != 0.f) { /* rotate the heading vector by da (|da| < 0.1: short series is exact to ~1e-9) */
+    k->ang = wrapa(k->ang + da);
+    float d2 = da * da, c = 1.f - d2 * 0.5f + d2 * d2 * (1.f / 24.f), sn = da * (1.f - d2 * (1.f / 6.f));
+    float x = k->dcx * c - k->dcy * sn, y = k->dcx * sn + k->dcy * c, l2 = x * x + y * y, f = 1.5f - 0.5f * l2; /* renormalise */
+    k->dcx = x * f; k->dcy = y * f;
+  }
 
   k->boost = k->wantBoost && k->mass > 14.f;
   float speed = k->boost ? 430.f : 195.f;
-  k->hx += cosf_(k->ang) * speed * dt;
-  k->hy += sinf_(k->ang) * speed * dt;
+  k->hx += k->dcx * speed * dt;
+  k->hy += k->dcy * speed * dt;
 
   if (k->boost) {
     float lose = (6.f + k->mass * 0.006f) * dt;
@@ -287,9 +333,10 @@ static void moveSnake(i32 s, float dt) {
     }
   }
 
-  k->r = radiusFor(k->mass);
+  float sq = sqrtf_(k->mass); /* one sqrt for both growth curves */
+  k->r = minf(10.f + sq * 0.45f, 40.f);
   k->spacing = k->r * 0.42f;
-  i32 want = segsFor(k->mass);
+  i32 want = 14 + (i32)(3.6f * sq); if (want > MAXSEG) want = MAXSEG;
   /* growth reveals older trail points: link them into the grid */
   while (k->n < want) { segInsert(s, k->pc - 1u - (u32)k->n); k->n++; }
   k->n = want;
@@ -334,17 +381,17 @@ static void legendDodge(i32 s, i32 h) {
   if (h == -2) { /* world edge: step back inside and face the centre */
     float d = sqrtf_(k->hx * k->hx + k->hy * k->hy), lim = WR - k->r - 4.f;
     k->hx *= lim / d; k->hy *= lim / d;
-    k->ang = k->tang = atan2f_(-k->hy, -k->hx);
+    k->ang = k->tang = atan2f_(-k->hy, -k->hx); k->dcx = cosf_(k->ang); k->dcy = sinf_(k->ang);
     return;
   }
   float nx = k->hx - hitX, ny = k->hy - hitY, d = sqrtf_(nx * nx + ny * ny);
-  if (d < 1e-3f) { nx = -cosf_(k->ang); ny = -sinf_(k->ang); d = 1.f; }
+  if (d < 1e-3f) { nx = -k->dcx; ny = -k->dcy; d = 1.f; }
   nx /= d; ny /= d;
   k->hx = hitX + nx * (hitT + 1.f); k->hy = hitY + ny * (hitT + 1.f);
-  float tx = -ny, ty = nx, fx_ = cosf_(k->ang), fy_ = sinf_(k->ang);
+  float tx = -ny, ty = nx, fx_ = k->dcx, fy_ = k->dcy;
   if (tx * fx_ + ty * fy_ < 0) { tx = -tx; ty = -ty; }
   float a = atan2f_(ty + nx * 0.35f, tx + ny * 0.35f); /* along the body, veering away */
-  k->ang = k->tang = a;
+  k->ang = k->tang = a; k->dcx = cosf_(a); k->dcy = sinf_(a);
   k->aiT = 0; k->huntT = 0.f; /* rethink next step */
 }
 
@@ -378,7 +425,7 @@ static void predictHeads(void) {
     Snake *q = &S[o];
     if (!q->alive || !q->near) continue;
     float v = (q->boost ? 430.f : 195.f) * 0.4f;
-    phX[nph] = q->hx + cosf_(q->ang) * v; phY[nph] = q->hy + sinf_(q->ang) * v; phR[nph] = q->r * 2.f; phId[nph++] = o;
+    phX[nph] = q->hx + q->dcx * v; phY[nph] = q->hy + q->dcy * v; phR[nph] = q->r * 2.f; phId[nph++] = o;
   }
 }
 static i32 headDanger(i32 self, float x, float y, float rad) {
@@ -409,8 +456,8 @@ static void botThink(i32 s, float dt) {
       } else {
         /* cut off: aim where its head will be; better bots lead further */
         float lead = o->r * 4.f + 70.f + (tier >= 3 ? 90.f : 0.f);
-        k->tx = o->hx + cosf_(o->ang) * lead;
-        k->ty = o->hy + sinf_(o->ang) * lead;
+        k->tx = o->hx + o->dcx * lead;
+        k->ty = o->hy + o->dcy * lead;
       }
     }
   }
@@ -432,7 +479,7 @@ static void botThink(i32 s, float dt) {
       if (k->target >= 0) {
         k->huntT = 1.f + frand() * (tier >= 3 ? 3.f : 1.5f);
         Snake *o = &S[k->target];
-        k->orbit = ((o->hx - hx) * sinf_(o->ang) - (o->hy - hy) * cosf_(o->ang)) > 0 ? 1 : -1;
+        k->orbit = ((o->hx - hx) * o->dcy - (o->hy - hy) * o->dcx) > 0 ? 1 : -1;
       }
     }
     if (k->target < 0 && k->rushT <= 0 && k->mass > 250.f && hx * hx + hy * hy > WR * WR * 0.2f && frand() < 0.5f) {
@@ -440,7 +487,7 @@ static void botThink(i32 s, float dt) {
       k->aiT = 1.5f;
     } else if (k->target < 0 && k->rushT <= 0) {
       /* best food by value / distance, favouring what is in front */
-      float ca = cosf_(k->ang), sa = sinf_(k->ang), bestScore = 0;
+      float ca = k->dcx, sa = k->dcy, bestScore = 0;
       i32 cx = cellX(hx), cy = cellX(hy), w = tier == 0 ? 1 : 2;
       for (i32 gy = cy - w; gy <= cy + w; gy++) {
         if (gy < 0 || gy >= GN) continue;
@@ -545,7 +592,8 @@ static void step(float dt) {
     if (!k->alive) continue;
     float dx = k->hx - focX, dy = k->hy - focY, R = focR + k->r * 2.f;
     k->near = s == 0 || dx * dx + dy * dy < R * R;
-    moveSnake(s, dt);
+    if (k->near) moveSnake(s, dt);
+    else if ((tick + (u32)s) & 1u) moveSnake(s, dt * 2.f); /* far away: half rate, same speed */
   }
 
   i32 nd = 0;
@@ -598,6 +646,7 @@ EXPORT("refillFood") void refillFood(void);
 EXPORT("spawnPlayer") void spawnPlayer(i32 skin) {
   S[0].tier = 3; spawnSnake(0, 10.f, 0, skin); playerKiller = -1;
   camX = focX = S[0].hx; camY = focY = S[0].hy; refillFood();
+  rebuild(); /* re-centre the collision window on the new view at once */
 }
 /* Fill food around a new focus at once (spawn, respawn, menu). */
 EXPORT("refillFood") void refillFood(void) { recount = 1; for (i32 t = 0; t < 400; t++) maintainFood(64); }
@@ -652,8 +701,7 @@ EXPORT("build") i32 build(float cx, float cy, float hw, float hh) {
    (one instance per visible snake). The CPU only writes a 48-byte header per
    visible snake. The fragment shader then reconstructs the overlapping-circle
    scales analytically (~1x overdraw). */
-typedef struct { float hx, hy, u, r, spacing, stride, ang, W; u32 row, newest, n, info; } Head;
-static Head hdr[MAXS];
+
 static i32 nvis, maxK;
 /* per-snake snapshot for JS (camera, HUD, minimap, labels): one read, no calls */
 typedef struct { float alive, x, y, mass, r, skin, tier, near, onScreen, kills; } Snap;
@@ -671,7 +719,7 @@ EXPORT("snapshot") void snapshot(void) {
     /* interpolated head; if the last step pushed trail points the head is now
        "behind" them, so step back to the newest point it is still ahead of */
     float hx = k->phx + (k->hx - k->phx) * alpha, hy = k->phy + (k->hy - k->phy) * alpha;
-    float ca = cosf_(k->ang), sa = sinf_(k->ang);
+    float ca = k->dcx, sa = k->dcy;
     u32 j0 = 0, pushes = k->pc - k->ppc;
     if (pushes > 4) pushes = 4;
     while (j0 < pushes && (hx - TX(s, j0)) * ca + (hy - TY(s, j0)) * sa < 0) j0++;
@@ -697,8 +745,10 @@ EXPORT("renderPrep") i32 renderPrep(float cx, float cy, float hw, float hh, floa
     i32 n = k->n;
     float W = k->boost ? 1.9f : k->tier == LEGEND && k->bot ? 1.5f : 1.08f, m = k->r * W * 2.f + 20.f;
     float x0 = cx - hw - m, x1 = cx + hw + m, y0 = cy - hh - m, y1 = cy + hh + m;
-    /* integer cull on the raw 16-bit trail */
+    /* integer cull on the raw 16-bit trail (after a cheap body-length reject) */
     i32 any = hx > x0 && hx < x1 && hy > y0 && hy < y1;
+    float reach = (float)n * k->spacing;
+    if (!any && (hx < x0 - reach || hx > x1 + reach || hy < y0 - reach || hy > y1 + reach)) continue;
     if (!any) {
       i32 qx0 = (i32)(x0 * 4.f), qx1 = (i32)(x1 * 4.f), qy0 = (i32)(y0 * 4.f), qy1 = (i32)(y1 * 4.f);
       for (i32 i = 0; i < n && !any; i++) {
@@ -760,8 +810,7 @@ EXPORT("ring") i32 ringSize(void) { return RING; }
 
 /* ---------- minimap (drawn by WebGL, not Canvas2D) ----------
    Coordinates are normalised to the minimap disc (radius 1). */
-typedef struct { float x, y, size; u32 info; } Mini; /* info: kind | skin<<8 | alpha<<16, rect: kind | halfH<<8 */
-static Mini mini[MAXS + 4];
+
 static i32 miniPrep(float camX, float camY, float hw, float hh) {
   i32 n = 0;
   const float k = 1.f / WR;
@@ -790,10 +839,8 @@ static float expf_(float x) { /* 2^(x*log2 e), enough for smoothing factors */
 }
 static float camH = 900.f, specT = 99.f;
 static i32 spectate = 1;
-static float frameBlk[12];     /* camX camY halfW halfH | px time lblScale 0 | vw vh WR 0 */
 static i32 frameOut[8];        /* food sprites, snakes drawn, maxK, runs, minimap items */
 /* WebGPU drawIndirect args, 4 x u32 per draw: floor, food, snakes, labels, minimap */
-static u32 indirect[20];
 EXPORT("indirectPtr") u32 *indirectPtr(void) { return indirect; }
 /* Accurate simulation cost on this device: time many steps in one go, so the
    browser's coarse/jittered timer doesn't matter. Advances the game. */

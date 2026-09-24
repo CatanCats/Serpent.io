@@ -13,7 +13,8 @@ function createGL(canvas, E) {
   const palGLSL = `const vec3 SKA[12]=vec3[](${PAL.map((p) => `vec3(${p[0]})`).join(",")});
 const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   // Per-frame values shared by every program: ONE uniform-buffer upload per frame.
-  const FRAME = `layout(std140) uniform Frame { vec4 uCamHalf; vec4 uPxTime; vec4 uResWR; };`;
+  // highp members: fragment shaders below default to mediump (half precision on mobile GPUs)
+  const FRAME = `layout(std140) uniform Frame { highp vec4 uCamHalf; highp vec4 uPxTime; highp vec4 uResWR; };`;
 
   const BG_VS = `#version 300 es
   void main(){ vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2)); gl_Position=vec4(p*2.-1.,0,1); }`;
@@ -31,14 +32,21 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     // two blend factors only (RG8: half the bytes of RGBA8); colours are applied when drawing
     o=vec4(smoothstep(.0,.5,e), 1.-smoothstep(.0,.03,e), 0, 1);
   }`;
+  const BGW_VS = `#version 300 es
+  ${FRAME}
+  out vec2 vW, vN;
+  void main(){
+    vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2))*2.-1.;
+    gl_Position=vec4(p,0,1); vN=p; vW=uCamHalf.xy+vec2(p.x,-p.y)*uCamHalf.zw; // interpolated: no per-pixel maths
+  }`;
   const BG_FS = `#version 300 es
   precision highp float;
+  in vec2 vW, vN;
   ${FRAME}
   uniform sampler2D uTile;
   out vec4 o;
   void main(){
-    vec2 ndc=gl_FragCoord.xy/uResWR.xy*2.-1.;
-    vec2 w=uCamHalf.xy+vec2(ndc.x,-ndc.y)*uCamHalf.zw;
+    vec2 ndc=vN, w=vW;
     float px=uCamHalf.w*2./uResWR.y/46.;
     vec2 tf=texture(uTile, w/46./vec2(1.7320508,1.)).rg;
     vec3 col=mix(mix(vec3(.052,.066,.108),vec3(.07,.088,.14),tf.x),vec3(.028,.035,.06),tf.y*.85);
@@ -65,7 +73,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     vL=l; vR=aP.z; vI=aI;
   }`;
   const FS = `#version 300 es
-  precision highp float;
+  precision mediump float;
   ${palGLSL}
   ${FRAME}
   in vec2 vL; in float vR; flat in uvec4 vI;
@@ -73,7 +81,8 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   void main(){
     float d=length(vL), r=vR, aa=uPxTime.x*1.2;
     vec3 c=SKA[vI.y%12u];
-    float pulse=.75+.25*sin(uPxTime.y*4.+float(vI.z)*.0245);
+    highp float ph=uPxTime.y*4.+float(vI.z)*.0245;
+    float pulse=.75+.25*sin(ph);
     float born=smoothstep(0.,10.,float(vI.w));   // fade in over ~0.6 s: no popping
     float rr=r*(.4+.6*born);
     float core=(1.-smoothstep(rr*.7-aa,rr*.7+aa,d))*born;
@@ -194,9 +203,9 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     vL=q*ext; vS=ext; vI=aI;
   }`;
   const MFS = `#version 300 es
-  precision highp float;
+  precision mediump float;
   ${palGLSL}
-  uniform vec3 uMini;
+  uniform highp vec3 uMini;
   in vec2 vL; in vec2 vS; flat in uint vI; out vec4 o;
   vec4 over(vec4 a, vec4 b){ return a+b*(1.-a.a); } // premultiplied "a over b"
   void main(){
@@ -220,6 +229,20 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   }`;
 
 
+  const SC_VS = `#version 300 es
+  layout(location=0) in uvec2 aU; // (index into trail, x | y<<16)
+  flat out ivec2 vV;
+  void main(){
+    uint i=aU.x;
+    vec2 t=vec2(float(i % ${RING}u)+.5, float(i / ${RING}u)+.5);
+    gl_Position=vec4(t/vec2(${RING}., ${NS}.)*2.-1.,0,1); gl_PointSize=1.;
+    int x=int(aU.y & 65535u), y=int(aU.y >> 16u);
+    vV=ivec2(x>32767?x-65536:x, y>32767?y-65536:y);
+  }`;
+  const SC_FS = `#version 300 es
+  precision highp int; flat in ivec2 vV; out ivec4 o;
+  void main(){ o=ivec4(vV,0,0); }`;
+
   function prog(vs, fs, ubo = true) {
     const p = gl.createProgram();
     for (const [t, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
@@ -232,7 +255,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     if (ubo) gl.uniformBlockBinding(p, gl.getUniformBlockIndex(p, "Frame"), 0);
     return p;
   }
-  const bgP = prog(BG_VS, BG_FS), foodP = prog(VS, FS), ribP = prog(RVS, RFS), lblP = prog(LVS, LFS), miniP = prog(MVS, MFS, false);
+  const bgP = prog(BGW_VS, BG_FS), foodP = prog(VS, FS), ribP = prog(RVS, RFS), lblP = prog(LVS, LFS), miniP = prog(MVS, MFS, false), scP = prog(SC_VS, SC_FS, false);
 
   // Textures live on fixed units for the whole run (no per-frame rebinding):
   // unit 0 trail (two, alternating), unit 1 floor tile, unit 2 label atlas.
@@ -265,38 +288,40 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   gl.uniform2f(gl.getUniformLocation(lblP, "uSlot"), E.SLOT_W, E.SLOT_H);
   gl.uniform2f(gl.getUniformLocation(lblP, "uCells"), E.CELLS_X, E.CELLS_Y);
 
-  // Everything dynamic is double-buffered: the CPU writes one copy while the
-  // GPU may still be reading last frame's (avoids implicit sync stalls).
-  const foodVao = [], hdrVao = [], miniVao = [], foodVbo = [], hdrVbo = [], miniVbo = [], trailTex = [], ubo = [];
+  // ONE buffer per frame mirrors the WASM per-frame block (uniforms + all instance
+  // data), double-buffered so the CPU never waits for the GPU. The UBO is a range of it.
+  const A = E.arena, arena = [], foodVao = [], hdrVao = [], miniVao = [];
   const inst = (loc, n, type, stride, off, int) => {
     gl.enableVertexAttribArray(loc);
     if (int) gl.vertexAttribIPointer(loc, n, type, stride, off); else gl.vertexAttribPointer(loc, n, type, false, stride, off);
     gl.vertexAttribDivisor(loc, 1);
   };
   for (let i = 0; i < 2; i++) {
+    arena[i] = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, arena[i]);
+    gl.bufferData(gl.ARRAY_BUFFER, A.size, gl.DYNAMIC_DRAW);
     foodVao[i] = gl.createVertexArray(); gl.bindVertexArray(foodVao[i]);
-    foodVbo[i] = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, foodVbo[i]);
-    gl.bufferData(gl.ARRAY_BUFFER, E.instBytes.byteLength, gl.DYNAMIC_DRAW);
-    inst(0, 3, gl.FLOAT, 16, 0); inst(1, 4, gl.UNSIGNED_BYTE, 16, 12, true);
-
+    inst(0, 3, gl.FLOAT, 16, A.inst); inst(1, 4, gl.UNSIGNED_BYTE, 16, A.inst + 12, true);
     hdrVao[i] = gl.createVertexArray(); gl.bindVertexArray(hdrVao[i]);
-    hdrVbo[i] = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, hdrVbo[i]);
-    gl.bufferData(gl.ARRAY_BUFFER, E.hdrBytes.byteLength, gl.DYNAMIC_DRAW);
-    inst(0, 4, gl.FLOAT, 48, 0); inst(1, 4, gl.FLOAT, 48, 16); inst(2, 4, gl.UNSIGNED_INT, 48, 32, true);
-
+    inst(0, 4, gl.FLOAT, 48, A.hdr); inst(1, 4, gl.FLOAT, 48, A.hdr + 16); inst(2, 4, gl.UNSIGNED_INT, 48, A.hdr + 32, true);
     miniVao[i] = gl.createVertexArray(); gl.bindVertexArray(miniVao[i]);
-    miniVbo[i] = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, miniVbo[i]);
-    gl.bufferData(gl.ARRAY_BUFFER, E.miniBytes.byteLength, gl.DYNAMIC_DRAW);
-    inst(0, 3, gl.FLOAT, 16, 0); inst(1, 1, gl.UNSIGNED_INT, 16, 12, true);
-
-    trailTex[i] = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, trailTex[i]);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG16I, RING, NS);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-
-    ubo[i] = gl.createBuffer(); gl.bindBuffer(gl.UNIFORM_BUFFER, ubo[i]);
-    gl.bufferData(gl.UNIFORM_BUFFER, 48, gl.DYNAMIC_DRAW);
+    inst(0, 3, gl.FLOAT, 16, A.mini); inst(1, 1, gl.UNSIGNED_INT, 16, A.mini + 12, true);
   }
+  // Trail: one RG16I texture kept in sync by drawing only the changed points into it.
+  const trailTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, trailTex); // unit 0
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG16I, RING, NS);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, RING, NS, gl.RG_INTEGER, gl.SHORT, E.trail);
+  const trailFb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, trailFb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, trailTex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  const updBytes = new Uint8Array(E.mem, E.ptr.upd, E.upd.byteLength);
+  const scVbo = gl.createBuffer(), scVao = gl.createVertexArray();
+  gl.bindVertexArray(scVao); gl.bindBuffer(gl.ARRAY_BUFFER, scVbo);
+  gl.bufferData(gl.ARRAY_BUFFER, updBytes.byteLength, gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribIPointer(0, 2, gl.UNSIGNED_INT, 8, 8);
   const emptyVao = gl.createVertexArray();
   gl.bindVertexArray(null);
   gl.enable(gl.BLEND); // always on: the floor writes alpha 1, so blending it is a no-op
@@ -321,45 +346,40 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     },
     labelsDone() { gl.activeTexture(gl.TEXTURE2); gl.generateMipmap(gl.TEXTURE_2D); gl.activeTexture(gl.TEXTURE0); },
     draw(frameNo, playing, timing) {
-      const o = E.frameOut, instCount = o[0], nVis = o[1], maxK = o[2], nRuns = o[3], nMini = o[4];
+      const o = E.frameOut, instCount = o[0], nVis = o[1], maxK = o[2], nMini = playing ? o[4] : 0;
       const f = frameNo & 1;
       const qs = timing && tq && pending.length < 3 ? [] : null;
       const mark = () => { if (!qs) return; if (qs.length) gl.endQuery(tq.TIME_ELAPSED_EXT); const q = gl.createQuery(); gl.beginQuery(tq.TIME_ELAPSED_EXT, q); qs.push(q); };
-      gl.bindBuffer(gl.UNIFORM_BUFFER, ubo[f]); gl.bufferSubData(gl.UNIFORM_BUFFER, 0, E.frameBlk);
-      gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, ubo[f]);
+      // ONE upload: uniforms + snake headers + minimap + used food, from WASM memory
+      gl.bindBuffer(gl.ARRAY_BUFFER, arena[f]);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, E.arenaBytes, 0, A.inst + instCount * 16);
+      gl.bindBufferRange(gl.UNIFORM_BUFFER, 0, arena[f], 0, 48);
+
+      // trail: rewrite respawned rows, then draw the changed points into the texture
+      const lo = E.W.rowsDirtyLo(), hi = E.W.rowsDirtyHi();
+      if (lo | hi) for (let r = 0; r < NS; r++) if ((r < 32 ? lo >>> r : hi >>> (r - 32)) & 1)
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, r, RING, 1, gl.RG_INTEGER, gl.SHORT, E.trail, r * RING * 2);
+      const nUpd = E.upd[0];
+      if (nUpd) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, trailFb); gl.viewport(0, 0, RING, NS); gl.disable(gl.BLEND);
+        gl.useProgram(scP); gl.bindVertexArray(scVao); gl.bindBuffer(gl.ARRAY_BUFFER, scVbo);
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, updBytes, 0, (2 + nUpd * 2) * 4);
+        gl.drawArrays(gl.POINTS, 0, nUpd);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.enable(gl.BLEND);
+      }
       gl.viewport(0, 0, vw, vh);
 
       mark(); // floor
       gl.useProgram(bgP); gl.bindVertexArray(emptyVao);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       mark(); // food
-      if (instCount) {
-        gl.useProgram(foodP); gl.bindVertexArray(foodVao[f]);
-        gl.bindBuffer(gl.ARRAY_BUFFER, foodVbo[f]);
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, E.instBytes, 0, instCount * 16);
-        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instCount);
-      }
+      if (instCount) { gl.useProgram(foodP); gl.bindVertexArray(foodVao[f]); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instCount); }
       mark(); // snakes
-      if (nVis) {
-        gl.bindTexture(gl.TEXTURE_2D, trailTex[f]); // unit 0
-        for (let i = 0; i < nRuns; i++) {
-          const r0 = E.runs[i * 2];
-          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, r0, RING, E.runs[i * 2 + 1], gl.RG_INTEGER, gl.SHORT, E.trail, r0 * RING * 2);
-        }
-        gl.useProgram(ribP); gl.bindVertexArray(hdrVao[f]);
-        gl.bindBuffer(gl.ARRAY_BUFFER, hdrVbo[f]);
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, E.hdrBytes, 0, nVis * 48);
-        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 2 * (maxK + 3), nVis);
-      }
+      if (nVis) { gl.useProgram(ribP); gl.bindVertexArray(hdrVao[f]); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 2 * (maxK + 3), nVis); }
       mark(); // labels (same headers)
       if (nVis) { gl.useProgram(lblP); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, nVis); }
       mark(); // minimap
-      if (playing && nMini) {
-        gl.useProgram(miniP); gl.bindVertexArray(miniVao[f]);
-        gl.bindBuffer(gl.ARRAY_BUFFER, miniVbo[f]);
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, E.miniBytes, 0, nMini * 16);
-        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, nMini);
-      }
+      if (nMini) { gl.useProgram(miniP); gl.bindVertexArray(miniVao[f]); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, nMini); }
       if (qs) { gl.endQuery(tq.TIME_ELAPSED_EXT); pending.push(qs); }
       while (pending.length && gl.getQueryParameter(pending[0][4], gl.QUERY_RESULT_AVAILABLE)) {
         const done = pending.shift(), ok = !gl.getParameter(tq.GPU_DISJOINT_EXT);

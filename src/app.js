@@ -36,13 +36,16 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const E = {
     W, mem, NS, RING, SKINS, SLOT_W, SLOT_H, CELLS_X, CELLS_Y, AW: SLOT_W * LS * CELLS_X, AH: SLOT_H * LS * CELLS_Y,
     frameBlk, frameOut,
-    instBytes: new Uint8Array(mem, W.instPtr(), W.maxInst() * 16),
-    hdrBytes: new Uint8Array(mem, W.hdrPtr(), NS * 48),
-    miniBytes: new Uint8Array(mem, W.miniPtr(), (NS + 4) * 16),
     trail: new Int16Array(mem, W.trailPtr(), NS * RING * 2),
-    runs: new Uint32Array(mem, W.runsPtr(), 128),
-    ptr: { frameBlk: W.frameBlkPtr(), indirect: W.indirectPtr(), inst: W.instPtr(), hdr: W.hdrPtr(), mini: W.miniPtr(), trail: W.trailPtr() },
+    upd: new Uint32Array(mem, W.updPtr(), 2 + 4096 * 2),   // [count, pad, (index, value)...]: trail changes
+    ptr: { trail: W.trailPtr(), upd: W.updPtr() },
+    drawMode: new URLSearchParams(location.search).get("draws") || "direct",
   };
+  // The per-frame GPU block in WASM memory: offsets relative to its start (frame uniforms at 0)
+  const base = W.frameBlkPtr();
+  E.arena = { base, indirect: W.indirectPtr() - base, hdr: W.hdrPtr() - base, mini: W.miniPtr() - base,
+              inst: W.instPtr() - base, size: W.instPtr() - base + W.maxInst() * 16 };
+  E.arenaBytes = new Uint8Array(mem, base, E.arena.size);
 
   /* ---------------- Renderer: WebGPU first, WebGL 2 as the backup ----------------
      ?renderer=webgl forces the backup. A lost WebGPU device reloads into WebGL. */
@@ -227,6 +230,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   /* ---------------- Main loop ----------------
      JS gathers input, makes ONE WebAssembly call and hands its output to the GPU. */
   const perfEl = $("perf");
+  const noGpuTime = new URLSearchParams(location.search).get("gputime") === "0"; // for A/B CPU measurements
   const PASS = ["floor", "food", "snakes", "labels", "map"];
   const T = { sim: 0, prep: 0, gl: 0, hud: 0, n: 0 };
   let resDrops = 1, frameNo = 0, last = performance.now(), fpsAcc = 0, perfT = 0, hudT = 0, avgDt = 1 / 60, resT = 0;
@@ -250,15 +254,16 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     camX = frameBlk[0]; camY = frameBlk[1]; camH = frameBlk[3]; lastMass = snap[0] ? snap[3] : lastMass;
     const t2 = performance.now();
 
-    const timing = !perfEl.classList.contains("off");
+    const timing = !perfEl.classList.contains("off") && !noGpuTime;
     R.draw(frameNo++, playing, timing);
+    W.updDone(); // trail changes handed to the GPU
     const t3 = performance.now();
 
     if ((hudT += dt) > 0.25) { hudT = 0; updateHud(); } // DOM: 4x per second
     const t4 = performance.now();
 
     T.sim += frameMs[0]; T.prep += frameMs[1]; T.gl += t3 - t2; T.hud += t4 - t3; T.n++; fpsAcc += dt;
-    if ((perfT += dt) > 0.5 && timing) {
+    if ((perfT += dt) > 0.5 && !perfEl.classList.contains("off")) {
       const a = (v) => (v / T.n).toFixed(2);
       let near = 0; for (let s = 1; s < NS; s++) near += snap[s * 10] && snap[s * 10 + 7] ? 1 : 0;
       const gpu = R.gpuMs >= 0 ? `<b>${R.gpuMs.toFixed(2)} ms</b>` + (R.passMs ? " (" + R.passMs.map((v, i) => `${PASS[i]} ${v.toFixed(2)}`).join(" · ") + ")" : "") : R.canTime ? "…" : "n/a";
