@@ -9,9 +9,10 @@ function createGL(canvas, E) {
     premultipliedAlpha: true, powerPreference: "high-performance" });
   if (!gl) return null;
   const { NS, RING } = E;
-  const PAL = E.SKINS.map(([a, b]) => [a, b].map((h) => [1, 3, 5].map((i) => (parseInt(h.substr(i, 2), 16) / 255).toFixed(4)).join(",")));
-  const palGLSL = `const vec3 SKA[12]=vec3[](${PAL.map((p) => `vec3(${p[0]})`).join(",")});
-const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
+  // Skin palette in a uniform buffer, looked up once per VERTEX and handed to the pixels
+  // as flat colours. (Indexing a constant array per pixel is a slow path on Direct3D,
+  // which runs WebGL in Edge/Chrome on Windows.)
+  const PAL = `layout(std140) uniform Pal { vec4 uPal[24]; };`; // 12 main colours, then 12 stripe colours
   // Per-frame values shared by every program: ONE uniform-buffer upload per frame.
   // highp members: fragment shaders below default to mediump (half precision on mobile GPUs)
   const FRAME = `layout(std140) uniform Frame { highp vec4 uCamHalf; highp vec4 uPxTime; highp vec4 uResWR; };`;
@@ -62,25 +63,25 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   // Food: instanced glowing orbs.
   const VS = `#version 300 es
   ${FRAME}
+  ${PAL}
   layout(location=0) in vec3 aP; layout(location=1) in uvec4 aI;
-  out vec2 vL; out float vR; flat out uvec4 vI;
+  out vec2 vL; out float vR; flat out uvec4 vI; flat out vec3 vC;
   void main(){
     vec2 q = vec2(float(gl_VertexID&1), float(gl_VertexID>>1))*2.-1.;
     bool tiny = aP.z/uPxTime.x < 1.6;                       // pellet under ~1.6 px: no halo
     vec2 l = q*(tiny ? aP.z*.7+uPxTime.x*1.5 : aP.z*1.9);
     vec2 c = (aP.xy+l-uCamHalf.xy)/uCamHalf.zw;
     gl_Position = vec4(c.x,-c.y,0,1);
-    vL=l; vR=aP.z; vI=aI;
+    vL=l; vR=aP.z; vI=aI; vC=uPal[aI.y%12u].rgb;
   }`;
   const FS = `#version 300 es
   precision mediump float;
-  ${palGLSL}
   ${FRAME}
-  in vec2 vL; in float vR; flat in uvec4 vI;
+  in vec2 vL; in float vR; flat in uvec4 vI; flat in vec3 vC;
   out vec4 o;
   void main(){
     float d=length(vL), r=vR, aa=uPxTime.x*1.2;
-    vec3 c=SKA[vI.y%12u];
+    vec3 c=vC;
     highp float ph=uPxTime.y*4.+float(vI.z)*.0245;
     float pulse=.75+.25*sin(ph);
     float born=smoothstep(0.,10.,float(vI.w));   // fade in over ~0.6 s: no popping
@@ -98,11 +99,12 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   const RVS = `#version 300 es
   precision highp float; precision highp int; precision highp isampler2D;
   ${FRAME}
+  ${PAL}
   uniform highp isampler2D uTrail;
   layout(location=0) in vec4 aH0;  // head x, y, u, radius
   layout(location=1) in vec4 aH1;  // spacing, stride, angle, width factor
   layout(location=2) in uvec4 aH2; // row, newest trail index, segments, skin|flags<<8
-  out float vT, vV; out vec2 vDir; flat out uint vSk, vFl; flat out float vR, vNl;
+  out float vT, vV; out vec2 vDir; flat out uint vFl; flat out float vR, vNl; flat out vec3 vCA, vCB;
   const float CR=1./.42;
   vec2 T(int k){ return vec2(texelFetch(uTrail, ivec2((int(aH2.y)-k)&${RING - 1}, int(aH2.x)), 0).rg)*.25; }
   vec2 fwd(){ return vec2(cos(aH1.z),sin(aH1.z)); }
@@ -127,18 +129,18 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     vec2 c=(p+(side?nrm:-nrm)-uCamHalf.xy)/uCamHalf.zw;
     gl_Position=vec4(c.x,-c.y,0,1);
     vT=t; vV=side?W:-W; vDir=tg;
-    vSk=(aH2.w&255u)%12u; vFl=aH2.w>>8; vR=aH0.w; vNl=float(n-1);
+    uint sk=(aH2.w&255u)%12u; vCA=uPal[sk].rgb; vCB=uPal[12u+sk].rgb;
+    vFl=aH2.w>>8; vR=aH0.w; vNl=float(n-1);
   }`;
   const RFS = `#version 300 es
   precision highp float;
-  ${palGLSL}
   ${FRAME}
-  in float vT, vV; in vec2 vDir; flat in uint vSk, vFl; flat in float vR, vNl;
+  in float vT, vV; in vec2 vDir; flat in uint vFl; flat in float vR, vNl; flat in vec3 vCA, vCB;
   out vec4 o;
   const float SP=.42, CR=1./.42;
   vec3 shade(float k, vec2 l, float nd, vec2 f){
     uint ki=uint(k);
-    vec3 base = ki==0u ? SKA[vSk] : (((ki>>2u)&1u)==0u ? SKA[vSk] : SKB[vSk]);
+    vec3 base = ki==0u || ((ki>>2u)&1u)==0u ? vCA : vCB;
     vec3 c=base*(1.05-.55*nd*nd);
     vec2 sp=l-vec2(-.28,-.36);
     c+=vec3(.28)*exp(-dot(sp,sp)*7.);
@@ -163,7 +165,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     float n0=length(l0), n1=length(l1);
     float e0=1.-smoothstep(1.-aa,1.+aa,n0), e1=(1.-smoothstep(1.-aa,1.+aa,n1))*(1.-e0);
     float a=e0+e1, glow=0.;
-    vec3 gc=SKA[vSk]*1.2;
+    vec3 gc=vCA*1.2;
     float gd=min(n0,n1); // distance to the nearest scale circle: round glow, also at head and tail
     if((vFl&1u)!=0u) glow=exp(-pow(max(gd-.8,0.)/.45,2.))*(.55+.25*sin(uPxTime.y*18.))*(1.-a);
     else if((vFl&4u)!=0u){ glow=exp(-pow(max(gd-.85,0.)/.3,2.))*(.45+.15*sin(uPxTime.y*2.5+vT*.3))*(1.-a); gc=vec3(1.,.78,.3); }
@@ -195,12 +197,13 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
 
   // Minimap: one instanced draw in a corner of the same canvas (no Canvas2D).
   const MVS = `#version 300 es
+  ${PAL}
   layout(location=0) in vec3 aP; layout(location=1) in uint aI;
   uniform vec3 uMini; // centre (clip) and radius in device px
   uniform vec2 uRes;
-  out vec2 vL; out vec2 vS; flat out uint vI;
+  out vec2 vL; out vec2 vS; flat out uint vI; flat out vec3 vC;
   void main(){
-    uint kind=aI&255u;
+    uint kind=aI&255u; vC=uPal[((aI>>8)&255u)%12u].rgb;
     vec2 q=vec2(float(gl_VertexID&1), float(gl_VertexID>>1))*2.-1.;
     vec2 ext = kind==3u ? vec2(aP.z, float(aI>>8)/16777215.) + 6./uMini.z : vec2(aP.z*(kind==0u?1.03:1.) + 1.5/uMini.z);
     vec2 m=aP.xy+q*ext;                       // minimap units (disc radius 1), y down
@@ -209,9 +212,8 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   }`;
   const MFS = `#version 300 es
   precision mediump float;
-  ${palGLSL}
   uniform highp vec3 uMini;
-  in vec2 vL; in vec2 vS; flat in uint vI; out vec4 o;
+  in vec2 vL; in vec2 vS; flat in uint vI; flat in vec3 vC; out vec4 o;
   vec4 over(vec4 a, vec4 b){ return a+b*(1.-a.a); } // premultiplied "a over b"
   void main(){
     uint kind=vI&255u; float aa=1./uMini.z; vec4 c=vec4(0);
@@ -222,7 +224,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
       c=over(vec4(vec3(.98,.44,.52)*.5,.5)*(1.-smoothstep(0.,2.*aa,abs(d-(1.-2.*aa)))), c);
     } else if(kind==1u){
       float r=vS.x-1.5*aa, a=(1.-smoothstep(r-aa,r+aa,length(vL)))*float((vI>>16)&255u)/255.;
-      c=vec4(SKA[(vI>>8)&255u]*a,a);
+      c=vec4(vC*a,a);
     } else if(kind==2u){ // you
       float d=length(vL), r=vS.x-1.5*aa;
       c=over(vec4(vec3(1),1)*(1.-smoothstep(r*.55-aa,r*.55+aa,d)), vec4(vec3(.3),.3)*(1.-smoothstep(r-aa,r+aa,d)));
@@ -244,6 +246,8 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
     if (ubo) gl.uniformBlockBinding(p, gl.getUniformBlockIndex(p, "Frame"), 0);
+    const pi = gl.getUniformBlockIndex(p, "Pal");
+    if (pi !== gl.INVALID_INDEX) gl.uniformBlockBinding(p, pi, 1);
     return p;
   }
   const bgP = prog(BGW_VS, BG_FS), foodP = prog(VS, FS), ribP = prog(RVS, RFS), lblP = prog(LVS, LFS), miniP = prog(MVS, MFS, false);
@@ -303,6 +307,10 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG16I, RING, NS);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  const palBuf = gl.createBuffer();
+  gl.bindBuffer(gl.UNIFORM_BUFFER, palBuf);
+  gl.bufferData(gl.UNIFORM_BUFFER, E.palette, gl.STATIC_DRAW);
+  gl.bindBufferBase(gl.UNIFORM_BUFFER, 1, palBuf);
   const emptyVao = gl.createVertexArray();
   gl.bindVertexArray(null);
   gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); // premultiplied (enabled after the floor)

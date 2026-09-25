@@ -20,9 +20,7 @@ async function createGPU(canvas, E) {
   const q = device.queue, U = GPUBufferUsage, TU = GPUTextureUsage;
   device.pushErrorScope("validation");
 
-  const hex = (h) => [1, 3, 5].map((i) => (parseInt(h.substr(i, 2), 16) / 255).toFixed(4)).join(",");
-  const PAL = `var<private> SKA: array<vec3f,12> = array<vec3f,12>(${E.SKINS.map(([a]) => `vec3f(${hex(a)})`).join(",")});
-var<private> SKB: array<vec3f,12> = array<vec3f,12>(${E.SKINS.map(([, b]) => `vec3f(${hex(b)})`).join(",")});`;
+
 
   const WGSL = /* wgsl */ `${F16 ? "enable f16;" : ""}
 // colour maths in half precision where the GPU supports it (big win on mobile GPUs)
@@ -36,7 +34,8 @@ struct Mini { c: vec4f };
 @group(0) @binding(4) var atlasTex: texture_2d<f32>;
 @group(0) @binding(5) var linClamp: sampler;
 @group(0) @binding(6) var<uniform> M: Mini;
-${PAL}
+// skin palette (12 main, then 12 stripe colours): read once per vertex, passed to pixels flat
+@group(0) @binding(7) var<uniform> PAL: array<vec4f, 24>;
 const RM: i32 = ${RING - 1};
 const CR: f32 = 2.38095238;   // 1 / 0.42: circle radius in segment units
 const SP: f32 = 0.42;
@@ -80,17 +79,17 @@ fn hexD(p0: vec2f) -> f32 { let p = abs(p0); return max(dot(p, vec2f(.8660254, .
 
 // ---------- food ----------
 struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
-  @location(1) @interpolate(flat) r: f32, @location(2) @interpolate(flat) info: vec4u };
+  @location(1) @interpolate(flat) r: f32, @location(2) @interpolate(flat) info: vec4u, @location(3) @interpolate(flat) col: vec3f };
 @vertex fn vsFood(@builtin(vertex_index) vi: u32, @location(0) p: vec3f, @location(1) info: vec4u) -> FoodO {
   let q = quad(vi) * 2. - 1.;
   let tiny = p.z / F.pxTime.x < 1.6;                       // under ~1.6 px: no halo
   let l = q * select(p.z * 1.9, p.z * .7 + F.pxTime.x * 1.5, tiny);
   let c = (p.xy + l - F.camHalf.xy) / F.camHalf.zw;
-  var o: FoodO; o.pos = vec4f(c.x, -c.y, 0., 1.); o.l = l; o.r = p.z; o.info = info; return o;
+  var o: FoodO; o.pos = vec4f(c.x, -c.y, 0., 1.); o.l = l; o.r = p.z; o.info = info; o.col = PAL[info.y % 12u].rgb; return o;
 }
 @fragment fn fsFood(i: FoodO) -> @location(0) vec4f {
   let d = length(i.l); let r = i.r; let aa = F.pxTime.x * 1.2;
-  let c = SKA[i.info.y % 12u];
+  let c = i.col;
   let pulse = .75 + .25 * sin(F.pxTime.y * 4. + f32(i.info.z) * .0245);
   let born = smoothstep(0., 10., f32(i.info.w));
   let rr = r * (.4 + .6 * born);
@@ -104,8 +103,8 @@ struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
 
 // ---------- snakes: ribbons built from the trail texture ----------
 struct RibO { @builtin(position) pos: vec4f, @location(0) t: f32, @location(1) v: f32, @location(2) dir: vec2f,
-  @location(3) @interpolate(flat) sk: u32, @location(4) @interpolate(flat) fl: u32,
-  @location(5) @interpolate(flat) r: f32, @location(6) @interpolate(flat) nl: f32 };
+  @location(3) @interpolate(flat) ca: vec3f, @location(4) @interpolate(flat) fl: u32,
+  @location(5) @interpolate(flat) r: f32, @location(6) @interpolate(flat) nl: f32, @location(7) @interpolate(flat) cb: vec3f };
 fn T(h2: vec4u, k: i32) -> vec2f {
   let v = trail[h2.x * ${RING}u + u32((i32(h2.y) - k) & RM)];
   return vec2f(f32(bitcast<i32>(v << 16u) >> 16u), f32(bitcast<i32>(v) >> 16u)) * .25;
@@ -133,12 +132,13 @@ fn fwd(h1: vec4f) -> vec2f { return vec2f(cos(h1.z), sin(h1.z)); }
   let c = (p + select(-nrm, nrm, side) - F.camHalf.xy) / F.camHalf.zw;
   var o: RibO;
   o.pos = vec4f(c.x, -c.y, 0., 1.); o.t = t; o.v = select(-W, W, side); o.dir = tg;
-  o.sk = (h2.w & 255u) % 12u; o.fl = h2.w >> 8u; o.r = h0.w; o.nl = f32(n - 1);
+  let sk = (h2.w & 255u) % 12u; o.ca = PAL[sk].rgb; o.cb = PAL[12u + sk].rgb;
+  o.fl = h2.w >> 8u; o.r = h0.w; o.nl = f32(n - 1);
   return o;
 }
-fn shade(k: f32, l: vec2f, nd: f32, f: vec2f, sk: u32, r: f32) -> vec3f {
+fn shade(k: f32, l: vec2f, nd: f32, f: vec2f, ca: vec3f, cb: vec3f, r: f32) -> vec3f {
   let ki = u32(k);
-  var base = SKA[sk]; if (ki != 0u && ((ki >> 2u) & 1u) == 1u) { base = SKB[sk]; }
+  var base = ca; if (ki != 0u && ((ki >> 2u) & 1u) == 1u) { base = cb; }
   var c = base * (1.05 - .55 * nd * nd);
   let sp = l - vec2f(-.28, -.36);
   c += vec3f(.28) * exp(-dot(sp, sp) * 7.);
@@ -163,14 +163,14 @@ fn shade(k: f32, l: vec2f, nd: f32, f: vec2f, sk: u32, r: f32) -> vec3f {
   let n0 = length(l0); let n1 = length(l1);
   let e0 = 1. - smoothstep(1. - aa, 1. + aa, n0); let e1 = (1. - smoothstep(1. - aa, 1. + aa, n1)) * (1. - e0);
   let a = e0 + e1;
-  var gc = SKA[i.sk] * 1.2; var glow = 0.;
+  var gc = i.ca * 1.2; var glow = 0.;
   let gd = min(n0, n1); // distance to the nearest scale circle: round glow, also at head and tail
   if ((i.fl & 1u) != 0u) { glow = exp(-pow(max(gd - .8, 0.) / .45, 2.)) * (.55 + .25 * sin(F.pxTime.y * 18.)) * (1. - a); }
   else if ((i.fl & 4u) != 0u) { glow = exp(-pow(max(gd - .85, 0.) / .3, 2.)) * (.45 + .15 * sin(F.pxTime.y * 2.5 + i.t * .3)) * (1. - a); gc = vec3f(1., .78, .3); }
   if (a <= 0. && glow <= .003) { discard; }
   var c = vec3f(0.);
-  if (e0 > 0.) { c += shade(k0, l0, n0, f, i.sk, i.r) * e0; }
-  if (e1 > 0.) { c += shade(k1, l1, n1, f, i.sk, i.r) * e1; }
+  if (e0 > 0.) { c += shade(k0, l0, n0, f, i.ca, i.cb, i.r) * e0; }
+  if (e1 > 0.) { c += shade(k1, l1, n1, f, i.ca, i.cb, i.r) * e1; }
   if ((i.fl & 4u) != 0u) { c += vec3f(1., .85, .4) * .18 * a * (.5 + .5 * sin(i.t * .8 - F.pxTime.y * 3.)); } // shimmering scales
   return vec4f(c + gc * glow, a);
 }
@@ -190,7 +190,7 @@ struct LblO { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 @fragment fn fsLbl(i: LblO) -> @location(0) vec4f { return textureSample(atlasTex, linClamp, i.uv); }
 
 // ---------- minimap ----------
-struct MiniO { @builtin(position) pos: vec4f, @location(0) l: vec2f, @location(1) s: vec2f, @location(2) @interpolate(flat) info: u32 };
+struct MiniO { @builtin(position) pos: vec4f, @location(0) l: vec2f, @location(1) s: vec2f, @location(2) @interpolate(flat) info: u32, @location(3) @interpolate(flat) col: vec3f };
 @vertex fn vsMini(@builtin(vertex_index) vi: u32, @location(0) p: vec3f, @location(1) info: u32) -> MiniO {
   let kind = info & 255u;
   let q = quad(vi) * 2. - 1.;
@@ -199,7 +199,7 @@ struct MiniO { @builtin(position) pos: vec4f, @location(0) l: vec2f, @location(1
   let m = p.xy + q * ext;
   var o: MiniO;
   o.pos = vec4f(M.c.xy + vec2f(m.x, -m.y) * M.c.z * 2. / F.resWR.xy, 0., 1.);
-  o.l = q * ext; o.s = ext; o.info = info; return o;
+  o.l = q * ext; o.s = ext; o.info = info; o.col = PAL[((info >> 8u) & 255u) % 12u].rgb; return o;
 }
 fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
 @fragment fn fsMini(i: MiniO) -> @location(0) vec4f {
@@ -213,7 +213,7 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   } else if (kind == 1u) {
     let r = i.s.x - 1.5 * aa;
     let a = hf((1. - smoothstep(r - aa, r + aa, length(i.l))) * f32((i.info >> 16u) & 255u) / 255.);
-    c = hv4(hv3(SKA[(i.info >> 8u) & 255u]) * a, a);
+    c = hv4(hv3(i.col) * a, a);
   } else if (kind == 2u) {
     let d = length(i.l); let r = i.s.x - 1.5 * aa;
     c = over(hv4(1.) * hf(1. - smoothstep(r * .55 - aa, r * .55 + aa, d)), hv4(hv3(.3), hf(.3)) * hf(1. - smoothstep(r - aa, r + aa, d)));
@@ -244,6 +244,8 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   // ONE buffer mirrors the WASM per-frame block: frame uniforms + all instance data
   const A = E.arena, arenaBuf = buf(A.size, U.UNIFORM | U.VERTEX | U.COPY_DST);
   const miniUBuf = buf(16, U.UNIFORM | U.COPY_DST);
+  const palBuf = buf(E.palette.byteLength, U.UNIFORM | U.COPY_DST);
+  q.writeBuffer(palBuf, 0, E.palette);
   const trailBuf = buf(NS * RING * 4, U.STORAGE | U.COPY_DST);
   // trail copy on the GPU: rows of on-screen snakes are kept in sync by WASM's upload list
   const mips = (w, h) => 1 + Math.floor(Math.log2(Math.max(w, h)));
@@ -263,12 +265,14 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
     { binding: 4, visibility: FR, texture: {} },
     { binding: 5, visibility: FR, sampler: {} },
     { binding: 6, visibility: V | FR, buffer: {} },
+    { binding: 7, visibility: V, buffer: {} },
   ] });
   const bind = device.createBindGroup({ layout: bgl, entries: [
     { binding: 0, resource: { buffer: arenaBuf, offset: 0, size: 48 } }, { binding: 1, resource: linRep },
     { binding: 2, resource: tileTex.createView() }, { binding: 3, resource: { buffer: trailBuf } },
     { binding: 4, resource: atlasTex.createView() }, { binding: 5, resource: linClamp },
     { binding: 6, resource: { buffer: miniUBuf } },
+    { binding: 7, resource: { buffer: palBuf } },
   ] });
   const layout = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
   const PREMUL = { color: { srcFactor: "one", dstFactor: "one-minus-src-alpha" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" } };

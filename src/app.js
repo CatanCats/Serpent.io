@@ -46,6 +46,9 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   E.arena = { base, hdr: W.hdrPtr() - base, mini: W.miniPtr() - base,
               inst: W.instPtr() - base, size: W.instPtr() - base + W.maxInst() * 16 };
   E.arenaBytes = new Uint8Array(mem, base, E.arena.size);
+  // skin palette as 24 vec4s (12 main colours, then 12 stripe colours) for a uniform buffer
+  E.palette = new Float32Array(96);
+  SKINS.forEach(([a, b], i) => [a, b].forEach((h, k) => [1, 3, 5].forEach((o, c) => { E.palette[(k * 12 + i) * 4 + c] = parseInt(h.substr(o, 2), 16) / 255; })));
 
   /* ---------------- Renderer: WebGPU first, WebGL 2 as the backup ----------------
      ?renderer=webgl forces the backup. A lost WebGPU device reloads into WebGL. */
