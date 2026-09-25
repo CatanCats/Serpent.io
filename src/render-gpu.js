@@ -20,8 +20,6 @@ async function createGPU(canvas, E) {
   const q = device.queue, U = GPUBufferUsage, TU = GPUTextureUsage;
   device.pushErrorScope("validation");
 
-
-
   const WGSL = /* wgsl */ `${F16 ? "enable f16;" : ""}
 // colour maths in half precision where the GPU supports it (big win on mobile GPUs)
 alias hf = ${F16 ? "f16" : "f32"}; alias hv3 = vec3<hf>; alias hv4 = vec4<hf>;
@@ -250,8 +248,8 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   // trail copy on the GPU: rows of on-screen snakes are kept in sync by WASM's upload list
   const mips = (w, h) => 1 + Math.floor(Math.log2(Math.max(w, h)));
   const tileTex = device.createTexture({ size: [512, 296], format: "rg8unorm", mipLevelCount: mips(512, 296),
-    usage: TU.TEXTURE_BINDING | TU.RENDER_ATTACHMENT | TU.COPY_DST });
-  const atlasTex = device.createTexture({ size: [E.AW, E.AH], format: "rgba8unorm", mipLevelCount: mips(E.AW, E.AH),
+    usage: TU.TEXTURE_BINDING | TU.RENDER_ATTACHMENT });
+  const atlasTex = device.createTexture({ size: [E.AW, E.AH], format: "rgba8unorm", // drawn ~1:1 with the screen: no mips
     usage: TU.TEXTURE_BINDING | TU.RENDER_ATTACHMENT | TU.COPY_DST });
   const linRep = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "repeat", addressModeV: "repeat" }); // no anisotropy: the floor is seen straight on
   const linClamp = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear" });
@@ -294,14 +292,11 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
     mini: pipe("vsMini", "fsMini", miniL, PREMUL),
   };
 
-
-  // ---- one-off: bake the floor tile, and a small mipmap generator ----
+  // ---- one-off: bake the floor tile and its mipmaps ----
   const mipMod = device.createShaderModule({ code: MIP_WGSL });
-  const mipPipes = {};
-  const mipPipeFor = (fmt) => mipPipes[fmt] ??= device.createRenderPipeline({ layout: "auto", vertex: { module: mipMod, entryPoint: "vs" },
-    fragment: { module: mipMod, entryPoint: "fs", targets: [{ format: fmt }] }, primitive: { topology: "triangle-list" } });
+  const mipPipe = device.createRenderPipeline({ layout: "auto", vertex: { module: mipMod, entryPoint: "vs" },
+    fragment: { module: mipMod, entryPoint: "fs", targets: [{ format: "rg8unorm" }] }, primitive: { topology: "triangle-list" } });
   function genMips(tex) {
-    const mipPipe = mipPipeFor(tex.format);
     const enc = device.createCommandEncoder();
     for (let l = 1; l < tex.mipLevelCount; l++) {
       const bg = device.createBindGroup({ layout: mipPipe.getBindGroupLayout(0), entries: [
@@ -357,7 +352,6 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
     labelSlot(src, x, y) {
       q.copyExternalImageToTexture({ source: src }, { texture: atlasTex, origin: { x, y }, premultipliedAlpha: true }, [src.width, src.height]);
     },
-    labelsDone() { genMips(atlasTex); },
     draw(frameNo, playing, timing) {
       const o = E.frameOut, instCount = o[0], nVis = o[1], maxK = o[2], nMini = playing ? o[4] : 0;
       // ONE upload for all per-frame data, straight from WebAssembly memory

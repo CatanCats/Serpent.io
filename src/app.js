@@ -194,7 +194,6 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       const key = s === 0 ? "p:" + playerName() : snap[s * 10] ? "t" + snap[s * 10 + 6] : slotKey[s];
       if (key !== slotKey[s]) drawSlot(s, key);
     }
-    if (atlasDirty) { R.labelsDone(); atlasDirty = false; }
     if (state !== "play") return;
     $("len").textContent = Math.floor(snap[3] * 10);
     $("rank").textContent = lb[1];
@@ -211,7 +210,6 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   slotCanvas.width = SLOT_W * LS; slotCanvas.height = SLOT_H * LS;
   const sc = slotCanvas.getContext("2d");
   const FONT = 'Outfit, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
-  let atlasDirty = false;
   function drawSlot(s, key) {
     slotKey[s] = key;
     sc.setTransform(LS, 0, 0, LS, 0, 0);
@@ -229,7 +227,6 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       sc.letterSpacing = "0px";
     }
     R.labelSlot(slotCanvas, (s % CELLS_X) * SLOT_W * LS, Math.floor(s / CELLS_X) * SLOT_H * LS);
-    atlasDirty = true;
   }
   // re-draw every label once the web font has loaded
   document.fonts?.ready.then(() => slotKey.fill(""));
@@ -247,7 +244,6 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   /* ---------------- Main loop ----------------
      JS gathers input, makes ONE WebAssembly call and hands its output to the GPU. */
   const perfEl = $("perf");
-  const noGpuTime = new URLSearchParams(location.search).get("gputime") === "0"; // for A/B CPU measurements
   const T = { sim: 0, prep: 0, gl: 0, hud: 0, n: 0 };
   let resDrops = 1, frameNo = 0, last = performance.now(), fpsAcc = 0, perfT = 0, hudT = 0, avgDt = 1 / 60, resT = 0;
   function frame(now) {
@@ -270,7 +266,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (snap[0]) lastMass = snap[3];
     const t2 = performance.now();
 
-    const timing = !perfEl.classList.contains("off") && !noGpuTime;
+    const timing = !perfEl.classList.contains("off");
     R.draw(frameNo++, playing, timing);
     const t3 = performance.now();
 
@@ -287,16 +283,19 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       perfT = 0; fpsAcc = 0; T.sim = T.prep = T.gl = T.hud = T.n = 0;
     }
   }
-  // Is WebAssembly running at full speed? A healthy browser does a sim step in
-  // ~5-30 us; 20x slower means its compilers are off (e.g. Edge "Enhance your
-  // security on the web"), which also slows JavaScript.
-  {
-    const us = W.bench(30);
-    if (us > 300) {
+  // Is WebAssembly running at full speed? Checked once it has warmed up (the first
+  // calls include compiling). A healthy browser needs ~10-40 us per step, even on
+  // a slow laptop; 15x more means the browser runs it without its compilers
+  // (e.g. Edge "Enhance your security on the web"), which also slows JavaScript.
+  setTimeout(() => {
+    if (state !== "menu") return;
+    const us = W.bench(120);
+    benchTxt = `<br>WebAssembly: <b>${us.toFixed(1)} µs</b> per sim step`;
+    if (us > 400) {
       const n = $("slowNote"); n.hidden = false;
-      n.innerHTML = `WebAssembly is running ~${Math.round(us / 10)}× slower than normal in this browser. In Edge: click the padlock / site-info icon in the address bar and turn off <b>Enhance security for this site</b>, or set edge://settings/privacy → "Enhance your security on the web" to <b>Basic</b>.`;
+      n.innerHTML = `WebAssembly is running very slowly here (${Math.round(us)} µs per step; normal is 10–40). That happens when the browser runs it without its compilers. In Edge: <b>edge://settings/privacy</b> → "Enhance your security on the web" → choose <b>Basic</b>, or add this page as an exception. "Balanced" (the default) also applies it to sites you rarely visit.`;
     }
-  }
+  }, 2500);
   W.snapshot(); updateHud();
   window.__serpent = { W, snap, names, renderer: () => R.name }; // debugging / automated tests
   requestAnimationFrame((t) => { last = t; frame(t); });

@@ -1,8 +1,8 @@
 /* ============================================================================
    WebGL 2 renderer (fallback when WebGPU is unavailable).
    Interface shared with the WebGPU renderer:
-     name, resize(vw, vh), placeMini(cx, cy, rPx), labelSlot(canvas, x, y),
-     labelsDone(), draw(frameNo, playing, timing), gpuMs, passMs
+     name, passNames, canTime, gpuMs, passMs,
+     resize(vw, vh), placeMini(cx, cy, rPx), labelSlot(canvas, x, y), draw(frameNo, playing, timing)
    ========================================================================== */
 function createGL(canvas, E) {
   const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, depth: false, stencil: false,
@@ -271,8 +271,8 @@ function createGL(canvas, E) {
   }
   const atlas = gl.createTexture();
   gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, atlas);
-  gl.texStorage2D(gl.TEXTURE_2D, 1 + Math.floor(Math.log2(Math.max(E.AW, E.AH))), gl.RGBA8, E.AW, E.AH);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, E.AW, E.AH); // drawn ~1:1 with the screen: no mips needed
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.activeTexture(gl.TEXTURE0);
 
@@ -332,7 +332,6 @@ function createGL(canvas, E) {
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
       gl.activeTexture(gl.TEXTURE0);
     },
-    labelsDone() { gl.activeTexture(gl.TEXTURE2); gl.generateMipmap(gl.TEXTURE_2D); gl.activeTexture(gl.TEXTURE0); },
     draw(frameNo, playing, timing) {
       const o = E.frameOut, instCount = o[0], nVis = o[1], maxK = o[2], nMini = playing ? o[4] : 0;
       const f = frameNo & 1;

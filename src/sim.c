@@ -1,19 +1,21 @@
 /*
- * Serpent.io simulation core — compiled to WebAssembly (no libc, no malloc).
+ * Serpent.io simulation core, compiled to WebAssembly (no libc, no malloc).
  *
- * Everything lives in static memory, so the JS side can create typed-array
- * views once and never re-allocate.
+ * All state is static, so JS makes typed-array views once and never allocates.
+ * One exported call per frame, frame(), runs input -> fixed 60 Hz steps ->
+ * interpolation -> camera -> culling -> GPU data, and writes everything the GPU
+ * needs into one contiguous block that JS uploads as-is.
  *
- * Old-machine tricks:
- *  - A body is never moved. Each snake is a ring buffer of its head's trail
- *    (16-bit fixed point); a step only pushes a point when the head has
- *    travelled one segment spacing, so movement is O(1) per snake, not O(len).
- *    Segments are the trail sampled at equal arc length (exact, smooth).
- *  - Spatial hash is incremental: new trail points / pellets are linked into
- *    their cell as they appear, stale nodes are skipped by a validity check,
- *    and the lists are compacted only every REBUILD steps.
- * Rendering data is written into a flat instance buffer that JS uploads to the
- * GPU with a single bufferSubData and draws with a single instanced call.
+ *  - Bodies are never moved: each snake is a ring buffer of its head's trail
+ *    (16-bit fixed point). A step pushes a point only when the head has moved
+ *    one segment spacing, so movement is O(1) per snake. Segments are the trail
+ *    sampled at equal arc length (the GPU does the sampling).
+ *  - Detail only where the player looks: snakes near the camera get collisions,
+ *    eating and real AI; the rest move at quarter rate and live or die by a
+ *    per-tier statistical model. Food and the collision/AI maps exist only
+ *    around the camera, so cost does not grow with the map.
+ *  - Spatial hash is incremental (nodes linked as they appear, stale ones
+ *    skipped) and compacted every REBUILD steps.
  */
 typedef unsigned int u32;
 typedef int i32;
@@ -37,8 +39,8 @@ typedef unsigned char u8;
 #define POOL 16384       /* segment grid nodes */
 #define REBUILD 32       /* steps between grid compactions */
 
-/* freestanding: the compiler may emit calls to these for struct copies */
-/* with -mbulk-memory these compile to the native memory.copy / memory.fill instructions */
+/* Freestanding: the compiler may call these; with -mbulk-memory they become the
+   native memory.copy / memory.fill instructions. */
 void *memcpy(void *d, const void *s, unsigned long n) { __builtin_memcpy(d, s, n); return d; }
 void *memset(void *d, int v, unsigned long n) { __builtin_memset(d, v, n); return d; }
 
@@ -81,14 +83,14 @@ static float frand(void) { return (float)(rnd() >> 8) * (1.f / 16777216.f); }
 typedef struct {
   float ang, tang, mass, r, spacing, dropT, dropMass, aiT, tx, ty, respawnT, huntT, hx, hy;
   float dcx, dcy; /* heading as a unit vector (no trig per step) */
-  i32 n, alive, boost, wantBoost, skin, bot, kills, target, tier, near, orbit;
+  i32 n, alive, boost, wantBoost, skin, kills, target, tier, near, orbit, seen; /* seen: drawn last frame */
   float rushT;
   u32 pc; /* trail points pushed so far (monotonic across lives) */
   float phx, phy; u32 ppc; /* state before the last fixed step (render interpolation) */
 } Snake;
 
 static Snake S[MAXS];
-/* trail, fixed point Q3, interleaved x,y: uploaded as-is to an RG16I texture */
+/* trail, fixed point (Q2), interleaved x,y: a byte copy goes to the GPU */
 static short tr[MAXS][RING][2];
 static i32 NS = 40;
 
@@ -113,7 +115,7 @@ static float focX, focY, focR = 2000.f;
 #define LEGEND 4
 static const i32 T_EVERY[5] = {4, 2, 2, 1, 1};                    /* think every N steps */
 static const float T_LOOK[5] = {0.6f, 1.f, 1.2f, 1.45f, 1.8f};    /* probe reach */
-static const float T_AGGR[5] = {0.f, 0.25f, 0.6f, 1.f, 1.f};      /* hunting appetite */
+static const float T_AGGR[5] = {0.f, 0.25f, 0.6f, 1.f, 0.25f};    /* hunting appetite (legends survive by staying calm) */
 static const float T_NOISE[5] = {0.35f, 0.12f, 0.04f, 0.f, 0.f};  /* steering sloppiness */
 /* The "dumb equation" used out of the player's view: growth and death odds by tier */
 static const float T_GROW[5] = {0.05f, 0.3f, 1.3f, 3.2f, 5.f};    /* mass/s */
@@ -121,6 +123,9 @@ static const float T_RISK[5] = {1.f / 35, 1.f / 90, 1.f / 400, 1.f / 6000, 0.f};
 static const float T_CAP[5] = {150.f, 450.f, 1500.f, 3500.f, 6000.f};
 static const float T_MASS0[5] = {10.f, 10.f, 30.f, 120.f, 1500.f}; /* spawn mass: base */
 static const float T_MASS[5] = {40.f, 150.f, 450.f, 1200.f, 2500.f}; /*   + spread */
+
+/* cos/sin of k*spread for k = -half..half (steering candidates), filled in init() */
+static float ROT[13 * 2], ROT_WIDE[7 * 2];
 
 /* recent death (vultures: hunters and above rush to the food) */
 static float deathX, deathY; static u32 deathTick = 0xffff0000u;
@@ -131,9 +136,6 @@ static float omX0 = -MN * MC * 0.5f, omY0 = -MN * MC * 0.5f; /* world position o
 typedef struct { float x, y, r; u32 info; } Inst;
 typedef struct { float hx, hy, u, r, spacing, stride, ang, W; u32 row, newest, n, info; } Head;
 typedef struct { float x, y, size; u32 info; } Mini; /* info: kind | skin<<8 | alpha<<16, rect: kind | halfH<<8 */
-/* Everything the GPU needs each frame, contiguous so it goes up in ONE upload:
-   frame uniforms | snake headers | minimap | food (only
-   the used prefix of the food array is sent). */
 /* GPU copy of the trails: only snakes on screen are kept in sync. For each one we
    send just the points pushed since its last sync (a contiguous run of the ring,
    split in two where it wraps), or the whole row if it is stale or respawned. */
@@ -152,6 +154,8 @@ static void trailSync(i32 s) {
   gpuPc[s] = k->pc; gpuOk[s] = 1;
 }
 
+/* Everything the GPU needs each frame, contiguous so it goes up in ONE upload:
+   frame uniforms | snake headers | minimap | food (only the used prefix). */
 static struct {
   float frameBlk[12];  /* std140 Frame block: camX camY halfW halfH | px time lblScale 0 | vw vh WR 0 */
   Head hdr[MAXS];
@@ -163,8 +167,6 @@ static struct {
 #define mini AR.mini
 #define inst AR.inst
 
-
-
 static u32 tick;
 static i32 playerKiller = -1;
 
@@ -175,7 +177,7 @@ static i32 cellX(float x) { i32 c = (i32)((x + WR) * (1.f / CELL)); return c < 0
 static i32 cellOf(float x, float y) { return cellX(y) * GN + cellX(x); }
 
 /* fixed point Q2: +-8191 units at 0.25 precision (sub-pixel at normal zoom) */
-static short q3(float v) { v *= 4.f; v += v >= 0 ? 0.5f : -0.5f; return (short)(v > 32767.f ? 32767.f : v < -32767.f ? -32767.f : v); }
+static short fix(float v) { v *= 4.f; v += v >= 0 ? 0.5f : -0.5f; return (short)(v > 32767.f ? 32767.f : v < -32767.f ? -32767.f : v); }
 #define UQ(v) ((float)(v) * 0.25f)
 /* trail point j (0 = newest) */
 #define TX(s, j) UQ(tr[s][(S[s].pc - 1u - (u32)(j)) & RMASK][0])
@@ -205,7 +207,8 @@ static i32 segLive(i32 i) {
 static void foodInsert(i32 i) { i32 c = cellOf(UQ(fx[i]), UQ(fy[i])); fNext[i] = fHead[c]; fHead[c] = (short)i; }
 
 static void rebuild(void) {
-  for (i32 c = 0; c < GC; c++) gHead[c] = -1, fHead[c] = -1;
+  __builtin_memset(gHead, 0xff, sizeof gHead); /* -1 = empty cell (bulk memory.fill) */
+  __builtin_memset(fHead, 0xff, sizeof fHead);
   __builtin_memset(omap, 0, sizeof omap);
   omX0 = focX - MN * MC * 0.5f; omY0 = focY - MN * MC * 0.5f;
   gN = 0;
@@ -220,7 +223,7 @@ static void spawnFood(float x, float y, float v, i32 skin) {
   if (!nfree) return;
   i32 i = freeList[--nfree];
   if (i >= foodHigh) foodHigh = i + 1;
-  fx[i] = q3(x); fy[i] = q3(y); fv[i] = (u8)(i32)minf(v * 16.f + 0.5f, 255.f); fs[i] = (u8)skin; fa[i] = 1; fph[i] = (u8)rnd(); fborn[i] = (unsigned short)(tick >> 2);
+  fx[i] = fix(x); fy[i] = fix(y); fv[i] = (u8)(i32)minf(v * 16.f + 0.5f, 255.f); fs[i] = (u8)skin; fa[i] = 1; fph[i] = (u8)rnd(); fborn[i] = (unsigned short)(tick >> 2);
   foodInsert(i);
   foodAlive++;
 }
@@ -250,7 +253,7 @@ static i32 dangerAt(i32 self, float x, float y, float rad) {
 static void pushTrail(i32 s, float x, float y) {
   Snake *k = &S[s];
   u32 i = k->pc & RMASK;
-  tr[s][i][0] = q3(x); tr[s][i][1] = q3(y);
+  tr[s][i][0] = fix(x); tr[s][i][1] = fix(y);
   segInsert(s, k->pc);
   k->pc++;
 }
@@ -264,7 +267,8 @@ static void homePoint(float mass, float *x, float *y) {
   if (mass > 250.f) randomDisk(WR * 0.35f, x, y); else randomRing(WR * 0.3f, WR * 0.88f, x, y);
 }
 
-static void spawnSnake(i32 s, float mass, i32 bot, i32 skin) {
+static void spawnSnake(i32 s, float mass, i32 skin) {
+  i32 bot = s != 0;
   Snake *k = &S[s];
   float x = 0, y = 0;
   for (i32 t = 0; t < 40; t++) {
@@ -276,7 +280,7 @@ static void spawnSnake(i32 s, float mass, i32 bot, i32 skin) {
   }
   k->ang = k->tang = frand() * TAU - PI; k->dcx = cosf_(k->ang); k->dcy = sinf_(k->ang);
   k->mass = mass; k->r = radiusFor(mass); k->spacing = k->r * 0.42f; k->n = segsFor(mass);
-  k->bot = bot; k->skin = skin; k->kills = 0; k->boost = k->wantBoost = 0;
+  k->skin = skin; k->kills = 0; k->boost = k->wantBoost = 0;
   k->dropT = k->dropMass = 0; k->aiT = 0; k->huntT = 0; k->target = -1; k->near = 1; k->rushT = 0; k->orbit = 1;
   k->tx = x; k->ty = y; k->hx = x; k->hy = y;
   /* lay a full ring of trail behind the head; pc keeps counting so nodes from a
@@ -285,7 +289,7 @@ static void spawnSnake(i32 s, float mass, i32 bot, i32 skin) {
   k->pc += RING;
   for (u32 j = 0; j < RING; j++) {
     u32 i = (k->pc - 1u - j) & RMASK;
-    tr[s][i][0] = q3(x - cx * k->spacing * (float)j); tr[s][i][1] = q3(y - sy * k->spacing * (float)j);
+    tr[s][i][0] = fix(x - cx * k->spacing * (float)j); tr[s][i][1] = fix(y - sy * k->spacing * (float)j);
   }
   k->alive = 1; k->phx = x; k->phy = y; k->ppc = k->pc;
   gpuOk[s] = 0; /* whole ring rewritten: the GPU needs the full row */
@@ -351,7 +355,6 @@ static void moveSnake(i32 s, float dt) {
   }
 }
 
-static float hitX, hitY, hitT; /* last contact: body point and contact distance */
 static i32 hitTest(i32 s) {
   Snake *k = &S[s];
   float hx = k->hx, hy = k->hy;
@@ -367,33 +370,13 @@ static i32 hitTest(i32 s) {
         if (o == s || !segLive(i)) continue;
         u32 j = gC[i] & RMASK;
         float dx = UQ(tr[o][j][0]) - hx, dy = UQ(tr[o][j][1]) - hy, t = (k->r + S[o].r) * 0.66f;
-        if (dx * dx + dy * dy < t * t) { hitX = hx + dx; hitY = hy + dy; hitT = t; return o; }
+        if (dx * dx + dy * dy < t * t) return o;
       }
     }
   }
   return -1;
 }
 
-/* Legends never crash: push the head back out of the body it touched and turn
-   it to slide along that body (whichever way is closer to its heading). */
-static void legendDodge(i32 s, i32 h) {
-  Snake *k = &S[s];
-  if (h == -2) { /* world edge: step back inside and face the centre */
-    float d = sqrtf_(k->hx * k->hx + k->hy * k->hy), lim = WR - k->r - 4.f;
-    k->hx *= lim / d; k->hy *= lim / d;
-    k->ang = k->tang = atan2f_(-k->hy, -k->hx); k->dcx = cosf_(k->ang); k->dcy = sinf_(k->ang);
-    return;
-  }
-  float nx = k->hx - hitX, ny = k->hy - hitY, d = sqrtf_(nx * nx + ny * ny);
-  if (d < 1e-3f) { nx = -k->dcx; ny = -k->dcy; d = 1.f; }
-  nx /= d; ny /= d;
-  k->hx = hitX + nx * (hitT + 1.f); k->hy = hitY + ny * (hitT + 1.f);
-  float tx = -ny, ty = nx, fx_ = k->dcx, fy_ = k->dcy;
-  if (tx * fx_ + ty * fy_ < 0) { tx = -tx; ty = -ty; }
-  float a = atan2f_(ty + nx * 0.35f, tx + ny * 0.35f); /* along the body, veering away */
-  k->ang = k->tang = a; k->dcx = cosf_(a); k->dcy = sinf_(a);
-  k->aiT = 0; k->huntT = 0.f; /* rethink next step */
-}
 
 static void eat(i32 s, float dt) {
   Snake *k = &S[s];
@@ -409,13 +392,35 @@ static void eat(i32 s, float dt) {
         float px = UQ(fx[i]), py = UQ(fy[i]);
         float dx = px - hx, dy = py - hy, d2 = dx * dx + dy * dy, er = k->r + frT[fv[i]] * 0.5f;
         if (d2 < er * er) { k->mass += FV(i) * 0.75f; killFood(i); }
-        else if (d2 < att2) { fx[i] = q3(px - dx * pull); fy[i] = q3(py - dy * pull); }
+        else if (d2 < att2) { fx[i] = fix(px - dx * pull); fy[i] = fix(py - dy * pull); }
       }
     }
   }
 }
 
 /* ---------- bot brain ---------- */
+/* Exact free space around (x,y): distance to the nearest other body edge
+   (segment grid, 3x3 cells), capped at 100. Only used when a bot is boxed in. */
+static float clearance(i32 self, float x, float y) {
+  float best = 100.f;
+  float lim = WR - sqrtf_(x * x + y * y); if (lim < best) best = lim;
+  i32 cx = cellX(x), cy = cellX(y);
+  for (i32 gy = cy - 1; gy <= cy + 1; gy++) {
+    if (gy < 0 || gy >= GN) continue;
+    for (i32 gx = cx - 1; gx <= cx + 1; gx++) {
+      if (gx < 0 || gx >= GN) continue;
+      for (i32 i = gHead[gy * GN + gx]; i >= 0; i = gNext[i]) {
+        i32 o = gS[i];
+        if (o == self || !segLive(i)) continue;
+        u32 j = gC[i] & RMASK;
+        float dx = UQ(tr[o][j][0]) - x, dy = UQ(tr[o][j][1]) - y, d = sqrtf_(dx * dx + dy * dy) - S[o].r;
+        if (d < best) best = d;
+      }
+    }
+  }
+  return best;
+}
+
 /* Elite+ also avoid where other heads will be in ~0.4 s (no head-on crashes). */
 /* where every near head will be in 0.4 s: computed once per step, not per probe */
 static float phX[MAXS], phY[MAXS], phR[MAXS]; static i32 phId[MAXS], nph;
@@ -465,7 +470,7 @@ static void botThink(i32 s, float dt) {
     k->aiT = 0.25f + frand() * 0.5f;
     k->target = -1;
     float ddx = deathX - hx, ddy = deathY - hy;
-    if (tier >= 2 && tick - deathTick < 200u && ddx * ddx + ddy * ddy < 900.f * 900.f) {
+    if (tier >= 2 && tier != LEGEND && tick - deathTick < 200u && ddx * ddx + ddy * ddy < 900.f * 900.f) {
       /* vulture: rush to fresh remains */
       k->tx = deathX; k->ty = deathY; k->rushT = 1.2f; k->aiT = 1.f;
     } else if (frand() < T_AGGR[tier] * (tier >= 3 ? 0.6f : 0.35f)) {
@@ -506,28 +511,58 @@ static void botThink(i32 s, float dt) {
     }
   }
 
-  float desired = atan2f_(k->ty - hy, k->tx - hx);
-  float L = T_LOOK[tier];
-  float l1 = (k->r * 1.6f + 55.f) * L, l2 = (k->r * 1.6f + 170.f) * L, l3 = (k->r * 1.6f + 320.f) * L, pr = k->r * 1.15f;
-  float bestA = desired, bestCost = 1e9f;
-  i32 nc = tier == 0 ? 7 : 13;
+  /* Steering. Candidate headings are the current heading rotated by multiples of
+     `spread` (unit vectors from a precomputed table, no trig), plus the exact goal
+     direction. They are tried nearest-to-goal first; since any danger costs more
+     than any angle, the first safe one is the best and the search stops there. */
+  const float *rc = tier == 0 ? ROT_WIDE : ROT;
+  i32 half = tier == 0 ? 3 : 6;
   float spread = tier == 0 ? 0.45f : 0.3f;
-  for (i32 c = 0; c < nc; c++) {
-    float a = c < nc - 1 ? k->ang + ((float)c - (float)(nc - 2) * 0.5f) * spread : desired;
-    float ca = cosf_(a), sa = sinf_(a);
-    float cost = absf(wrapa(a - desired));
-    if (cost >= bestCost) continue;
-    if (dangerAt(s, hx + ca * l1, hy + sa * l1, pr) || (tier >= 3 && headDanger(s, hx + ca * l1, hy + sa * l1, pr))) cost += 100.f;
-    else if (dangerAt(s, hx + ca * l2, hy + sa * l2, pr)) cost += 20.f;
-    else if (tier >= 3 && dangerAt(s, hx + ca * l3, hy + sa * l3, pr)) cost += 5.f;
-    if (cost < bestCost) { bestCost = cost; bestA = a; }
+  float gx = k->tx - hx, gy = k->ty - hy, gl = sqrtf_(gx * gx + gy * gy);
+  if (gl < 1.f) { gx = k->dcx; gy = k->dcy; } else { gx /= gl; gy /= gl; }
+  float rel = atan2f_(gx * k->dcy * -1.f + gy * k->dcx, gx * k->dcx + gy * k->dcy); /* goal angle relative to heading */
+  i32 legend = tier == LEGEND;
+  float L = T_LOOK[tier], pr = k->r * (legend ? 1.35f : 1.15f);
+  float l0 = k->r * 1.2f + 12.f; /* right in front of the head: what the far probes cannot see */
+  float l1 = (k->r * 1.6f + 55.f) * L, l2 = (k->r * 1.6f + 170.f) * L, l3 = (k->r * 1.6f + 320.f) * L;
+  float bx = gx, by = gy, bestCost = 1e9f;
+  i32 k0 = (i32)(rel / spread + (rel >= 0 ? 0.5f : -0.5f));   /* table index nearest the goal */
+  if (k0 < -half) k0 = -half; if (k0 > half) k0 = half;
+  for (i32 c = -1; c <= 4 * half; c++) {                       /* goal, then k0, k0-1, k0+1, k0-2, ... */
+    float vx, vy, ang;
+    if (c < 0) { if (absf(rel) > (float)half * spread) continue; vx = gx; vy = gy; ang = 0.f; }
+    else {
+      i32 idx = k0 + ((c & 1) ? -(c + 1) / 2 : c / 2);
+      if (idx < -half || idx > half) continue;
+      const float *r = &rc[(idx + half) * 2];
+      vx = k->dcx * r[0] - k->dcy * r[1]; vy = k->dcx * r[1] + k->dcy * r[0];
+      ang = absf((float)idx * spread - rel);
+    }
+    float cost = ang;
+    if (tier > 0 && (dangerAt(s, hx + vx * l0, hy + vy * l0, k->r) || (tier >= 3 && headDanger(s, hx + vx * l0, hy + vy * l0, k->r)))) cost += 200.f; /* rookies don't look this close */
+    else if (dangerAt(s, hx + vx * l1, hy + vy * l1, pr) || (tier >= 3 && headDanger(s, hx + vx * l1, hy + vy * l1, pr))) cost += 100.f;
+    else if (dangerAt(s, hx + vx * l2, hy + vy * l2, pr)) cost += 20.f;
+    else if (tier >= 3 && dangerAt(s, hx + vx * l3, hy + vy * l3, pr)) cost += 5.f;
+    if (cost < bestCost) { bestCost = cost; bx = vx; by = vy; }
+    if (cost < 5.f) break; /* safe, and nearest to the goal: nothing later can beat it */
   }
+  float room = 100.f;
+  if (bestCost >= 200.f) { /* boxed in by the coarse map: pick the direction with the most real space */
+    room = -1e9f;
+    for (i32 idx = -half; idx <= half; idx++) {
+      const float *r = &rc[(idx + half) * 2];
+      float vx = k->dcx * r[0] - k->dcy * r[1], vy = k->dcx * r[1] + k->dcy * r[0];
+      float c = minf(clearance(s, hx + vx * l0, hy + vy * l0), clearance(s, hx + vx * l0 * 2.f, hy + vy * l0 * 2.f));
+      if (c > room) { room = c; bx = vx; by = vy; }
+    }
+  }
+  float bestA = atan2f_(by, bx);
   k->tang = bestA + (frand() - 0.5f) * 2.f * T_NOISE[tier];
   float dx = k->tx - hx, dy = k->ty - hy, d2 = dx * dx + dy * dy;
   k->wantBoost =
       (tier >= 2 && k->huntT > 0 && k->mass > 30.f && d2 < 450.f * 450.f && bestCost < 20.f) || /* strike */
       (tier >= 2 && k->rushT > 0 && k->mass > 60.f && bestCost < 20.f) ||                        /* vulture */
-      (tier >= 3 && bestCost >= 100.f && k->mass > 40.f) ||                                      /* escape a trap */
+      (tier >= 3 && bestCost >= 100.f && room > k->r && k->mass > 40.f) ||                    /* escape through a real gap */
       (tier == 1 && bestCost >= 100.f && k->mass > 40.f && frand() < 0.05f);
 }
 
@@ -549,7 +584,7 @@ static void spawnBot(i32 s) {
   for (i32 o = 1; o < NS; o++) legends += S[o].alive && S[o].tier == LEGEND;
   i32 tier = r < 0.34f ? 0 : r < 0.67f ? 1 : r < 0.87f ? 2 : r < 0.985f || legends >= 2 ? 3 : LEGEND;
   S[s].tier = tier;
-  spawnSnake(s, T_MASS0[tier] + t * t * T_MASS[tier], 1, tier == LEGEND ? 11 : (i32)(rnd() % 11));
+  spawnSnake(s, T_MASS0[tier] + t * t * T_MASS[tier], tier == LEGEND ? 11 : (i32)(rnd() % 11));
 }
 
 /* Food only exists around the player: keep a steady density inside the food
@@ -592,7 +627,7 @@ static void step(float dt) {
     if (!k->alive) continue;
     float dx = k->hx - focX, dy = k->hy - focY, R = focR + k->r * 2.f;
     k->near = s == 0 || dx * dx + dy * dy < R * R;
-    if (k->near) moveSnake(s, dt);
+    if (k->near || k->seen) moveSnake(s, dt); /* anything on screen moves every step */
     else if (((tick + (u32)s) & 3u) == 0) moveSnake(s, dt * 4.f); /* far away: quarter rate, same speed */
   }
 
@@ -600,9 +635,7 @@ static void step(float dt) {
   for (i32 s = 0; s < NS; s++) {
     if (!S[s].alive || !S[s].near) continue;
     i32 h = hitTest(s);
-    if (h == -1) continue;
-    if (S[s].tier == LEGEND && S[s].bot) { legendDodge(s, h); continue; } /* 100%: always gets out of the way */
-    deaths[nd++] = s; deaths[nd++] = h;
+    if (h != -1) { deaths[nd++] = s; deaths[nd++] = h; }
   }
   for (i32 i = 0; i < nd; i += 2) killSnake(deaths[i], deaths[i + 1] >= 0 ? deaths[i + 1] : -1);
 
@@ -635,6 +668,8 @@ EXPORT("init") void init(u32 seed, i32 bots) {
   for (i32 s = 0; s < MAXS; s++) S[s].alive = 0;
   rebuild();
   for (i32 i = 0; i < 256; i++) frT[i] = minf(3.5f + sqrtf_((float)i / 16.f) * 2.6f, 15.f);
+  for (i32 i = 0; i < 13; i++) { float a = (float)(i - 6) * 0.3f; ROT[i * 2] = cosf_(a); ROT[i * 2 + 1] = sinf_(a); }
+  for (i32 i = 0; i < 7; i++) { float a = (float)(i - 3) * 0.45f; ROT_WIDE[i * 2] = cosf_(a); ROT_WIDE[i * 2 + 1] = sinf_(a); }
   focX = focY = 0; focR = 2000.f;
   deathTick = 0xffff0000u;
   for (i32 s = 1; s < NS; s++) spawnBot(s);
@@ -643,7 +678,7 @@ EXPORT("init") void init(u32 seed, i32 bots) {
 
 static float camX, camY;
 EXPORT("spawnPlayer") void spawnPlayer(i32 skin) {
-  S[0].tier = 3; spawnSnake(0, 10.f, 0, skin); playerKiller = -1;
+  S[0].tier = 0; spawnSnake(0, 10.f, skin); playerKiller = -1;
   camX = focX = S[0].hx; camY = focY = S[0].hy; refillFood();
   rebuild(); /* re-centre the collision window on the new view at once */
 }
@@ -735,11 +770,13 @@ static i32 renderPrep(float cx, float cy, float hw, float hh, float px) {
   for (i32 o = 1; o <= NS; o++) {
     i32 s = o == NS ? 0 : o;
     Snake *k = &S[s];
+    k->seen = 0;
     if (!k->alive) continue;
     float hx = ihx[s], hy = ihy[s];
     snap[s].onScreen = (float)(hx > cx - hw && hx < cx + hw && hy > cy - hh && hy < cy + hh);
     i32 n = k->n;
-    float W = k->boost ? 1.9f : k->tier == LEGEND && k->bot ? 1.5f : 1.08f, m = k->r * W * 2.f + 20.f;
+    i32 legend = s != 0 && k->tier == LEGEND;
+    float W = k->boost ? 1.9f : legend ? 1.5f : 1.08f, m = k->r * W * 2.f + 20.f;
     float x0 = cx - hw - m, x1 = cx + hw + m, y0 = cy - hh - m, y1 = cy + hh + m;
     /* integer cull on the raw 16-bit trail (after a cheap body-length reject) */
     i32 any = hx > x0 && hx < x1 && hy > y0 && hy < y1;
@@ -760,8 +797,9 @@ static i32 renderPrep(float cx, float cy, float hw, float hh, float px) {
     Head *h = &hdr[nvis++];
     h->hx = hx; h->hy = hy; h->u = iu[s]; h->r = k->r; h->spacing = k->spacing; h->stride = (float)stride;
     h->ang = k->ang; h->W = W; h->row = (u32)s; h->newest = inew[s]; h->n = (u32)n;
-    h->info = (u32)k->skin | ((u32)(k->boost | (s == 0 ? 2 : 0) | (k->tier == LEGEND && k->bot ? 4 : 0)) << 8);
+    h->info = (u32)k->skin | ((u32)(k->boost | (s == 0 ? 2 : 0) | (legend ? 4 : 0)) << 8);
     trailSync(s);
+    k->seen = 1;
   }
   return nvis;
 }
@@ -838,7 +876,7 @@ EXPORT("frameMsPtr") float *frameMsPtr(void) { return frameMs; }
 EXPORT("frame") void frame(float dt, float aim, i32 boost, i32 mode, float vw, float vh, float cssW, float time) {
   double t0 = nowMs();
   if (mode == 0 && S[0].alive) { S[0].tang = aim; S[0].wantBoost = boost; }
-  focX = camX; focY = camY; focR = sqrtf_(camH * camH * (1.f + (vw / vh) * (vw / vh))) + 700.f;
+  focX = camX; focY = camY; focR = sqrtf_(camH * camH * (1.f + (vw / vh) * (vw / vh))) + 450.f;
   update(dt);
   snapshot();
   double t1 = nowMs();
