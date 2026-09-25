@@ -33,7 +33,6 @@ typedef unsigned char u8;
 #define CELL 100.f       /* spatial hash cell size (>= max query radius) */
 #define GN 160           /* grid cells per side: 2*WR/CELL */
 #define GC (GN * GN)
-#define MAXI 4096        /* food sprites */
 #define MC 32.f          /* owner-map cell */
 #define MN 320           /* owner-map window (cells per side), follows the player */
 #define POOL 16384       /* segment grid nodes */
@@ -94,15 +93,16 @@ static Snake S[MAXS];
 static short tr[MAXS][RING][2];
 static i32 NS = 40;
 
-/* food: 16-bit fixed-point position, value in 1/16ths -> 8 bytes per pellet */
-static short fx[MAXF], fy[MAXF];
-static u8 fv[MAXF], fs[MAXF], fa[MAXF], fph[MAXF];
-static unsigned short fborn[MAXF]; /* tick/4 at spawn: fade-in on the GPU */
-static short freeList[MAXF], pend[MAXF];
-static i32 nfree, npend, foodAlive, foodHigh;
+/* Food, 8 bytes per pellet, in the exact layout the GPU draws from: the whole
+   array is uploaded as-is and culled by the vertex shader, so the CPU does no
+   per-frame food work at all. v = value in 1/16ths (0 = empty slot),
+   born = tick/4 at spawn (fade-in); the pulse phase comes from the slot index. */
+typedef struct { short x, y; u8 v, skin; unsigned short born; } Food;
+static short freeList[MAXF]; /* empty slots below foodHigh (eaten pellets join at the next rebuild) */
+static i32 nfree, foodHigh, foodNear; /* foodNear: pellets inside the food disk */
 #define FOOD_DENSITY 7.2e-5f /* pellets per square unit around the player */
-static float frT[256]; /* pellet radius by value byte */
-#define FV(i) ((float)fv[i] * (1.f / 16.f))
+static float frT[256]; /* pellet radius by value byte (the food shader has the same formula) */
+#define FV(i) ((float)F[i].v * (1.f / 16.f))
 
 static short gHead[GC], gNext[POOL], fHead[GC], fNext[MAXF];
 static u32 gC[POOL]; static u8 gS[POOL]; static i32 gN;
@@ -110,6 +110,7 @@ static u32 gC[POOL]; static u8 gS[POOL]; static i32 gN;
 /* Level of detail: only snakes near the focus (the camera) get collisions,
    eating and real AI. Everything else runs a cheap statistical model. */
 static float focX, focY, focR = 2000.f;
+static float foodR(void) { return focR * 1.25f; } /* food exists inside this disk */
 
 /* Bot tiers: rookie, casual, hunter, elite, legend (rare) */
 #define LEGEND 4
@@ -133,7 +134,6 @@ static float deathX, deathY; static u32 deathTick = 0xffff0000u;
 static u8 omap[MN * MN + 16];
 static float omX0 = -MN * MC * 0.5f, omY0 = -MN * MC * 0.5f; /* world position of the window's corner */
 
-typedef struct { float x, y, r; u32 info; } Inst;
 typedef struct { float hx, hy, u, r, spacing, stride, ang, W; u32 row, newest, n, info; } Head;
 typedef struct { float x, y, size; u32 info; } Mini; /* info: kind | skin<<8 | alpha<<16, rect: kind | halfH<<8 */
 /* GPU copy of the trails: only snakes on screen are kept in sync. For each one we
@@ -157,15 +157,15 @@ static void trailSync(i32 s) {
 /* Everything the GPU needs each frame, contiguous so it goes up in ONE upload:
    frame uniforms | snake headers | minimap | food (only the used prefix). */
 static struct {
-  float frameBlk[12];  /* std140 Frame block: camX camY halfW halfH | px time lblScale 0 | vw vh WR 0 */
+  float frameBlk[12];  /* std140 Frame block: camX camY halfW halfH | px time lblScale tick/4 | vw vh WR 0 */
   Head hdr[MAXS];
   Mini mini[MAXS + 4];
-  Inst inst[MAXI];
+  Food food[MAXF];
 } AR __attribute__((aligned(16)));
 #define frameBlk AR.frameBlk
 #define hdr AR.hdr
 #define mini AR.mini
-#define inst AR.inst
+#define F AR.food
 
 static u32 tick;
 static i32 playerKiller = -1;
@@ -204,7 +204,7 @@ static i32 segLive(i32 i) {
   Snake *o = &S[gS[i]];
   return o->alive && o->pc - gC[i] <= (u32)o->n;
 }
-static void foodInsert(i32 i) { i32 c = cellOf(UQ(fx[i]), UQ(fy[i])); fNext[i] = fHead[c]; fHead[c] = (short)i; }
+static void foodInsert(i32 i) { i32 c = cellOf(UQ(F[i].x), UQ(F[i].y)); fNext[i] = fHead[c]; fHead[c] = (short)i; }
 
 static void rebuild(void) {
   __builtin_memset(gHead, 0xff, sizeof gHead); /* -1 = empty cell (bulk memory.fill) */
@@ -213,19 +213,33 @@ static void rebuild(void) {
   omX0 = focX - MN * MC * 0.5f; omY0 = focY - MN * MC * 0.5f;
   gN = 0;
   for (i32 s = 0; s < NS; s++)
-    if (S[s].alive) for (i32 j = S[s].n - 1; j >= 0; j--) segInsert(s, S[s].pc - 1u - (u32)j);
-  while (npend) freeList[nfree++] = pend[--npend]; /* slots are unlinked now: reusable */
-  for (i32 i = 0; i < foodHigh; i++) if (fa[i]) foodInsert(i);
+    if (S[s].alive) {
+      /* a body lies within n*spacing of its head: skip snakes entirely outside the window */
+      float reach = (float)S[s].n * S[s].spacing, hx = S[s].hx, hy = S[s].hy;
+      if (hx < omX0 - reach || hy < omY0 - reach || hx > omX0 + MN * MC + reach || hy > omY0 + MN * MC + reach) continue;
+      for (i32 j = S[s].n - 1; j >= 0; j--) segInsert(s, S[s].pc - 1u - (u32)j);
+    }
+  /* food: drop pellets left far behind, count the ones near, relink the rest, and
+     list the holes lowest-first so the array the GPU draws in full stays short */
+  nfree = 0;
+  i32 hi = 0; float FR2 = foodR() * foodR();
+  foodNear = 0;
+  for (i32 i = 0; i < foodHigh; i++) {
+    if (!F[i].v) continue;
+    float dx = UQ(F[i].x) - focX, dy = UQ(F[i].y) - focY, d2 = dx * dx + dy * dy;
+    if (d2 > FR2 * 1.6f) { F[i].v = 0; continue; } /* left far behind, off screen: dropped */
+    foodInsert(i); hi = i + 1; foodNear += d2 < FR2;
+  }
+  for (i32 i = hi - 1; i >= 0; i--) if (!F[i].v) freeList[nfree++] = (short)i; /* holes, lowest on top */
+  foodHigh = hi;
 }
 
-static void killFood(i32 i) { fa[i] = 0; pend[npend++] = (short)i; foodAlive--; }
+static void killFood(i32 i) { F[i].v = 0; } /* stays linked in the hash (skipped) until the next rebuild */
 static void spawnFood(float x, float y, float v, i32 skin) {
-  if (!nfree) return;
-  i32 i = freeList[--nfree];
-  if (i >= foodHigh) foodHigh = i + 1;
-  fx[i] = fix(x); fy[i] = fix(y); fv[i] = (u8)(i32)minf(v * 16.f + 0.5f, 255.f); fs[i] = (u8)skin; fa[i] = 1; fph[i] = (u8)rnd(); fborn[i] = (unsigned short)(tick >> 2);
+  i32 i = nfree ? freeList[--nfree] : foodHigh < MAXF ? foodHigh++ : -1;
+  if (i < 0) return;
+  F[i] = (Food){fix(x), fix(y), (u8)(i32)minf(v * 16.f + 0.5f, 255.f), (u8)skin, (unsigned short)(tick >> 2)};
   foodInsert(i);
-  foodAlive++;
 }
 static void randomDisk(float rad, float *x, float *y) {
   float a = frand() * TAU, d = rad * sqrtf_(frand());
@@ -388,11 +402,11 @@ static void eat(i32 s, float dt) {
     for (i32 gx = cx - 1; gx <= cx + 1; gx++) {
       if (gx < 0 || gx >= GN) continue;
       for (i32 i = fHead[gy * GN + gx]; i >= 0; i = fNext[i]) {
-        if (!fa[i]) continue;
-        float px = UQ(fx[i]), py = UQ(fy[i]);
-        float dx = px - hx, dy = py - hy, d2 = dx * dx + dy * dy, er = k->r + frT[fv[i]] * 0.5f;
+        if (!F[i].v) continue;
+        float px = UQ(F[i].x), py = UQ(F[i].y);
+        float dx = px - hx, dy = py - hy, d2 = dx * dx + dy * dy, er = k->r + frT[F[i].v] * 0.5f;
         if (d2 < er * er) { k->mass += FV(i) * 0.75f; killFood(i); }
-        else if (d2 < att2) { fx[i] = fix(px - dx * pull); fy[i] = fix(py - dy * pull); }
+        else if (d2 < att2) { F[i].x = fix(px - dx * pull); F[i].y = fix(py - dy * pull); }
       }
     }
   }
@@ -499,8 +513,8 @@ static void botThink(i32 s, float dt) {
         for (i32 gx = cx - w; gx <= cx + w; gx++) {
           if (gx < 0 || gx >= GN) continue;
           for (i32 i = fHead[gy * GN + gx]; i >= 0; i = fNext[i]) {
-            if (!fa[i]) continue;
-            float px = UQ(fx[i]), py = UQ(fy[i]);
+            if (!F[i].v) continue;
+            float px = UQ(F[i].x), py = UQ(F[i].y);
             float dx = px - hx, dy = py - hy, d = sqrtf_(dx * dx + dy * dy) + 1.f;
             float score = FV(i) / (d + 60.f) * (1.6f + (dx * ca + dy * sa) / d);
             if (score > bestScore) { bestScore = score; k->tx = px; k->ty = py; }
@@ -576,6 +590,9 @@ static void farThink(i32 s, float dt) {
     k->aiT = 3.f + frand() * 5.f;
   }
   k->tang = atan2f_(k->ty - k->hy, k->tx - k->hx);
+  /* the "dumb equation": growth and death odds by tier */
+  if (k->mass < T_CAP[k->tier]) k->mass += T_GROW[k->tier] * dt;
+  if (frand() < T_RISK[k->tier] * dt) killSnake(s, -1);
 }
 
 static void spawnBot(i32 s) {
@@ -589,23 +606,9 @@ static void spawnBot(i32 s) {
 
 /* Food only exists around the player: keep a steady density inside the food
    disk, let pellets outside it fade. Cost is independent of the map size. */
-static i32 foodNear, recount;
 static void maintainFood(i32 budget) {
-  float FR = focR * 1.25f, FR2 = FR * FR, want = FOOD_DENSITY * PI * FR2;
+  float FR = foodR(), want = FOOD_DENSITY * PI * FR * FR;
   if (want > MAXF - 1500) want = MAXF - 1500;
-  for (i32 t = 0; t < 8 && foodHigh; t++) {
-    i32 i = (i32)(rnd() % (u32)foodHigh);
-    float dx = UQ(fx[i]) - focX, dy = UQ(fy[i]) - focY;
-    if (fa[i] && dx * dx + dy * dy > FR2 * 1.6f) killFood(i);
-  }
-  if ((tick & 31u) == 0 || recount) { /* recount occasionally, track spawns in between */
-    recount = 0;
-    foodNear = 0;
-    for (i32 i = 0; i < foodHigh; i++) {
-      float dx = UQ(fx[i]) - focX, dy = UQ(fy[i]) - focY;
-      foodNear += fa[i] && dx * dx + dy * dy < FR2;
-    }
-  }
   for (i32 t = 0; t < budget && (float)foodNear < want; t++) {
     float x, y; randomDisk(FR, &x, &y); x += focX; y += focY;
     if (x * x + y * y > WR * WR * 0.96f) continue;
@@ -621,7 +624,7 @@ static i32 deaths[MAXS * 2];
 
 static void step(float dt) {
   tick++;
-  if (tick % REBUILD == 0 || gN > POOL - 4096 || npend > MAXF / 2) rebuild();
+  if (tick % REBUILD == 0 || gN > POOL - 4096) rebuild();
   for (i32 s = 0; s < NS; s++) {
     Snake *k = &S[s];
     if (!k->alive) continue;
@@ -648,9 +651,7 @@ static void step(float dt) {
       i32 e = T_EVERY[k->tier];
       if ((tick + (u32)s) % (u32)e == 0) botThink(s, dt * (float)e);
     } else {
-      if ((tick + (u32)s) % 16u == 0) farThink(s, dt * 16.f);
-      if (k->mass < T_CAP[k->tier]) k->mass += T_GROW[k->tier] * dt;
-      if (frand() < T_RISK[k->tier] * dt) killSnake(s, -1);
+      if (((tick + (u32)s) & 15u) == 0) farThink(s, dt * 16.f);
     }
   }
 
@@ -663,8 +664,8 @@ static void step(float dt) {
 EXPORT("init") void init(u32 seed, i32 bots) {
   rs = seed ? seed : 1u;
   NS = bots + 1 > MAXS ? MAXS : bots + 1;
-  nfree = 0; npend = 0; foodAlive = 0; foodHigh = 0; tick = 0; playerKiller = -1;
-  for (i32 i = MAXF - 1; i >= 0; i--) { fa[i] = 0; freeList[nfree++] = (short)i; }
+  nfree = 0; foodHigh = 0; tick = 0; playerKiller = -1;
+  for (i32 i = 0; i < MAXF; i++) F[i].v = 0;
   for (i32 s = 0; s < MAXS; s++) S[s].alive = 0;
   rebuild();
   for (i32 i = 0; i < 256; i++) frT[i] = minf(3.5f + sqrtf_((float)i / 16.f) * 2.6f, 15.f);
@@ -679,11 +680,11 @@ EXPORT("init") void init(u32 seed, i32 bots) {
 static float camX, camY;
 EXPORT("spawnPlayer") void spawnPlayer(i32 skin) {
   S[0].tier = 0; spawnSnake(0, 10.f, skin); playerKiller = -1;
-  camX = focX = S[0].hx; camY = focY = S[0].hy; refillFood();
-  rebuild(); /* re-centre the collision window on the new view at once */
+  camX = focX = S[0].hx; camY = focY = S[0].hy;
+  refillFood(); /* also re-centres the collision window on the new view at once */
 }
 /* Fill food around a new focus at once (spawn, respawn, menu). */
-static void refillFood(void) { recount = 1; for (i32 t = 0; t < 400; t++) maintainFood(64); }
+static void refillFood(void) { rebuild(); for (i32 t = 0; t < 400; t++) maintainFood(64); }
 EXPORT("killPlayer") void killPlayer(void) { S[0].alive = 0; }
 
 
@@ -702,31 +703,6 @@ static void update(float dt) {
   alpha = acc / DT;
 }
 
-static void push(float x, float y, float r, u32 kind, u32 skin, u32 extra, u32 flags, i32 *n) {
-  if (*n >= MAXI) return;
-  Inst *p = &inst[(*n)++];
-  p->x = x; p->y = y; p->r = r;
-  p->info = kind | (skin << 8) | ((extra & 255u) << 16) | (flags << 24);
-}
-
-/* View-culled food sprites. */
-static i32 build(float cx, float cy, float hw, float hh) {
-  i32 n = 0;
-  float x0 = cx - hw - 60.f, x1 = cx + hw + 60.f, y0 = cy - hh - 60.f, y1 = cy + hh + 60.f;
-  i32 gx0 = cellX(x0 - CELL), gx1 = cellX(x1 + CELL), gy0 = cellX(y0 - CELL), gy1 = cellX(y1 + CELL);
-  for (i32 gy = gy0; gy <= gy1; gy++)
-    for (i32 gx = gx0; gx <= gx1; gx++)
-      for (i32 i = fHead[gy * GN + gx]; i >= 0; i = fNext[i])
-        if (fa[i]) {
-          float px = UQ(fx[i]), py = UQ(fy[i]);
-          if (px > x0 && px < x1 && py > y0 && py < y1) {
-            u32 age = (u32)(unsigned short)((tick >> 2) - fborn[i]);
-            push(px, py, frT[fv[i]], 0, fs[i], fph[i], age > 255u ? 255u : age, &n);
-          }
-        }
-  return n;
-}
-
 /* ---------- snake ribbons (built on the GPU) ----------
    The vertex shader pulls trail points straight from an RG16I texture that is
    a byte-for-byte copy of tr[][][], and generates the ribbon strip itself
@@ -739,7 +715,6 @@ static i32 nvis, maxK;
 typedef struct { float alive, x, y, mass, r, skin, tier, near, onScreen, kills; } Snap;
 static Snap snap[MAXS];
 
-static float ihx[MAXS], ihy[MAXS], iu[MAXS]; static u32 inew[MAXS];
 
 /* Interpolated state for this frame (call after update). */
 EXPORT("snapshot") void snapshot(void) {
@@ -748,16 +723,7 @@ EXPORT("snapshot") void snapshot(void) {
     Snap *sn = &snap[s];
     sn->alive = (float)k->alive;
     if (!k->alive) { sn->onScreen = 0; continue; }
-    /* interpolated head; if the last step pushed trail points the head is now
-       "behind" them, so step back to the newest point it is still ahead of */
     float hx = k->phx + (k->hx - k->phx) * alpha, hy = k->phy + (k->hy - k->phy) * alpha;
-    float ca = k->dcx, sa = k->dcy;
-    u32 j0 = 0, pushes = k->pc - k->ppc;
-    if (pushes > 4) pushes = 4;
-    while (j0 < pushes && (hx - TX(s, j0)) * ca + (hy - TY(s, j0)) * sa < 0) j0++;
-    float dx = hx - TX(s, j0), dy = hy - TY(s, j0);
-    ihx[s] = hx; ihy[s] = hy; inew[s] = (k->pc - 1u - j0) & RMASK;
-    iu[s] = 1.f - minf(sqrtf_(dx * dx + dy * dy) / k->spacing, 1.f);
     sn->x = hx; sn->y = hy; sn->mass = k->mass; sn->r = k->r; sn->skin = (float)k->skin;
     sn->tier = (float)k->tier; sn->near = (float)k->near; sn->kills = (float)k->kills;
   }
@@ -772,7 +738,7 @@ static i32 renderPrep(float cx, float cy, float hw, float hh, float px) {
     Snake *k = &S[s];
     k->seen = 0;
     if (!k->alive) continue;
-    float hx = ihx[s], hy = ihy[s];
+    float hx = snap[s].x, hy = snap[s].y; /* interpolated head */
     snap[s].onScreen = (float)(hx > cx - hw && hx < cx + hw && hy > cy - hh && hy < cy + hh);
     i32 n = k->n;
     i32 legend = s != 0 && k->tier == LEGEND;
@@ -782,21 +748,29 @@ static i32 renderPrep(float cx, float cy, float hw, float hh, float px) {
     i32 any = hx > x0 && hx < x1 && hy > y0 && hy < y1;
     float reach = (float)n * k->spacing;
     if (!any && (hx < x0 - reach || hx > x1 + reach || hy < y0 - reach || hy > y1 + reach)) continue;
-    if (!any) {
-      i32 qx0 = (i32)(x0 * 4.f), qx1 = (i32)(x1 * 4.f), qy0 = (i32)(y0 * 4.f), qy1 = (i32)(y1 * 4.f);
-      for (i32 i = 0; i < n && !any; i++) {
+    if (!any) { /* every 4th point, box grown by 3 spacings: points in between can't be further out */
+      float g = k->spacing * 3.f;
+      i32 qx0 = (i32)((x0 - g) * 4.f), qx1 = (i32)((x1 + g) * 4.f), qy0 = (i32)((y0 - g) * 4.f), qy1 = (i32)((y1 + g) * 4.f);
+      for (i32 i = 0; i < n && !any; i += 4) {
         const short *t = tr[s][(k->pc - 1u - (u32)i) & RMASK];
         any = t[0] > qx0 && t[0] < qx1 && t[1] > qy0 && t[1] < qy1;
       }
     }
     if (!any) continue;
+    /* the interpolated head can be "behind" points the last step pushed: attach the
+       ribbon to the newest point it is still ahead of */
+    float ca = k->dcx, sa = k->dcy;
+    u32 j0 = 0, pushes = k->pc - k->ppc;
+    if (pushes > 4) pushes = 4;
+    while (j0 < pushes && (hx - TX(s, j0)) * ca + (hy - TY(s, j0)) * sa < 0) j0++;
+    float dx = hx - TX(s, j0), dy = hy - TY(s, j0);
     float spx = k->spacing / px;
     i32 stride = spx < 1.2f ? 4 : spx < 2.5f ? 2 : 1;
     i32 K = (n - 1 + stride - 1) / stride;
     if (K > maxK) maxK = K;
     Head *h = &hdr[nvis++];
-    h->hx = hx; h->hy = hy; h->u = iu[s]; h->r = k->r; h->spacing = k->spacing; h->stride = (float)stride;
-    h->ang = k->ang; h->W = W; h->row = (u32)s; h->newest = inew[s]; h->n = (u32)n;
+    h->hx = hx; h->hy = hy; h->u = 1.f - minf(sqrtf_(dx * dx + dy * dy) / k->spacing, 1.f); h->r = k->r; h->spacing = k->spacing; h->stride = (float)stride;
+    h->ang = k->ang; h->W = W; h->row = (u32)s; h->newest = (k->pc - 1u - j0) & RMASK; h->n = (u32)n;
     h->info = (u32)k->skin | ((u32)(k->boost | (s == 0 ? 2 : 0) | (legend ? 4 : 0)) << 8);
     trailSync(s);
     k->seen = 1;
@@ -895,18 +869,18 @@ EXPORT("frame") void frame(float dt, float aim, i32 boost, i32 mode, float vw, f
   camX += (tx - camX) * kp; camY += (ty - camY) * kp; camH += (tH - camH) * kz;
 
   float hh = camH, hw = camH * vw / vh, px = hh * 2.f / vh;
-  frameOut[0] = build(camX, camY, hw, hh);
+  frameOut[0] = foodHigh; /* food: the GPU draws every slot and culls */
   frameOut[1] = renderPrep(camX, camY, hw, hh, px);
   frameOut[2] = maxK; frameOut[3] = (i32)ntup;
   frameOut[4] = miniPrep(camX, camY, hw, hh);
   frameBlk[0] = camX; frameBlk[1] = camY; frameBlk[2] = hw; frameBlk[3] = hh;
-  frameBlk[4] = px; frameBlk[5] = time; frameBlk[6] = vw / cssW; frameBlk[7] = 0;
+  frameBlk[4] = px; frameBlk[5] = time; frameBlk[6] = vw / cssW; frameBlk[7] = (float)((tick >> 2) & 0xffffu);
   frameBlk[8] = vw; frameBlk[9] = vh; frameBlk[10] = WR; frameBlk[11] = 0;
   frameMs[0] = (float)(t1 - t0); frameMs[1] = (float)(nowMs() - t1);
 }
 
-EXPORT("instPtr") Inst *instPtr(void) { return inst; }
-EXPORT("maxInst") i32 maxInst(void) { return MAXI; }
+EXPORT("foodPtr") Food *foodPtr(void) { return F; }
+EXPORT("maxFood") i32 maxFood(void) { return MAXF; }
 EXPORT("worldRadius") float worldRadius(void) { return WR; }
 EXPORT("snakeCount") i32 snakeCount(void) { return NS; }
 EXPORT("kills") i32 kills(i32 s) { return S[s].kills; }

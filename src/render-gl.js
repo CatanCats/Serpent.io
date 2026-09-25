@@ -64,15 +64,20 @@ function createGL(canvas, E) {
   const VS = `#version 300 es
   ${FRAME}
   ${PAL}
-  layout(location=0) in vec3 aP; layout(location=1) in uvec4 aI;
+  layout(location=0) in ivec2 aP; layout(location=1) in uvec4 aB; // x, y (Q2) | value, skin, born lo, born hi
   out vec2 vL; out float vR; flat out uvec4 vI; flat out vec3 vC;
+  // Every food slot is an instance, straight from WASM memory: empty and off-screen
+  // pellets are culled here, so the CPU never builds a sprite list.
   void main(){
+    vec2 p=vec2(aP)*.25, c0=p-uCamHalf.xy; float r=min(3.5+sqrt(float(aB.x)/16.)*2.6,15.);
+    if(aB.x==0u || any(greaterThan(abs(c0),uCamHalf.zw+r*1.9+uPxTime.x*1.5))){ gl_Position=vec4(2,2,2,1); return; }
     vec2 q = vec2(float(gl_VertexID&1), float(gl_VertexID>>1))*2.-1.;
-    bool tiny = aP.z/uPxTime.x < 1.6;                       // pellet under ~1.6 px: no halo
-    vec2 l = q*(tiny ? aP.z*.7+uPxTime.x*1.5 : aP.z*1.9);
-    vec2 c = (aP.xy+l-uCamHalf.xy)/uCamHalf.zw;
+    bool tiny = r/uPxTime.x < 1.6;                          // pellet under ~1.6 px: no halo
+    vec2 l = q*(tiny ? r*.7+uPxTime.x*1.5 : r*1.9);
+    vec2 c = (c0+l)/uCamHalf.zw;
     gl_Position = vec4(c.x,-c.y,0,1);
-    vL=l; vR=aP.z; vI=aI; vC=uPal[aI.y%12u].rgb;
+    uint age=(uint(uPxTime.w)-(aB.z|(aB.w<<8)))&0xffffu;
+    vL=l; vR=r; vI=uvec4(0u,aB.y,(uint(gl_InstanceID)*157u)&255u,min(age,255u)); vC=uPal[aB.y%12u].rgb;
   }`;
   const FS = `#version 300 es
   precision mediump float;
@@ -295,7 +300,7 @@ function createGL(canvas, E) {
     arena[i] = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, arena[i]);
     gl.bufferData(gl.ARRAY_BUFFER, A.size, gl.DYNAMIC_DRAW);
     foodVao[i] = gl.createVertexArray(); gl.bindVertexArray(foodVao[i]);
-    inst(0, 3, gl.FLOAT, 16, A.inst); inst(1, 4, gl.UNSIGNED_BYTE, 16, A.inst + 12, true);
+    inst(0, 2, gl.SHORT, 8, A.food, true); inst(1, 4, gl.UNSIGNED_BYTE, 8, A.food + 4, true);
     hdrVao[i] = gl.createVertexArray(); gl.bindVertexArray(hdrVao[i]);
     inst(0, 4, gl.FLOAT, 48, A.hdr); inst(1, 4, gl.FLOAT, 48, A.hdr + 16); inst(2, 4, gl.UNSIGNED_INT, 48, A.hdr + 32, true);
     miniVao[i] = gl.createVertexArray(); gl.bindVertexArray(miniVao[i]);
@@ -333,13 +338,13 @@ function createGL(canvas, E) {
       gl.activeTexture(gl.TEXTURE0);
     },
     draw(frameNo, playing, timing) {
-      const o = E.frameOut, instCount = o[0], nVis = o[1], maxK = o[2], nMini = playing ? o[4] : 0;
+      const o = E.frameOut, nFood = o[0], nVis = o[1], maxK = o[2], nMini = playing ? o[4] : 0;
       const f = frameNo & 1;
       const qs = timing && tq && pending.length < 3 ? [] : null;
       const mark = () => { if (!qs) return; if (qs.length) gl.endQuery(tq.TIME_ELAPSED_EXT); const q = gl.createQuery(); gl.beginQuery(tq.TIME_ELAPSED_EXT, q); qs.push(q); };
       // ONE upload: uniforms + snake headers + minimap + used food, from WASM memory
       gl.bindBuffer(gl.ARRAY_BUFFER, arena[f]);
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, E.arenaBytes, 0, A.inst + instCount * 16);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, E.arenaBytes, 0, A.food + nFood * 8);
       gl.bindBufferRange(gl.UNIFORM_BUFFER, 0, arena[f], 0, 48);
 
       // trail: new points of snakes on screen only (runs listed by WASM), unit 0
@@ -357,7 +362,7 @@ function createGL(canvas, E) {
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       gl.enable(gl.BLEND);
       mark(); // food
-      if (instCount) { gl.useProgram(foodP); gl.bindVertexArray(foodVao[f]); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instCount); }
+      if (nFood) { gl.useProgram(foodP); gl.bindVertexArray(foodVao[f]); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, nFood); }
       mark(); // snakes
       if (nVis) { gl.useProgram(ribP); gl.bindVertexArray(hdrVao[f]); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 2 * (maxK + 3), nVis); }
       mark(); // labels (same headers)

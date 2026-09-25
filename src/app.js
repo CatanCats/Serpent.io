@@ -44,7 +44,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   // The per-frame GPU block in WASM memory: offsets relative to its start (frame uniforms at 0)
   const base = W.frameBlkPtr();
   E.arena = { base, hdr: W.hdrPtr() - base, mini: W.miniPtr() - base,
-              inst: W.instPtr() - base, size: W.instPtr() - base + W.maxInst() * 16 };
+              food: W.foodPtr() - base, size: W.foodPtr() - base + W.maxFood() * 8 };
   E.arenaBytes = new Uint8Array(mem, base, E.arena.size);
   // skin palette as 24 vec4s (12 main colours, then 12 stripe colours) for a uniform buffer
   E.palette = new Float32Array(96);
@@ -279,7 +279,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       let near = 0; for (let s = 1; s < NS; s++) near += snap[s * 10] && snap[s * 10 + 7] ? 1 : 0;
       const gpu = R.gpuMs >= 0 ? `<b>${R.gpuMs.toFixed(2)} ms</b>` + (R.passMs ? " (" + R.passMs.map((v, i) => `${R.passNames[i]} ${v.toFixed(2)}`).join(" · ") + ")" : "") : R.canTime ? "…" : "n/a";
       perfEl.innerHTML = `<b>${Math.round(T.n / fpsAcc)}</b> fps · <b>${R.name}</b> · CPU/frame: sim <b>${a(T.sim)}</b> · prep <b>${a(T.prep)}</b> · draw <b>${a(T.gl)}</b> · dom <b>${a(T.hud)}</b> ms` +
-        `<br>GPU ${gpu}<br>${frameOut[0]} food · ${frameOut[1]} snakes drawn · res <b>${Math.round(resScale * 100)}%</b> · full-detail bots <b>${near}</b> / ${NS - 1}` + benchTxt;
+        `<br>GPU ${gpu}<br>${frameOut[0]} food slots (GPU-culled) · ${frameOut[1]} snakes drawn · res <b>${Math.round(resScale * 100)}%</b> · full-detail bots <b>${near}</b> / ${NS - 1}` + benchTxt;
       perfT = 0; fpsAcc = 0; T.sim = T.prep = T.gl = T.hud = T.n = 0;
     }
   }

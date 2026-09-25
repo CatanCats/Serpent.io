@@ -78,12 +78,21 @@ fn hexD(p0: vec2f) -> f32 { let p = abs(p0); return max(dot(p, vec2f(.8660254, .
 // ---------- food ----------
 struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
   @location(1) @interpolate(flat) r: f32, @location(2) @interpolate(flat) info: vec4u, @location(3) @interpolate(flat) col: vec3f };
-@vertex fn vsFood(@builtin(vertex_index) vi: u32, @location(0) p: vec3f, @location(1) info: vec4u) -> FoodO {
+// Every food slot is an instance, straight from WASM memory (x, y Q2 | value, skin, born lo, born hi):
+// empty and off-screen pellets are culled here, so the CPU never builds a sprite list.
+@vertex fn vsFood(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32,
+                  @location(0) pq: vec2i, @location(1) b: vec4u) -> FoodO {
+  var o: FoodO;
+  let p = vec2f(pq) * .25; let r = min(3.5 + sqrt(f32(b.x) / 16.) * 2.6, 15.);
+  let c0 = p - F.camHalf.xy;
+  if (b.x == 0u || any(abs(c0) > F.camHalf.zw + r * 1.9 + F.pxTime.x * 1.5)) { o.pos = vec4f(2., 2., 2., 1.); return o; }
   let q = quad(vi) * 2. - 1.;
-  let tiny = p.z / F.pxTime.x < 1.6;                       // under ~1.6 px: no halo
-  let l = q * select(p.z * 1.9, p.z * .7 + F.pxTime.x * 1.5, tiny);
-  let c = (p.xy + l - F.camHalf.xy) / F.camHalf.zw;
-  var o: FoodO; o.pos = vec4f(c.x, -c.y, 0., 1.); o.l = l; o.r = p.z; o.info = info; o.col = PAL[info.y % 12u].rgb; return o;
+  let tiny = r / F.pxTime.x < 1.6;                         // under ~1.6 px: no halo
+  let l = q * select(r * 1.9, r * .7 + F.pxTime.x * 1.5, tiny);
+  let c = (c0 + l) / F.camHalf.zw;
+  let age = (u32(F.pxTime.w) - (b.z | (b.w << 8u))) & 0xffffu;
+  o.pos = vec4f(c.x, -c.y, 0., 1.); o.l = l; o.r = r; o.info = vec4u(0u, b.y, (ii * 157u) & 255u, min(age, 255u));
+  o.col = PAL[b.y % 12u].rgb; return o;
 }
 @fragment fn fsFood(i: FoodO) -> @location(0) vec4f {
   let d = length(i.l); let r = i.r; let aa = F.pxTime.x * 1.2;
@@ -280,7 +289,7 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
     primitive: { topology: strip ? "triangle-strip" : "triangle-list" },
   });
   const inst = (stride, attrs) => [{ arrayStride: stride, stepMode: "instance", attributes: attrs.map(([l, o, f]) => ({ shaderLocation: l, offset: o, format: f })) }];
-  const foodL = inst(16, [[0, 0, "float32x3"], [1, 12, "uint8x4"]]);
+  const foodL = inst(8, [[0, 0, "sint16x2"], [1, 4, "uint8x4"]]);
   const hdrL = inst(48, [[0, 0, "float32x4"], [1, 16, "float32x4"], [2, 32, "uint32x4"]]);
   const lblL = inst(48, [[0, 0, "float32x4"], [2, 32, "uint32x4"]]);
   const miniL = inst(16, [[0, 0, "float32x3"], [1, 12, "uint32"]]);
@@ -319,7 +328,7 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
 
   // ---- record the five passes once; replayed every frame ----
   // The five draws: [pipeline, vertex-data offset in the arena]
-  const DRAWS = [[P.bg, -1], [P.food, A.inst], [P.rib, A.hdr], [P.lbl, A.hdr], [P.mini, A.mini]];
+  const DRAWS = [[P.bg, -1], [P.food, A.food], [P.rib, A.hdr], [P.lbl, A.hdr], [P.mini, A.mini]];
   // reused every frame: no per-frame allocations
   const counts = new Uint32Array([3, 1, 4, 0, 0, 0, 4, 0, 4, 0]); // (vertices, instances) x5
   const mainAtt = { view: null, loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 1] };
@@ -353,9 +362,9 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
       q.copyExternalImageToTexture({ source: src }, { texture: atlasTex, origin: { x, y }, premultipliedAlpha: true }, [src.width, src.height]);
     },
     draw(frameNo, playing, timing) {
-      const o = E.frameOut, instCount = o[0], nVis = o[1], maxK = o[2], nMini = playing ? o[4] : 0;
+      const o = E.frameOut, nFood = o[0], nVis = o[1], maxK = o[2], nMini = playing ? o[4] : 0;
       // ONE upload for all per-frame data, straight from WebAssembly memory
-      q.writeBuffer(arenaBuf, 0, E.mem, A.base, A.inst + instCount * 16);
+      q.writeBuffer(arenaBuf, 0, E.mem, A.base, A.food + nFood * 8);
       // trail: new points of snakes on screen only (runs listed by WASM)
       for (let i = 0, n = o[3]; i < n; i++) {
         const off = (E.tup[i * 3] * RING + E.tup[i * 3 + 1]) * 4;
@@ -363,7 +372,7 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
       }
       const enc = device.createCommandEncoder();
       const view = ctx.getCurrentTexture().createView();
-      setCounts(instCount, maxK, nVis, nMini);
+      setCounts(nFood, maxK, nVis, nMini);
       if (!(timing && canTime && !reading)) {
         mainAtt.view = view;
         const pass = enc.beginRenderPass(mainDesc);
