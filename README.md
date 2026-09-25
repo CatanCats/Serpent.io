@@ -7,7 +7,7 @@
 - ⚡ **Built for speed:** a WebAssembly simulation and WebGPU rendering (with WebGL 2 as backup) keep it smooth even on laptops with integrated graphics.
 - 📱 Mouse, keyboard and touch controls.
 
-**Play:** download `index.html` and open it in your browser.
+**▶ Play online: [catancats.github.io/Snake-Game](https://catancats.github.io/Snake-Game/)**, or download `index.html` and open it in your browser.
 
 ## Controls
 | Action | Mouse | Keyboard | Touch |
@@ -15,7 +15,7 @@
 | Steer | move the pointer | ← → / A D | drag |
 | Boost (costs length) | hold click | Space / Shift / ↑ / W | two fingers |
 | Respawn / menu | | Enter / Esc | |
-| Performance overlay | | P | |
+| Performance overlay (off by default) | | P | |
 
 On the menu you can also pick **Quality** (Sharp / Balanced / Fast: caps the pixel density at 2× / 1.25× / 1×) and **Renderer** (Auto / WebGPU / WebGL). `?renderer=webgl` in the address forces WebGL.
 
