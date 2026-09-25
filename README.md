@@ -1,8 +1,13 @@
-# serpent.io
+# serpent.io – a free slither.io-style snake game for the browser
 
-A slither.io-style snake game in a single, self-contained `index.html` (about 125 KB): 60 AI bots in five tiers (Rookie, Casual, Hunter, Elite and the rare Legend), a big circular world, boosting, and snakes that burst into food when they die.
+**Eat, grow and cut off 60 AI snakes.** Serpent.io is a fast, free io game in the style of slither.io. It runs in any modern browser on desktop or mobile: no download, no sign-up, and it works offline. The whole game is one self-contained `index.html` (about 125 KB).
 
-**Play:** open `index.html` in any modern browser. No server or install needed.
+- 🐍 **60 AI bots in five tiers:** Rookie, Casual, Hunter, Elite and the rare Legend.
+- 🏆 Live leaderboard, minimap, boosting, and snakes that burst into food when they die.
+- ⚡ **Built for speed:** a WebAssembly simulation and WebGPU rendering (with WebGL 2 as backup) keep it smooth even on laptops with integrated graphics.
+- 📱 Mouse, keyboard and touch controls.
+
+**Play:** download `index.html` and open it in your browser.
 
 ## Controls
 | Action | Mouse | Keyboard | Touch |
