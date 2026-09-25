@@ -105,25 +105,28 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   out float vT, vV; out vec2 vDir; flat out uint vSk, vFl; flat out float vR, vNl;
   const float CR=1./.42;
   vec2 T(int k){ return vec2(texelFetch(uTrail, ivec2((int(aH2.y)-k)&${RING - 1}, int(aH2.x)), 0).rg)*.25; }
-  vec2 body(int i){ return i<=0 ? aH0.xy : mix(T(i-1),T(i),aH0.z); }
   vec2 fwd(){ return vec2(cos(aH1.z),sin(aH1.z)); }
-  // strip order: tail cap, body samples tail->head, head, head cap
-  vec3 seqPt(int j,int n,int st,int K){
-    if(j<=0){ vec2 a=body(n-1), d=a-body(n-2); float l=length(d); d=l>1e-3?d/l:-fwd(); return vec3(a+d*aH0.w*aH1.w, float(n-1)+CR*aH1.w); }
-    if(j<=K){ int i=max(n-1-(j-1)*st,1); return vec3(body(i),float(i)); }
-    if(j==K+1) return vec3(aH0.xy,0.);
-    return vec3(aH0.xy+fwd()*aH0.w*aH1.w,-CR*aH1.w); // caps as wide as the glow
-  }
+  // Strip order: tail cap, body samples tail->head, head, head cap. All snakes share
+  // one instanced draw sized for the longest, so spare vertices must be nearly free:
+  // they repeat the head cap (no texture reads) and form zero-area triangles.
   void main(){
-    int n=int(aH2.z), st=int(aH1.y), K=(n-1+st-1)/st, last=K+2;
-    int j=min(gl_VertexID>>1,last); bool side=(gl_VertexID&1)==0;
-    vec3 p=seqPt(j,n,st,K);
-    vec2 tg=seqPt(min(j+1,last),n,st,K).xy-seqPt(max(j-1,0),n,st,K).xy;
-    float tl=length(tg); tg=tl>1e-4?tg/tl:fwd();
-    vec2 nrm=vec2(-tg.y,tg.x)*aH0.w*aH1.w;
-    vec2 c=(p.xy+(side?nrm:-nrm)-uCamHalf.xy)/uCamHalf.zw;
+    int n=int(aH2.z), st=int(aH1.y), K=(n-1+st-1)/st;
+    int j=gl_VertexID>>1; bool side=(gl_VertexID&1)==0;
+    float W=aH1.w, hr=aH0.w*W;
+    vec2 p, tg; float t;
+    if(j<=0){                       // tail cap: 2 texture reads
+      vec2 a=T(n-2), b=T(n-1), d=b-a; float l=length(d);
+      d=l>1e-3?d/l:-fwd(); p=mix(a,b,aH0.z)+d*hr; tg=-d; t=float(n-1)+CR*W;
+    } else if(j<=K){                // body sample: 3 texture reads
+      int i=max(n-1-(j-1)*st,1);
+      vec2 a=T(i-1), b=T(i), c=T(i+1), d=a-c; float l=length(d);
+      p=mix(a,b,aH0.z); tg=l>1e-3?d/l:fwd(); t=float(i);
+    } else if(j==K+1){ p=aH0.xy; tg=fwd(); t=0.; }                 // head
+    else { tg=fwd(); p=aH0.xy+tg*hr; t=-CR*W; }                      // head cap (and spares)
+    vec2 nrm=vec2(-tg.y,tg.x)*hr;
+    vec2 c=(p+(side?nrm:-nrm)-uCamHalf.xy)/uCamHalf.zw;
     gl_Position=vec4(c.x,-c.y,0,1);
-    vT=p.z; vV=side?aH1.w:-aH1.w; vDir=tg;
+    vT=t; vV=side?W:-W; vDir=tg;
     vSk=(aH2.w&255u)%12u; vFl=aH2.w>>8; vR=aH0.w; vNl=float(n-1);
   }`;
   const RFS = `#version 300 es
@@ -136,25 +139,23 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   vec3 shade(float k, vec2 l, float nd, vec2 f){
     uint ki=uint(k);
     vec3 base = ki==0u ? SKA[vSk] : (((ki>>2u)&1u)==0u ? SKA[vSk] : SKB[vSk]);
-    base=mix(base,SKB[vSk]*.85,smoothstep(.45,1.,abs(vV))*.35);   // flanks lean darker: rounder body
-    vec3 c=base*(1.08-.5*nd*nd);                                   // spherical scale
-    c*=1.+.16*clamp(dot(l,f),0.,1.);                               // front of each scale lit: layered scales
+    vec3 c=base*(1.05-.55*nd*nd);
     vec2 sp=l-vec2(-.28,-.36);
-    c+=vec3(.3)*exp(-dot(sp,sp)*8.);                               // specular
-    c=mix(c*.42,c,1.-smoothstep(.78,1.,nd));                       // crisp scale outline
-    if(ki==0u){ // head: eyes with a glint
+    c+=vec3(.28)*exp(-dot(sp,sp)*7.);
+    c=mix(c*.55,c,1.-smoothstep(.82,1.,nd));
+    if(ki==0u){ // head: eyes
       vec2 sd=vec2(-f.y,f.x); float aa=uPxTime.x*1.2/vR;
       for(int e=0;e<2;e++){
-        vec2 ec=f*.32+sd*(e==0?.45:-.45), pc=ec+f*.11;
-        c=mix(c,vec3(.97),1.-smoothstep(.32-aa,.32+aa,length(l-ec)));
-        c=mix(c,vec3(.03,.04,.07),1.-smoothstep(.17-aa,.17+aa,length(l-pc)));
-        c=mix(c,vec3(1),1.-smoothstep(.055-aa,.055+aa,length(l-pc-f*.05+sd*.06)));
+        vec2 ec=f*.32+sd*(e==0?.45:-.45);
+        c=mix(c,vec3(.97),1.-smoothstep(.3-aa,.3+aa,length(l-ec)));
+        c=mix(c,vec3(.03,.04,.07),1.-smoothstep(.16-aa,.16+aa,length(l-ec-f*.11)));
       }
     }
     return c;
   }
   void main(){
     float aa=uPxTime.x*1.2/vR, av=abs(vV);
+    if(av>1.+aa && (vFl&5u)==0u) discard; // outside the body and no glow: skip everything
     vec2 f=normalize(vDir), side=vec2(-f.y,f.x);
     float h=av<1. ? sqrt(1.-av*av)*CR : 0.;
     float k0=clamp(av<1. ? ceil(vT-h) : floor(vT+.5), 0., vNl), k1=min(k0+1.,vNl);

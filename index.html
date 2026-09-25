@@ -271,25 +271,28 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   out float vT, vV; out vec2 vDir; flat out uint vSk, vFl; flat out float vR, vNl;
   const float CR=1./.42;
   vec2 T(int k){ return vec2(texelFetch(uTrail, ivec2((int(aH2.y)-k)&${RING - 1}, int(aH2.x)), 0).rg)*.25; }
-  vec2 body(int i){ return i<=0 ? aH0.xy : mix(T(i-1),T(i),aH0.z); }
   vec2 fwd(){ return vec2(cos(aH1.z),sin(aH1.z)); }
-  // strip order: tail cap, body samples tail->head, head, head cap
-  vec3 seqPt(int j,int n,int st,int K){
-    if(j<=0){ vec2 a=body(n-1), d=a-body(n-2); float l=length(d); d=l>1e-3?d/l:-fwd(); return vec3(a+d*aH0.w*aH1.w, float(n-1)+CR*aH1.w); }
-    if(j<=K){ int i=max(n-1-(j-1)*st,1); return vec3(body(i),float(i)); }
-    if(j==K+1) return vec3(aH0.xy,0.);
-    return vec3(aH0.xy+fwd()*aH0.w*aH1.w,-CR*aH1.w); // caps as wide as the glow
-  }
+  // Strip order: tail cap, body samples tail->head, head, head cap. All snakes share
+  // one instanced draw sized for the longest, so spare vertices must be nearly free:
+  // they repeat the head cap (no texture reads) and form zero-area triangles.
   void main(){
-    int n=int(aH2.z), st=int(aH1.y), K=(n-1+st-1)/st, last=K+2;
-    int j=min(gl_VertexID>>1,last); bool side=(gl_VertexID&1)==0;
-    vec3 p=seqPt(j,n,st,K);
-    vec2 tg=seqPt(min(j+1,last),n,st,K).xy-seqPt(max(j-1,0),n,st,K).xy;
-    float tl=length(tg); tg=tl>1e-4?tg/tl:fwd();
-    vec2 nrm=vec2(-tg.y,tg.x)*aH0.w*aH1.w;
-    vec2 c=(p.xy+(side?nrm:-nrm)-uCamHalf.xy)/uCamHalf.zw;
+    int n=int(aH2.z), st=int(aH1.y), K=(n-1+st-1)/st;
+    int j=gl_VertexID>>1; bool side=(gl_VertexID&1)==0;
+    float W=aH1.w, hr=aH0.w*W;
+    vec2 p, tg; float t;
+    if(j<=0){                       // tail cap: 2 texture reads
+      vec2 a=T(n-2), b=T(n-1), d=b-a; float l=length(d);
+      d=l>1e-3?d/l:-fwd(); p=mix(a,b,aH0.z)+d*hr; tg=-d; t=float(n-1)+CR*W;
+    } else if(j<=K){                // body sample: 3 texture reads
+      int i=max(n-1-(j-1)*st,1);
+      vec2 a=T(i-1), b=T(i), c=T(i+1), d=a-c; float l=length(d);
+      p=mix(a,b,aH0.z); tg=l>1e-3?d/l:fwd(); t=float(i);
+    } else if(j==K+1){ p=aH0.xy; tg=fwd(); t=0.; }                 // head
+    else { tg=fwd(); p=aH0.xy+tg*hr; t=-CR*W; }                      // head cap (and spares)
+    vec2 nrm=vec2(-tg.y,tg.x)*hr;
+    vec2 c=(p+(side?nrm:-nrm)-uCamHalf.xy)/uCamHalf.zw;
     gl_Position=vec4(c.x,-c.y,0,1);
-    vT=p.z; vV=side?aH1.w:-aH1.w; vDir=tg;
+    vT=t; vV=side?W:-W; vDir=tg;
     vSk=(aH2.w&255u)%12u; vFl=aH2.w>>8; vR=aH0.w; vNl=float(n-1);
   }`;
   const RFS = `#version 300 es
@@ -302,25 +305,23 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   vec3 shade(float k, vec2 l, float nd, vec2 f){
     uint ki=uint(k);
     vec3 base = ki==0u ? SKA[vSk] : (((ki>>2u)&1u)==0u ? SKA[vSk] : SKB[vSk]);
-    base=mix(base,SKB[vSk]*.85,smoothstep(.45,1.,abs(vV))*.35);   // flanks lean darker: rounder body
-    vec3 c=base*(1.08-.5*nd*nd);                                   // spherical scale
-    c*=1.+.16*clamp(dot(l,f),0.,1.);                               // front of each scale lit: layered scales
+    vec3 c=base*(1.05-.55*nd*nd);
     vec2 sp=l-vec2(-.28,-.36);
-    c+=vec3(.3)*exp(-dot(sp,sp)*8.);                               // specular
-    c=mix(c*.42,c,1.-smoothstep(.78,1.,nd));                       // crisp scale outline
-    if(ki==0u){ // head: eyes with a glint
+    c+=vec3(.28)*exp(-dot(sp,sp)*7.);
+    c=mix(c*.55,c,1.-smoothstep(.82,1.,nd));
+    if(ki==0u){ // head: eyes
       vec2 sd=vec2(-f.y,f.x); float aa=uPxTime.x*1.2/vR;
       for(int e=0;e<2;e++){
-        vec2 ec=f*.32+sd*(e==0?.45:-.45), pc=ec+f*.11;
-        c=mix(c,vec3(.97),1.-smoothstep(.32-aa,.32+aa,length(l-ec)));
-        c=mix(c,vec3(.03,.04,.07),1.-smoothstep(.17-aa,.17+aa,length(l-pc)));
-        c=mix(c,vec3(1),1.-smoothstep(.055-aa,.055+aa,length(l-pc-f*.05+sd*.06)));
+        vec2 ec=f*.32+sd*(e==0?.45:-.45);
+        c=mix(c,vec3(.97),1.-smoothstep(.3-aa,.3+aa,length(l-ec)));
+        c=mix(c,vec3(.03,.04,.07),1.-smoothstep(.16-aa,.16+aa,length(l-ec-f*.11)));
       }
     }
     return c;
   }
   void main(){
     float aa=uPxTime.x*1.2/vR, av=abs(vV);
+    if(av>1.+aa && (vFl&5u)==0u) discard; // outside the body and no glow: skip everything
     vec2 f=normalize(vDir), side=vec2(-f.y,f.x);
     float h=av<1. ? sqrt(1.-av*av)*CR : 0.;
     float k0=clamp(av<1. ? ceil(vT-h) : floor(vT+.5), 0., vNl), k1=min(k0+1.,vNl);
@@ -645,58 +646,52 @@ fn T(h2: vec4u, k: i32) -> vec2f {
   let v = trail[h2.x * ${RING}u + u32((i32(h2.y) - k) & RM)];
   return vec2f(f32(bitcast<i32>(v << 16u) >> 16u), f32(bitcast<i32>(v) >> 16u)) * .25;
 }
-fn body(h0: vec4f, h2: vec4u, i: i32) -> vec2f {
-  if (i <= 0) { return h0.xy; }
-  return mix(T(h2, i - 1), T(h2, i), h0.z);
-}
 fn fwd(h1: vec4f) -> vec2f { return vec2f(cos(h1.z), sin(h1.z)); }
-// strip order: tail cap, body samples tail->head, head, head cap
-fn seqPt(j: i32, n: i32, st: i32, K: i32, h0: vec4f, h1: vec4f, h2: vec4u) -> vec3f {
-  if (j <= 0) {
-    let a = body(h0, h2, n - 1); var d = a - body(h0, h2, n - 2); let l = length(d);
-    if (l > 1e-3) { d = d / l; } else { d = -fwd(h1); }
-    return vec3f(a + d * h0.w * h1.w, f32(n - 1) + CR * h1.w);
-  }
-  if (j <= K) { let i = max(n - 1 - (j - 1) * st, 1); return vec3f(body(h0, h2, i), f32(i)); }
-  if (j == K + 1) { return vec3f(h0.xy, 0.); }
-  return vec3f(h0.xy + fwd(h1) * h0.w * h1.w, -CR * h1.w);
-}
+// Strip order: tail cap, body samples tail->head, head, head cap. All snakes share
+// one instanced draw sized for the longest, so spare vertices must be nearly free:
+// they repeat the head cap (no texture reads) and form zero-area triangles.
 @vertex fn vsRib(@builtin(vertex_index) vi: u32, @location(0) h0: vec4f, @location(1) h1: vec4f, @location(2) h2: vec4u) -> RibO {
-  let n = i32(h2.z); let st = i32(h1.y); let K = (n - 1 + st - 1) / st; let last = K + 2;
-  let j = min(i32(vi >> 1u), last); let side = (vi & 1u) == 0u;
-  let p = seqPt(j, n, st, K, h0, h1, h2);
-  var tg = seqPt(min(j + 1, last), n, st, K, h0, h1, h2).xy - seqPt(max(j - 1, 0), n, st, K, h0, h1, h2).xy;
-  let tl = length(tg); if (tl > 1e-4) { tg = tg / tl; } else { tg = fwd(h1); }
-  let nrm = vec2f(-tg.y, tg.x) * h0.w * h1.w;
-  let c = (p.xy + select(-nrm, nrm, side) - F.camHalf.xy) / F.camHalf.zw;
+  let n = i32(h2.z); let st = i32(h1.y); let K = (n - 1 + st - 1) / st;
+  let j = i32(vi >> 1u); let side = (vi & 1u) == 0u;
+  let W = h1.w; let hr = h0.w * W;
+  var p: vec2f; var tg: vec2f; var t: f32;
+  if (j <= 0) {                       // tail cap: 2 texture reads
+    let a = T(h2, n - 2); let b = T(h2, n - 1); var d = b - a; let l = length(d);
+    if (l > 1e-3) { d = d / l; } else { d = -fwd(h1); }
+    p = mix(a, b, h0.z) + d * hr; tg = -d; t = f32(n - 1) + CR * W;
+  } else if (j <= K) {                // body sample: 3 texture reads
+    let i = max(n - 1 - (j - 1) * st, 1);
+    let a = T(h2, i - 1); let b = T(h2, i); let d = a - T(h2, i + 1); let l = length(d);
+    p = mix(a, b, h0.z); if (l > 1e-3) { tg = d / l; } else { tg = fwd(h1); } t = f32(i);
+  } else if (j == K + 1) { p = h0.xy; tg = fwd(h1); t = 0.; }       // head
+  else { tg = fwd(h1); p = h0.xy + tg * hr; t = -CR * W; }           // head cap (and spares)
+  let nrm = vec2f(-tg.y, tg.x) * hr;
+  let c = (p + select(-nrm, nrm, side) - F.camHalf.xy) / F.camHalf.zw;
   var o: RibO;
-  o.pos = vec4f(c.x, -c.y, 0., 1.); o.t = p.z; o.v = select(-h1.w, h1.w, side); o.dir = tg;
+  o.pos = vec4f(c.x, -c.y, 0., 1.); o.t = t; o.v = select(-W, W, side); o.dir = tg;
   o.sk = (h2.w & 255u) % 12u; o.fl = h2.w >> 8u; o.r = h0.w; o.nl = f32(n - 1);
   return o;
 }
-fn shade(k: f32, l: vec2f, nd: f32, f: vec2f, sk: u32, r: f32, v: f32) -> vec3f {
+fn shade(k: f32, l: vec2f, nd: f32, f: vec2f, sk: u32, r: f32) -> vec3f {
   let ki = u32(k);
   var base = SKA[sk]; if (ki != 0u && ((ki >> 2u) & 1u) == 1u) { base = SKB[sk]; }
-  base = mix(base, SKB[sk] * .85, smoothstep(.45, 1., abs(v)) * .35);  // flanks lean darker: rounder body
-  var c = base * (1.08 - .5 * nd * nd);                                // spherical scale
-  c *= 1. + .16 * clamp(dot(l, f), 0., 1.);                            // front of each scale lit: layered scales
+  var c = base * (1.05 - .55 * nd * nd);
   let sp = l - vec2f(-.28, -.36);
-  c += vec3f(.3) * exp(-dot(sp, sp) * 8.);                             // specular
-  c = mix(c * .42, c, 1. - smoothstep(.78, 1., nd));                   // crisp scale outline
-  if (ki == 0u) { // head: eyes with a glint
+  c += vec3f(.28) * exp(-dot(sp, sp) * 7.);
+  c = mix(c * .55, c, 1. - smoothstep(.82, 1., nd));
+  if (ki == 0u) { // head: eyes
     let sd = vec2f(-f.y, f.x); let aa = F.pxTime.x * 1.2 / r;
     for (var e = 0; e < 2; e++) {
       let ec = f * .32 + sd * select(-.45, .45, e == 0);
-      c = mix(c, vec3f(.97), 1. - smoothstep(.32 - aa, .32 + aa, length(l - ec)));
-      let pc = ec + f * .11;
-      c = mix(c, vec3f(.03, .04, .07), 1. - smoothstep(.17 - aa, .17 + aa, length(l - pc)));
-      c = mix(c, vec3f(1.), 1. - smoothstep(.055 - aa, .055 + aa, length(l - pc - f * .05 + sd * .06)));
+      c = mix(c, vec3f(.97), 1. - smoothstep(.3 - aa, .3 + aa, length(l - ec)));
+      c = mix(c, vec3f(.03, .04, .07), 1. - smoothstep(.16 - aa, .16 + aa, length(l - ec - f * .11)));
     }
   }
   return c;
 }
 @fragment fn fsRib(i: RibO) -> @location(0) vec4f {
   let aa = F.pxTime.x * 1.2 / i.r; let av = abs(i.v);
+  if (av > 1. + aa && (i.fl & 5u) == 0u) { discard; } // outside the body and no glow: skip everything
   let f = normalize(i.dir); let side = vec2f(-f.y, f.x);
   var h = 0.; if (av < 1.) { h = sqrt(1. - av * av) * CR; }
   let k0 = clamp(select(floor(i.t + .5), ceil(i.t - h), av < 1.), 0., i.nl); let k1 = min(k0 + 1., i.nl);
@@ -710,8 +705,8 @@ fn shade(k: f32, l: vec2f, nd: f32, f: vec2f, sk: u32, r: f32, v: f32) -> vec3f 
   else if ((i.fl & 4u) != 0u) { glow = exp(-pow(max(gd - .85, 0.) / .3, 2.)) * (.45 + .15 * sin(F.pxTime.y * 2.5 + i.t * .3)) * (1. - a); gc = vec3f(1., .78, .3); }
   if (a <= 0. && glow <= .003) { discard; }
   var c = vec3f(0.);
-  if (e0 > 0.) { c += shade(k0, l0, n0, f, i.sk, i.r, i.v) * e0; }
-  if (e1 > 0.) { c += shade(k1, l1, n1, f, i.sk, i.r, i.v) * e1; }
+  if (e0 > 0.) { c += shade(k0, l0, n0, f, i.sk, i.r) * e0; }
+  if (e1 > 0.) { c += shade(k1, l1, n1, f, i.sk, i.r) * e1; }
   if ((i.fl & 4u) != 0u) { c += vec3f(1., .85, .4) * .18 * a * (.5 + .5 * sin(i.t * .8 - F.pxTime.y * 3.)); } // shimmering scales
   return vec4f(c + gc * glow, a);
 }
