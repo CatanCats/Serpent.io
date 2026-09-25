@@ -15,7 +15,10 @@
  *    per-tier statistical model. Food and the collision/AI maps exist only
  *    around the camera, so cost does not grow with the map.
  *  - Spatial hash is incremental (nodes linked as they appear, stale ones
- *    skipped) and compacted every REBUILD steps.
+ *    skipped) and compacted every REBUILD steps; queries visit only the cells
+ *    their reach overlaps.
+ *  - Food is stored in the GPU's own vertex layout and drawn in full; the
+ *    vertex shader culls it, so food costs no CPU work per frame.
  */
 typedef unsigned int u32;
 typedef int i32;
@@ -175,6 +178,10 @@ static i32 playerKiller = -1;
 /* ---------- helpers ---------- */
 static i32 cellX(float x) { i32 c = (i32)((x + WR) * (1.f / CELL)); return c < 0 ? 0 : c >= GN ? GN - 1 : c; }
 static i32 cellOf(float x, float y) { return cellX(y) * GN + cellX(x); }
+/* for each grid cell overlapping the square (x +- R, y +- R): usually 1-4 cells, not a fixed 3x3 */
+#define FOR_CELLS(x, y, R, c) \
+  for (i32 gy_ = cellX((y) - (R)), gy1_ = cellX((y) + (R)), gx0_ = cellX((x) - (R)), gx1_ = cellX((x) + (R)); gy_ <= gy1_; gy_++) \
+    for (i32 gx_ = gx0_, c; gx_ <= gx1_ && (c = gy_ * GN + gx_, 1); gx_++)
 
 /* fixed point Q2: +-8191 units at 0.25 precision (sub-pixel at normal zoom) */
 static short fix(float v) { v *= 4.f; v += v >= 0 ? 0.5f : -0.5f; return (short)(v > 32767.f ? 32767.f : v < -32767.f ? -32767.f : v); }
@@ -374,20 +381,14 @@ static i32 hitTest(i32 s) {
   float hx = k->hx, hy = k->hy;
   float lim = WR - k->r * 0.5f;
   if (hx * hx + hy * hy > lim * lim) return -2;
-  i32 cx = cellX(hx), cy = cellX(hy);
-  for (i32 gy = cy - 1; gy <= cy + 1; gy++) {
-    if (gy < 0 || gy >= GN) continue;
-    for (i32 gx = cx - 1; gx <= cx + 1; gx++) {
-      if (gx < 0 || gx >= GN) continue;
-      for (i32 i = gHead[gy * GN + gx]; i >= 0; i = gNext[i]) {
-        i32 o = gS[i];
-        if (o == s || !segLive(i)) continue;
-        u32 j = gC[i] & RMASK;
-        float dx = UQ(tr[o][j][0]) - hx, dy = UQ(tr[o][j][1]) - hy, t = (k->r + S[o].r) * 0.66f;
-        if (dx * dx + dy * dy < t * t) return o;
-      }
+  FOR_CELLS(hx, hy, (k->r + 40.f) * 0.66f, c) /* 40 = largest radius */
+    for (i32 i = gHead[c]; i >= 0; i = gNext[i]) {
+      i32 o = gS[i];
+      if (o == s || !segLive(i)) continue;
+      u32 j = gC[i] & RMASK;
+      float dx = UQ(tr[o][j][0]) - hx, dy = UQ(tr[o][j][1]) - hy, t = (k->r + S[o].r) * 0.66f;
+      if (dx * dx + dy * dy < t * t) return o;
     }
-  }
   return -1;
 }
 
@@ -396,20 +397,14 @@ static void eat(i32 s, float dt) {
   Snake *k = &S[s];
   float hx = k->hx, hy = k->hy;
   float att = k->r * 1.5f + 34.f, att2 = att * att, pull = minf(1.f, dt * 10.f);
-  i32 cx = cellX(hx), cy = cellX(hy);
-  for (i32 gy = cy - 1; gy <= cy + 1; gy++) {
-    if (gy < 0 || gy >= GN) continue;
-    for (i32 gx = cx - 1; gx <= cx + 1; gx++) {
-      if (gx < 0 || gx >= GN) continue;
-      for (i32 i = fHead[gy * GN + gx]; i >= 0; i = fNext[i]) {
-        if (!F[i].v) continue;
-        float px = UQ(F[i].x), py = UQ(F[i].y);
-        float dx = px - hx, dy = py - hy, d2 = dx * dx + dy * dy, er = k->r + frT[F[i].v] * 0.5f;
-        if (d2 < er * er) { k->mass += FV(i) * 0.75f; killFood(i); }
-        else if (d2 < att2) { F[i].x = fix(px - dx * pull); F[i].y = fix(py - dy * pull); }
-      }
+  FOR_CELLS(hx, hy, att, c)
+    for (i32 i = fHead[c]; i >= 0; i = fNext[i]) {
+      if (!F[i].v) continue;
+      float px = UQ(F[i].x), py = UQ(F[i].y);
+      float dx = px - hx, dy = py - hy, d2 = dx * dx + dy * dy, er = k->r + frT[F[i].v] * 0.5f;
+      if (d2 < er * er) { k->mass += FV(i) * 0.75f; killFood(i); }
+      else if (d2 < att2) { F[i].x = fix(px - dx * pull); F[i].y = fix(py - dy * pull); }
     }
-  }
 }
 
 /* ---------- bot brain ---------- */
@@ -418,20 +413,14 @@ static void eat(i32 s, float dt) {
 static float clearance(i32 self, float x, float y) {
   float best = 100.f;
   float lim = WR - sqrtf_(x * x + y * y); if (lim < best) best = lim;
-  i32 cx = cellX(x), cy = cellX(y);
-  for (i32 gy = cy - 1; gy <= cy + 1; gy++) {
-    if (gy < 0 || gy >= GN) continue;
-    for (i32 gx = cx - 1; gx <= cx + 1; gx++) {
-      if (gx < 0 || gx >= GN) continue;
-      for (i32 i = gHead[gy * GN + gx]; i >= 0; i = gNext[i]) {
-        i32 o = gS[i];
-        if (o == self || !segLive(i)) continue;
-        u32 j = gC[i] & RMASK;
-        float dx = UQ(tr[o][j][0]) - x, dy = UQ(tr[o][j][1]) - y, d = sqrtf_(dx * dx + dy * dy) - S[o].r;
-        if (d < best) best = d;
-      }
+  FOR_CELLS(x, y, 100.f, c)
+    for (i32 i = gHead[c]; i >= 0; i = gNext[i]) {
+      i32 o = gS[i];
+      if (o == self || !segLive(i)) continue;
+      u32 j = gC[i] & RMASK;
+      float dx = UQ(tr[o][j][0]) - x, dy = UQ(tr[o][j][1]) - y, d = sqrtf_(dx * dx + dy * dy) - S[o].r;
+      if (d < best) best = d;
     }
-  }
   return best;
 }
 
@@ -507,20 +496,14 @@ static void botThink(i32 s, float dt) {
     } else if (k->target < 0 && k->rushT <= 0) {
       /* best food by value / distance, favouring what is in front */
       float ca = k->dcx, sa = k->dcy, bestScore = 0;
-      i32 cx = cellX(hx), cy = cellX(hy), w = tier == 0 ? 1 : 2;
-      for (i32 gy = cy - w; gy <= cy + w; gy++) {
-        if (gy < 0 || gy >= GN) continue;
-        for (i32 gx = cx - w; gx <= cx + w; gx++) {
-          if (gx < 0 || gx >= GN) continue;
-          for (i32 i = fHead[gy * GN + gx]; i >= 0; i = fNext[i]) {
-            if (!F[i].v) continue;
-            float px = UQ(F[i].x), py = UQ(F[i].y);
-            float dx = px - hx, dy = py - hy, d = sqrtf_(dx * dx + dy * dy) + 1.f;
-            float score = FV(i) / (d + 60.f) * (1.6f + (dx * ca + dy * sa) / d);
-            if (score > bestScore) { bestScore = score; k->tx = px; k->ty = py; }
-          }
+      FOR_CELLS(hx, hy, tier == 0 ? CELL : 2.f * CELL, c) /* rookies look less far */
+        for (i32 i = fHead[c]; i >= 0; i = fNext[i]) {
+          if (!F[i].v) continue;
+          float px = UQ(F[i].x), py = UQ(F[i].y);
+          float dx = px - hx, dy = py - hy, d = sqrtf_(dx * dx + dy * dy) + 1.f;
+          float score = FV(i) / (d + 60.f) * (1.6f + (dx * ca + dy * sa) / d);
+          if (score > bestScore) { bestScore = score; k->tx = px; k->ty = py; }
         }
-      }
       if (bestScore == 0) homePoint(k->mass, &k->tx, &k->ty);
     }
   }
@@ -833,7 +816,7 @@ static float expf_(float x) { /* 2^(x*log2 e), enough for smoothing factors */
 }
 static float camH = 900.f, specT = 99.f;
 static i32 spectate = 1;
-static i32 frameOut[8];        /* food sprites, snakes drawn, maxK, trail uploads, minimap items */
+static i32 frameOut[8];        /* food slots, snakes drawn, maxK, trail uploads, minimap items */
 /* Accurate simulation cost on this device: time many steps in one go, so the
    browser's coarse/jittered timer doesn't matter. Advances the game. */
 EXPORT("bench") float bench(i32 steps) {

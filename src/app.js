@@ -35,7 +35,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   // label atlas at the screen's own pixel density (not always 2x): smaller texture, same sharpness
   const SLOT_W = 150, SLOT_H = 34, LS = Math.min(2, Math.max(1, window.devicePixelRatio || 1)), CELLS_X = 8, CELLS_Y = Math.ceil(NS / CELLS_X);
   const E = {
-    W, mem, NS, RING, SKINS, SLOT_W, SLOT_H, CELLS_X, CELLS_Y, AW: SLOT_W * LS * CELLS_X, AH: SLOT_H * LS * CELLS_Y,
+    mem, NS, RING, SLOT_W, SLOT_H, CELLS_X, CELLS_Y, AW: SLOT_W * LS * CELLS_X, AH: SLOT_H * LS * CELLS_Y,
     frameBlk, frameOut,
     trail: new Int16Array(mem, W.trailPtr(), NS * RING * 2),
     tup: new Uint32Array(mem, W.tupPtr(), NS * 6),          // trail uploads: (row, first index, count)...
@@ -162,7 +162,6 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     else if (k === "ArrowLeft" || k === "a") { keyTurn = -1; usingKeys = true; }
     else if (k === "ArrowRight" || k === "d") { keyTurn = 1; usingKeys = true; }
     else if (k === "p" || k === "P") $("perf").classList.toggle("off");
-    else if ((k === "b" || k === "B") && state !== "play") runBench();
     else if (k === "Enter" && state !== "play") start();
     else if (k === "Escape" && state !== "menu") toMenu();
   });
@@ -231,16 +230,6 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   // re-draw every label once the web font has loaded
   document.fonts?.ready.then(() => slotKey.fill(""));
 
-  /* ---------------- Benchmark (B on the menu) ----------------
-     Times 600 simulation steps in one go, so coarse or jittered browser timers
-     (privacy protections) can't distort it. */
-  let benchTxt = "";
-  function runBench() {
-    const us = W.bench(600);
-    benchTxt = `<br>bench: <b>${us.toFixed(1)} µs</b> per sim step (${(us * 60 / 10).toFixed(2)}% of one core at 60 Hz)`;
-    $("perf").classList.remove("off"); perfT = 1;
-  }
-
   /* ---------------- Main loop ----------------
      JS gathers input, makes ONE WebAssembly call and hands its output to the GPU. */
   const perfEl = $("perf");
@@ -283,17 +272,16 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       perfT = 0; fpsAcc = 0; T.sim = T.prep = T.gl = T.hud = T.n = 0;
     }
   }
-  // Is WebAssembly running at full speed? Checked once it has warmed up (the first
-  // calls include compiling). A healthy browser needs ~10-40 us per step, even on
-  // a slow laptop; 15x more means the browser runs it without its compilers
-  // (e.g. Edge "Enhance your security on the web"), which also slows JavaScript.
+  // Simulation speed on this device, measured once warmed up (the first calls include
+  // compiling). Timing 120 steps in one go keeps coarse/jittered browser timers out of it.
+  let benchTxt = "";
   setTimeout(() => {
     if (state !== "menu") return;
     const us = W.bench(120);
-    benchTxt = `<br>WebAssembly: <b>${us.toFixed(1)} µs</b> per sim step`;
+    benchTxt = `<br>sim benchmark: <b>${us.toFixed(1)} µs</b> per step`;
     if (us > 400) {
       const n = $("slowNote"); n.hidden = false;
-      n.innerHTML = `WebAssembly is running very slowly here (${Math.round(us)} µs per step; normal is 10–40). That happens when the browser runs it without its compilers. In Edge: <b>edge://settings/privacy</b> → "Enhance your security on the web" → choose <b>Basic</b>, or add this page as an exception. "Balanced" (the default) also applies it to sites you rarely visit.`;
+      n.innerHTML = `The simulation is running very slowly here (${Math.round(us)} µs per step; typical is 10–40). Check for battery saver / efficiency mode, a browser setting that disables its JavaScript/WebAssembly compilers, or a busy CPU.`;
     }
   }, 2500);
   W.snapshot(); updateHud();

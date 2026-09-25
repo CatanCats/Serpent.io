@@ -50,16 +50,15 @@
   .tg { flex: none; font-size: 8.5px; font-weight: 600; letter-spacing: .08em; padding: 1px 5px; border-radius: 6px; }
   .tg.t0 { color: #6ee7b7; background: rgba(52,211,153,.12); }
   .tg.t1 { color: #7dd3fc; background: rgba(56,189,248,.12); }
-  .tg.you { color: #04130d; background: linear-gradient(90deg,#34d399,#38bdf8); }
-  #board li .sc { min-width: 42px; text-align: right; }
   .tg.t2 { color: #fbbf24; background: rgba(251,191,36,.12); }
   .tg.t3 { color: #fb7185; background: rgba(251,113,133,.14); }
   .tg.t4 { color: #1c1400; background: linear-gradient(90deg,#fde68a,#f59e0b); }
+  .tg.you { color: #04130d; background: linear-gradient(90deg,#34d399,#38bdf8); }
+  #board li .sc { min-width: 42px; text-align: right; }
 
-  #mini { right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); width: 170px; height: 170px; border-radius: 50%; padding: 0; overflow: hidden; }
-  /* the minimap itself is drawn by WebGL underneath this ring */
-  #mini { border: 1px solid var(--line); box-shadow: 0 10px 40px rgba(0,0,0,.35); }
-  body:not(.playing) #mini { opacity: 0; }
+  /* the minimap itself is drawn on the game canvas, underneath this ring */
+  #mini { right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); width: 170px; height: 170px; border-radius: 50%;
+    border: 1px solid var(--line); box-shadow: 0 10px 40px rgba(0,0,0,.35); }
 
   #perf { left: max(16px, env(safe-area-inset-left)); top: max(16px, env(safe-area-inset-top)); padding: 8px 12px; max-width: calc(100vw - 300px); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); border-radius: 10px; }
   #perf b { color: var(--text); font-weight: 500; }
@@ -142,7 +141,7 @@
       <span>Renderer</span>
       <button data-r="auto">Auto</button><button data-r="webgpu">WebGPU</button><button data-r="webgl">WebGL</button>
     </div>
-    <div class="tech"><span id="tech">WebAssembly sim · GPU-built snakes</span> · now: <span id="rnow">…</span></div>
+    <div class="tech"><span id="tech"></span> · now: <span id="rnow">…</span></div>
     <div class="slow" id="slowNote" hidden></div>
   </div>
 </div>

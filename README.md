@@ -1,46 +1,56 @@
 # serpent.io
 
-A slither.io-style snake game in a single, self-contained `index.html`: 60 AI bots in five tiers (Rookie, Casual, Hunter, Elite and the rare Legend), a big circular world, boosting, and snakes that burst into food when they die.
+A slither.io-style snake game in a single, self-contained `index.html` (about 125 KB): 60 AI bots in five tiers (Rookie, Casual, Hunter, Elite and the rare Legend), a big circular world, boosting, and snakes that burst into food when they die.
 
-**Play:** open `index.html` in any modern browser. It needs no server or install.
+**Play:** open `index.html` in any modern browser. No server or install needed.
 
 ## Controls
 | Action | Mouse | Keyboard | Touch |
 | --- | --- | --- | --- |
 | Steer | move the pointer | ← → / A D | drag |
-| Boost (costs length) | hold click | Space / Shift / ↑ | two fingers |
+| Boost (costs length) | hold click | Space / Shift / ↑ / W | two fingers |
 | Respawn / menu | | Enter / Esc | |
 | Performance overlay | | P | |
 
+On the menu you can also pick **Quality** (Sharp / Balanced / Fast: caps the pixel density at 2× / 1.25× / 1×) and **Renderer** (Auto / WebGPU / WebGL). `?renderer=webgl` in the address forces WebGL.
+
+## The game
+- **Tiers:** bots from Rookie to Legend differ in how far they look ahead, how cleanly they steer, and how much they hunt. Hunters and above predict other heads and swoop on fresh kills.
+- **Legends are strong but fair.** They follow the same physics and turn rate as every snake and die when they crash. They survive by driving carefully: a close-range probe, an exact free-space check when boxed in, and a calm temperament.
+- **Map:** the player spawns on the outer rim; big snakes gather in the centre. The whole world wraps around the one snake you control.
+
 ## How it's built for speed
-- **The simulation runs in WebAssembly** (`src/sim.c`, compiled with clang to a 17 KB module with no libc and no malloc). All state is in static memory, so JS makes its typed-array views once and never allocates per frame.
-- **Bodies never move:** each snake is a ring buffer of its head's trail in 16-bit fixed point, so a step is O(1) per snake. The spatial hash is updated incrementally and compacted every 32 steps. Bots check danger with a 32-unit ownership byte map.
-- **Bot AI:** bots look for food by value over distance and hunt smaller snakes by cutting in front of them. They probe 13 candidate headings for obstacles and the world border. Their thinking is staggered across alternate steps.
-- **Rendering takes 3 draw calls per frame:** the hex floor, all food as one instanced draw, and all snakes as one triangle strip. The snake shader works out which segment circle is on top at each pixel and shades it, so the classic scaled look costs about 1× overdraw instead of about 5×.
-- The game uses a fixed ≤1/60 s substep. DPR is capped at 2, and DOM updates for the leaderboard and minimap run only 4× per second.
+Each frame, JavaScript makes **one WebAssembly call**, then **one upload** of a contiguous block of WebAssembly memory to the GPU, followed by five draws.
 
-Measured headless: about 0.3 ms of simulation per frame with 40 bots and about 3,600 food pellets.
+**Simulation** (`src/sim.c`, C compiled with clang to a ~39 KB WebAssembly module; no libc, no malloc, all memory static):
+- **Fixed 60 Hz steps** with interpolated rendering, so the game plays the same at any refresh rate.
+- **Bodies never move.** Each snake is a ring buffer of its head's trail in 16-bit fixed point, so movement is O(1) per snake.
+- **Detail only where you look.** Snakes near the camera get collisions, eating and full AI. The rest move at quarter rate and live or die by a per-tier formula that runs every 16 steps. Food and the collision maps exist only around the camera, so cost does not grow with the map.
+- **Incremental spatial hash**, compacted every 32 steps. Collision, eating and free-space queries visit only the grid cells their reach overlaps (usually 1–4, not a fixed 3×3).
+- **Cheap bot steering:** candidate headings come from precomputed rotation tables (no trig). The goal direction is tried first and the search stops at the first safe heading. Danger checks read a byte map of who owns each 32-unit cell.
+- **Food costs no CPU per frame.** Pellets are 8-byte records in exactly the layout the GPU reads. The whole array is uploaded as-is and the vertex shader skips empty and off-screen slots. The array is compacted during the regular rebuild.
 
-- **Detail only near the player:** full collisions, eating and AI run only around the camera. Far-away bots use a cheap statistical model: higher tiers grow faster and almost never die. Food and the bot obstacle map exist only around the player, so the cost doesn't depend on map size.
-- **GPU-built snakes:** the vertex shader builds each snake's ribbon straight from a texture that's a byte copy of the WASM trail memory. The CPU writes 48 bytes per visible snake.
-- **Fixed 60 Hz simulation** with render interpolation, so the game behaves the same at any refresh rate.
+**Rendering** (`src/render-gpu.js` WebGPU, `src/render-gl.js` WebGL 2; same look and the same five draws):
+- **Snakes are built on the GPU.** The vertex shader builds each ribbon straight from a GPU copy of the trail memory. Only the new trail points of snakes on screen are uploaded. The fragment shader works out which scale is on top at each pixel, so the scaled look costs about 1× overdraw. The CPU writes 48 bytes per visible snake.
+- **Labels** (name and level) are drawn into a texture atlas only when they change, then drawn as one instanced draw.
+- The **minimap** is drawn on the game canvas, with no Canvas2D.
+- The **floor** is one hex tile baked once into a mipmapped texture and drawn without blending.
+- **Dynamic resolution** drops pixels before dropping frames.
 
-- **Two renderers, same look:** WebGPU when available, otherwise WebGL 2. Choose on the menu (**Renderer: Auto / WebGPU / WebGL**), or add `?renderer=webgl` to the address. Each frame is **one upload** of a contiguous block of WebAssembly memory (frame uniforms, snake headers, minimap, food), plus only the *new* trail points of snakes on screen. Five draws in one pass.
-- **Food costs the CPU nothing per frame:** pellets are stored as 8-byte records in exactly the layout the GPU reads. The whole array is uploaded as-is and the vertex shader skips empty slots and off-screen pellets, so no sprite list is built. The array is compacted every 32 steps, which also drops pellets left far behind.
-- **Built for slow WebAssembly too:** some browser settings run WebAssembly without its compilers (for example Edge's Enhanced Security, which uses the slow DrumBrake interpreter). There the cost is the number of instructions executed, so per-frame work is kept to a minimum. Far bots roll their fate every 16 steps, and only snakes that are drawn get interpolated.
-- **Quality: Sharp / Balanced / Fast** caps the pixel density at 2× / 1.25× / 1×. GPU cost is mostly pixels, so on integrated graphics this is the biggest single saving.
-- **Simulation:** heading kept as a unit vector (no trig per step), far-away snakes move at quarter rate, and the collision grid only holds segments near the player. Memory clears use WebAssembly's bulk-memory instructions.
-- **Measuring:** press **P** for fps, CPU time per part and GPU time per pass (floor, food, snakes, labels, map). On the menu, press **B** to benchmark the simulation; it times 600 steps in one go, so privacy-blurred browser timers can't distort the result.
+## Measuring
+Press **P** for:
+- fps, and CPU time per part (sim, prep, draw, DOM);
+- GPU time per pass (floor, food, snakes, labels, map), when the browser supports GPU timers;
+- a simulation benchmark in µs per step, taken on the menu after warm-up. Typical is 10–40 µs. If it is far higher, the menu shows a note.
 
 ## Source layout
-- `src/sim.c`: the whole game simulation, compiled to WebAssembly.
+- `src/sim.c`: the whole simulation (WebAssembly).
 - `src/app.js`: UI, input, HUD, labels and the main loop.
-- `src/render-gpu.js` / `src/render-gl.js`: the WebGPU and WebGL 2 renderers (same interface).
-- `src/index.html`: the page. `node build.mjs` inlines everything into `index.html`.
+- `src/render-gpu.js` / `src/render-gl.js`: the two renderers.
+- `src/index.html`: the page.
+- `build.mjs` inlines everything into `index.html`.
 
 ## Rebuilding
-Edit `src/sim.c` or `src/index.html`, then run:
 ```sh
-node build.mjs   # needs clang with the wasm32 target
+node build.mjs   # needs clang with the wasm32 target; uses Binaryen's wasm-opt if it is on PATH
 ```
-This compiles the WASM and inlines it (base64) into `index.html`.

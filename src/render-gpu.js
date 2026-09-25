@@ -108,7 +108,7 @@ struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
   return vec4f(vec3f(rgb), f32(core));
 }
 
-// ---------- snakes: ribbons built from the trail texture ----------
+// ---------- snakes: ribbons built from the trail buffer ----------
 struct RibO { @builtin(position) pos: vec4f, @location(0) t: f32, @location(1) v: f32, @location(2) dir: vec2f,
   @location(3) @interpolate(flat) ca: vec3f, @location(4) @interpolate(flat) fl: u32,
   @location(5) @interpolate(flat) r: f32, @location(6) @interpolate(flat) nl: f32, @location(7) @interpolate(flat) cb: vec3f };
@@ -326,14 +326,12 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
     genMips(tileTex);
   }
 
-  // ---- record the five passes once; replayed every frame ----
-  // The five draws: [pipeline, vertex-data offset in the arena]
+  // ---- the five draws: [pipeline, vertex-data offset in the arena] ----
   const DRAWS = [[P.bg, -1], [P.food, A.food], [P.rib, A.hdr], [P.lbl, A.hdr], [P.mini, A.mini]];
   // reused every frame: no per-frame allocations
-  const counts = new Uint32Array([3, 1, 4, 0, 0, 0, 4, 0, 4, 0]); // (vertices, instances) x5
+  const counts = new Uint32Array([3, 1, 4, 0, 0, 0, 4, 0, 4, 0]); // (vertices, instances): floor, food, snakes, labels, minimap
   const mainAtt = { view: null, loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 1] };
   const mainDesc = { colorAttachments: [mainAtt] };
-  // pairs (vertices, instances): floor, food, snakes, labels, minimap
   const setCounts = (food, maxK, nVis, nMini) => { counts[3] = food; counts[4] = 2 * (maxK + 3); counts[5] = nVis; counts[7] = nVis; counts[9] = nMini; };
   const encodeDirect = (pass, i) => {
     const [p, off] = DRAWS[i], vc = counts[i * 2], ic = counts[i * 2 + 1];
