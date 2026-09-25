@@ -87,6 +87,11 @@
   button.play:active { transform: scale(.98); }
   .keys { margin-top: 18px; color: var(--dim); font-size: 13px; line-height: 1.9; }
   kbd { font: 12px ui-monospace, monospace; padding: 2px 7px; border-radius: 6px; border: 1px solid var(--line); background: rgba(255,255,255,.04); color: #cbd5e1; }
+  .rsw { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 10px; font-size: 12px; color: var(--dim); }
+  .rsw span { margin-right: 4px; letter-spacing: .08em; text-transform: uppercase; font-size: 11px; }
+  .rsw button { font: inherit; font-size: 12px; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,.03); color: #cbd5e1; cursor: pointer; }
+  .rsw button[aria-pressed="true"] { border-color: rgba(56,189,248,.7); color: #fff; background: rgba(56,189,248,.14); }
+  .slow { margin-top: 12px; padding: 10px 12px; border-radius: 10px; font-size: 12.5px; line-height: 1.5; color: #fde68a; background: rgba(251,191,36,.1); border: 1px solid rgba(251,191,36,.3); text-align: left; }
   .tech { margin-top: 14px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #56627a; }
 
   .over h2 { font-size: 34px; font-weight: 800; letter-spacing: -.02em; }
@@ -129,7 +134,16 @@
     <div class="skins" id="skins" role="group" aria-label="Skin"></div>
     <button class="play" id="play">PLAY</button>
     <div class="keys"><kbd>Mouse</kbd> steer · <kbd>Click</kbd>/<kbd>Space</kbd> boost<br><kbd>←</kbd><kbd>→</kbd> steer with keys · Touch: drag to steer, 2 fingers boost · <kbd>P</kbd> perf</div>
-    <div class="tech" id="tech">WebAssembly sim · GPU-built snakes</div>
+    <div class="rsw" id="qsw" role="group" aria-label="Quality">
+      <span>Quality</span>
+      <button data-q="sharp">Sharp</button><button data-q="balanced">Balanced</button><button data-q="fast">Fast</button>
+    </div>
+    <div class="rsw" id="rsw" role="group" aria-label="Renderer">
+      <span>Renderer</span>
+      <button data-r="auto">Auto</button><button data-r="webgpu">WebGPU</button><button data-r="webgl">WebGL</button>
+    </div>
+    <div class="tech"><span id="tech">WebAssembly sim · GPU-built snakes</span> · now: <span id="rnow">…</span></div>
+    <div class="slow" id="slowNote" hidden></div>
   </div>
 </div>
 

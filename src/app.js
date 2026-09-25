@@ -32,25 +32,26 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const frameBlk = new Float32Array(mem, W.frameBlkPtr(), 12); // std140 Frame block, written by WASM
   const frameOut = new Int32Array(mem, W.frameOutPtr(), 8);    // counts for this frame
   const frameMs = new Float32Array(mem, W.frameMsPtr(), 2);    // WASM-side timings
-  const SLOT_W = 150, SLOT_H = 34, LS = 2, CELLS_X = 8, CELLS_Y = Math.ceil(NS / CELLS_X);
+  // label atlas at the screen's own pixel density (not always 2x): smaller texture, same sharpness
+  const SLOT_W = 150, SLOT_H = 34, LS = Math.min(2, Math.max(1, window.devicePixelRatio || 1)), CELLS_X = 8, CELLS_Y = Math.ceil(NS / CELLS_X);
   const E = {
     W, mem, NS, RING, SKINS, SLOT_W, SLOT_H, CELLS_X, CELLS_Y, AW: SLOT_W * LS * CELLS_X, AH: SLOT_H * LS * CELLS_Y,
     frameBlk, frameOut,
     trail: new Int16Array(mem, W.trailPtr(), NS * RING * 2),
-    upd: new Uint32Array(mem, W.updPtr(), 2 + 4096 * 2),   // [count, pad, (index, value)...]: trail changes
-    ptr: { trail: W.trailPtr(), upd: W.updPtr() },
-    drawMode: new URLSearchParams(location.search).get("draws") || "direct",
+    tup: new Uint32Array(mem, W.tupPtr(), NS * 6),          // trail uploads: (row, first index, count)...
+    ptr: { trail: W.trailPtr() },
   };
   // The per-frame GPU block in WASM memory: offsets relative to its start (frame uniforms at 0)
   const base = W.frameBlkPtr();
-  E.arena = { base, indirect: W.indirectPtr() - base, hdr: W.hdrPtr() - base, mini: W.miniPtr() - base,
+  E.arena = { base, hdr: W.hdrPtr() - base, mini: W.miniPtr() - base,
               inst: W.instPtr() - base, size: W.instPtr() - base + W.maxInst() * 16 };
   E.arenaBytes = new Uint8Array(mem, base, E.arena.size);
 
   /* ---------------- Renderer: WebGPU first, WebGL 2 as the backup ----------------
      ?renderer=webgl forces the backup. A lost WebGPU device reloads into WebGL. */
   const canvas = $("gl");
-  const want = new URLSearchParams(location.search).get("renderer") || (sessionStorage.getItem("serpent.gl") ? "webgl" : "webgpu");
+  const saved = store.get("serpent.renderer") || "auto";
+  const want = new URLSearchParams(location.search).get("renderer") || (sessionStorage.getItem("serpent.gl") ? "webgl" : saved);
   let R = null;
   if (want !== "webgl") {
     try { R = await createGPU(canvas, E); }
@@ -63,12 +64,27 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   if (!R) R = createGL($("gl"), E);
   if (!R) { document.body.innerHTML = '<p style="padding:40px;font:18px system-ui;color:#fff">This game needs WebGPU or WebGL 2.</p>'; return; }
   const cv = $("gl");
-  $("tech").textContent = `WebAssembly sim · ${R.name} · GPU-built snakes · 5 draws`;
+  // Pixel density cap: GPU cost is mostly pixels, so on integrated graphics a
+  // lower cap is the biggest single saving (Sharp = up to 2x, Balanced 1.25x, Fast 1x).
+  const QUAL = { sharp: 2, balanced: 1.25, fast: 1 };
+  let quality = store.get("serpent.quality") || "sharp";
+  $("tech").textContent = `WebAssembly sim · GPU-built snakes · 5 draws`;
+  // Renderer switch (Auto = WebGPU if available). Applying it needs a fresh page.
+  const rsEl = $("rsw");
+  for (const b of rsEl.querySelectorAll("button")) {
+    b.setAttribute("aria-pressed", b.dataset.r === saved);
+    b.onclick = () => { store.set("serpent.renderer", b.dataset.r); sessionStorage.removeItem("serpent.gl"); location.href = location.pathname; };
+  }
+  $("rnow").textContent = R.name;
+  const qEl = $("qsw");
+  const markQ = () => { for (const b of qEl.querySelectorAll("button")) b.setAttribute("aria-pressed", b.dataset.q === quality); };
+  for (const b of qEl.querySelectorAll("button")) b.onclick = () => { quality = b.dataset.q; store.set("serpent.quality", quality); markQ(); resize(); };
+  markQ();
 
   let vw = 0, vh = 0, resScale = 1;
   const miniEl = $("mini");
   function resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2) * resScale;
+    const dpr = Math.min(window.devicePixelRatio || 1, QUAL[quality] || 2) * resScale;
     vw = Math.round(innerWidth * dpr); vh = Math.round(innerHeight * dpr);
     if (cv.width !== vw || cv.height !== vh) { cv.width = vw; cv.height = vh; }
     R.resize(vw, vh);
@@ -94,8 +110,6 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const playerName = () => nameEl.value.trim() || "You";
 
   let state = "menu"; // menu | play | dead
-  let camX = 0, camY = 0, camH = 900; // mirrored from WASM each frame
-  let deathTime = 0;
 
   function start() {
     store.set("serpent.name", nameEl.value.trim());
@@ -110,7 +124,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     $("over").classList.add("hidden"); $("menu").classList.remove("hidden");
   }
   function onDeath() {
-    state = "dead"; deathTime = performance.now();
+    state = "dead";
     const len = Math.floor(lastMass * 10), k = W.kills(0);
     const isBest = len > best; if (isBest) { best = len; store.set("serpent.best", best); }
     $("oLen").textContent = len; $("oKills").textContent = k; $("oBest").textContent = best;
@@ -162,7 +176,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const TIER_COL = ["#6ee7b7", "#7dd3fc", "#fcd34d", "#fda4af", "#fbbf24"];
   const lbEl = $("lb");
   const esc = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
-  let lastMass = 10, lastLb = "", halfWv = 1000;
+  let lastMass = 10, lastLb = "";
   function updateHud() {
     W.rankPrep(); // fills lb: [alive, player rank, top 10 ids...]
     let html = "";
@@ -231,7 +245,6 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
      JS gathers input, makes ONE WebAssembly call and hands its output to the GPU. */
   const perfEl = $("perf");
   const noGpuTime = new URLSearchParams(location.search).get("gputime") === "0"; // for A/B CPU measurements
-  const PASS = ["floor", "food", "snakes", "labels", "map"];
   const T = { sim: 0, prep: 0, gl: 0, hud: 0, n: 0 };
   let resDrops = 1, frameNo = 0, last = performance.now(), fpsAcc = 0, perfT = 0, hudT = 0, avgDt = 1 / 60, resT = 0;
   function frame(now) {
@@ -251,12 +264,11 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     // --- everything but drawing: input, 60 Hz sim, camera, culling, render data, draw counts
     W.frame(dt, aim, mouseBoost || keyBoost || touchBoost ? 1 : 0, playing ? 0 : state === "dead" ? 1 : 2, vw, vh, innerWidth, (now / 1000) % 3600);
     if (playing && !snap[0]) onDeath();
-    camX = frameBlk[0]; camY = frameBlk[1]; camH = frameBlk[3]; lastMass = snap[0] ? snap[3] : lastMass;
+    if (snap[0]) lastMass = snap[3];
     const t2 = performance.now();
 
     const timing = !perfEl.classList.contains("off") && !noGpuTime;
     R.draw(frameNo++, playing, timing);
-    W.updDone(); // trail changes handed to the GPU
     const t3 = performance.now();
 
     if ((hudT += dt) > 0.25) { hudT = 0; updateHud(); } // DOM: 4x per second
@@ -266,10 +278,20 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if ((perfT += dt) > 0.5 && !perfEl.classList.contains("off")) {
       const a = (v) => (v / T.n).toFixed(2);
       let near = 0; for (let s = 1; s < NS; s++) near += snap[s * 10] && snap[s * 10 + 7] ? 1 : 0;
-      const gpu = R.gpuMs >= 0 ? `<b>${R.gpuMs.toFixed(2)} ms</b>` + (R.passMs ? " (" + R.passMs.map((v, i) => `${PASS[i]} ${v.toFixed(2)}`).join(" · ") + ")" : "") : R.canTime ? "…" : "n/a";
+      const gpu = R.gpuMs >= 0 ? `<b>${R.gpuMs.toFixed(2)} ms</b>` + (R.passMs ? " (" + R.passMs.map((v, i) => `${R.passNames[i]} ${v.toFixed(2)}`).join(" · ") + ")" : "") : R.canTime ? "…" : "n/a";
       perfEl.innerHTML = `<b>${Math.round(T.n / fpsAcc)}</b> fps · <b>${R.name}</b> · CPU/frame: sim <b>${a(T.sim)}</b> · prep <b>${a(T.prep)}</b> · draw <b>${a(T.gl)}</b> · dom <b>${a(T.hud)}</b> ms` +
         `<br>GPU ${gpu}<br>${frameOut[0]} food · ${frameOut[1]} snakes drawn · res <b>${Math.round(resScale * 100)}%</b> · full-detail bots <b>${near}</b> / ${NS - 1}` + benchTxt;
       perfT = 0; fpsAcc = 0; T.sim = T.prep = T.gl = T.hud = T.n = 0;
+    }
+  }
+  // Is WebAssembly running at full speed? A healthy browser does a sim step in
+  // ~5-30 us; 20x slower means its compilers are off (e.g. Edge "Enhance your
+  // security on the web"), which also slows JavaScript.
+  {
+    const us = W.bench(30);
+    if (us > 300) {
+      const n = $("slowNote"); n.hidden = false;
+      n.innerHTML = `WebAssembly is running ~${Math.round(us / 10)}× slower than normal in this browser. In Edge: click the padlock / site-info icon in the address bar and turn off <b>Enhance security for this site</b>, or set edge://settings/privacy → "Enhance your security on the web" to <b>Basic</b>.`;
     }
   }
   W.snapshot(); updateHud();

@@ -1,8 +1,9 @@
 /* ============================================================================
    WebGPU renderer (preferred). Same passes and same look as the WebGL one.
-   - Every pass is a pre-recorded render bundle; draw counts come from an
-     indirect-args buffer that WebAssembly fills, so a frame is ~10 JS calls.
-   - One bind group shared by all pipelines.
+   - One upload per frame (a byte copy of the WASM per-frame block), plus the
+     new trail points of snakes on screen.
+   - Five direct draws in one pass with one shared bind group (measured
+     cheaper than bundles + indirect draws for so few draws).
    - Optional per-pass GPU timestamps (when the browser exposes them).
    ========================================================================== */
 async function createGPU(canvas, E) {
@@ -11,9 +12,6 @@ async function createGPU(canvas, E) {
   if (!adapter) return null;
   const canTime = adapter.features.has("timestamp-query"), F16 = adapter.features.has("shader-f16");
   const device = await adapter.requestDevice({ requiredFeatures: [...(canTime ? ["timestamp-query"] : []), ...(F16 ? ["shader-f16"] : [])] });
-  // A/B measured (3 runs each, reused descriptors): direct draws slightly cheaper on the CPU,
-  // and they skip the browser's GPU-side validation of indirect buffers. ?draws=indirect to compare.
-  const direct = E.drawMode !== "indirect";
   const ctx = canvas.getContext("webgpu");
   if (!ctx) return null;
   const format = navigator.gpu.getPreferredCanvasFormat();
@@ -98,7 +96,7 @@ struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
   let rr = r * (.4 + .6 * born);
   let core = hf((1. - smoothstep(rr * .7 - aa, rr * .7 + aa, d)) * born);
   var glow = hf(0.);
-  if (r / F.pxTime.x >= 1.6) { glow = hf(max(exp(-d * d / (rr * rr * 1.1)) - .0376, 0.) / .9624 * .9 * pulse * born); }
+  if (r / F.pxTime.x >= 1.6) { let t = min(d / (rr * 1.9), 1.); let g = 1. - t * t; glow = hf(g * g * pulse * born); } // fuller halo, same quad
   let ch = hv3(c);
   let rgb = ch * glow + mix(ch, hv3(1.), hf(.55 * (1. - d / (rr * .7)))) * core;
   return vec4f(vec3f(rgb), f32(core));
@@ -141,19 +139,23 @@ fn seqPt(j: i32, n: i32, st: i32, K: i32, h0: vec4f, h1: vec4f, h2: vec4u) -> ve
   o.sk = (h2.w & 255u) % 12u; o.fl = h2.w >> 8u; o.r = h0.w; o.nl = f32(n - 1);
   return o;
 }
-fn shade(k: f32, l: vec2f, nd: f32, f: vec2f, sk: u32, r: f32) -> vec3f {
+fn shade(k: f32, l: vec2f, nd: f32, f: vec2f, sk: u32, r: f32, v: f32) -> vec3f {
   let ki = u32(k);
   var base = SKA[sk]; if (ki != 0u && ((ki >> 2u) & 1u) == 1u) { base = SKB[sk]; }
-  var c = base * (1.05 - .55 * nd * nd);
+  base = mix(base, SKB[sk] * .85, smoothstep(.45, 1., abs(v)) * .35);  // flanks lean darker: rounder body
+  var c = base * (1.08 - .5 * nd * nd);                                // spherical scale
+  c *= 1. + .16 * clamp(dot(l, f), 0., 1.);                            // front of each scale lit: layered scales
   let sp = l - vec2f(-.28, -.36);
-  c += vec3f(.28) * exp(-dot(sp, sp) * 7.);
-  c = mix(c * .55, c, 1. - smoothstep(.82, 1., nd));
-  if (ki == 0u) { // head: eyes
+  c += vec3f(.3) * exp(-dot(sp, sp) * 8.);                             // specular
+  c = mix(c * .42, c, 1. - smoothstep(.78, 1., nd));                   // crisp scale outline
+  if (ki == 0u) { // head: eyes with a glint
     let sd = vec2f(-f.y, f.x); let aa = F.pxTime.x * 1.2 / r;
     for (var e = 0; e < 2; e++) {
       let ec = f * .32 + sd * select(-.45, .45, e == 0);
-      c = mix(c, vec3f(.97), 1. - smoothstep(.3 - aa, .3 + aa, length(l - ec)));
-      c = mix(c, vec3f(.03, .04, .07), 1. - smoothstep(.16 - aa, .16 + aa, length(l - ec - f * .11)));
+      c = mix(c, vec3f(.97), 1. - smoothstep(.32 - aa, .32 + aa, length(l - ec)));
+      let pc = ec + f * .11;
+      c = mix(c, vec3f(.03, .04, .07), 1. - smoothstep(.17 - aa, .17 + aa, length(l - pc)));
+      c = mix(c, vec3f(1.), 1. - smoothstep(.055 - aa, .055 + aa, length(l - pc - f * .05 + sd * .06)));
     }
   }
   return c;
@@ -173,8 +175,8 @@ fn shade(k: f32, l: vec2f, nd: f32, f: vec2f, sk: u32, r: f32) -> vec3f {
   else if ((i.fl & 4u) != 0u) { glow = exp(-pow(max(gd - .85, 0.) / .3, 2.)) * (.45 + .15 * sin(F.pxTime.y * 2.5 + i.t * .3)) * (1. - a); gc = vec3f(1., .78, .3); }
   if (a <= 0. && glow <= .003) { discard; }
   var c = vec3f(0.);
-  if (e0 > 0.) { c += shade(k0, l0, n0, f, i.sk, i.r) * e0; }
-  if (e1 > 0.) { c += shade(k1, l1, n1, f, i.sk, i.r) * e1; }
+  if (e0 > 0.) { c += shade(k0, l0, n0, f, i.sk, i.r, i.v) * e0; }
+  if (e1 > 0.) { c += shade(k1, l1, n1, f, i.sk, i.r, i.v) * e1; }
   if ((i.fl & 4u) != 0u) { c += vec3f(1., .85, .4) * .18 * a * (.5 + .5 * sin(i.t * .8 - F.pxTime.y * 3.)); } // shimmering scales
   return vec4f(c + gc * glow, a);
 }
@@ -228,13 +230,6 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   return vec4f(c);
 }
 `;
-  const SCATTER_WGSL = /* wgsl */ `
-@group(0) @binding(0) var<storage, read_write> trail: array<u32>;
-@group(0) @binding(1) var<storage, read> upd: array<u32>; // [count, pad, (index, value)...]
-@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3u) {
-  if (id.x >= upd[0]) { return; }
-  trail[upd[2u + id.x * 2u]] = upd[3u + id.x * 2u];
-}`;
   const MIP_WGSL = /* wgsl */ `
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
@@ -252,12 +247,11 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
 
   // ---- resources ----
   const buf = (size, usage) => device.createBuffer({ size: Math.ceil(size / 4) * 4, usage });
-  // ONE buffer mirrors the WASM per-frame block: uniforms + indirect args + all instance data
-  const A = E.arena, arenaBuf = buf(A.size, U.UNIFORM | U.VERTEX | U.INDIRECT | U.COPY_DST);
+  // ONE buffer mirrors the WASM per-frame block: frame uniforms + all instance data
+  const A = E.arena, arenaBuf = buf(A.size, U.UNIFORM | U.VERTEX | U.COPY_DST);
   const miniUBuf = buf(16, U.UNIFORM | U.COPY_DST);
   const trailBuf = buf(NS * RING * 4, U.STORAGE | U.COPY_DST);
-  const updBuf = buf(E.upd.byteLength, U.STORAGE | U.COPY_DST);
-  q.writeBuffer(trailBuf, 0, E.mem, E.ptr.trail, NS * RING * 4); // whole trail once; afterwards only changes
+  // trail copy on the GPU: rows of on-screen snakes are kept in sync by WASM's upload list
   const mips = (w, h) => 1 + Math.floor(Math.log2(Math.max(w, h)));
   const tileTex = device.createTexture({ size: [512, 296], format: "rg8unorm", mipLevelCount: mips(512, 296),
     usage: TU.TEXTURE_BINDING | TU.RENDER_ATTACHMENT | TU.COPY_DST });
@@ -302,10 +296,6 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
     mini: pipe("vsMini", "fsMini", miniL, PREMUL),
   };
 
-  const scMod = device.createShaderModule({ code: SCATTER_WGSL });
-  const scPipe = device.createComputePipeline({ layout: "auto", compute: { module: scMod, entryPoint: "main" } });
-  const scBind = device.createBindGroup({ layout: scPipe.getBindGroupLayout(0), entries: [
-    { binding: 0, resource: { buffer: trailBuf } }, { binding: 1, resource: { buffer: updBuf } }] });
 
   // ---- one-off: bake the floor tile, and a small mipmap generator ----
   const mipMod = device.createShaderModule({ code: MIP_WGSL });
@@ -337,14 +327,6 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   // ---- record the five passes once; replayed every frame ----
   // The five draws: [pipeline, vertex-data offset in the arena]
   const DRAWS = [[P.bg, -1], [P.food, A.inst], [P.rib, A.hdr], [P.lbl, A.hdr], [P.mini, A.mini]];
-  // indirect mode (kept for A/B measurement): pre-recorded bundles, counts from the arena
-  const bundles = DRAWS.map(([p, off], i) => {
-    const be = device.createRenderBundleEncoder({ colorFormats: [format] });
-    be.setPipeline(p); be.setBindGroup(0, bind);
-    if (off >= 0) be.setVertexBuffer(0, arenaBuf, off);
-    be.drawIndirect(arenaBuf, A.indirect + i * 16);
-    return be.finish();
-  });
   // reused every frame: no per-frame allocations
   const counts = new Uint32Array([3, 1, 4, 0, 0, 0, 4, 0, 4, 0]); // (vertices, instances) x5
   const mainAtt = { view: null, loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 1] };
@@ -360,18 +342,18 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   };
 
   // ---- GPU timestamps (optional) ----
-  let qset = null, resolveBuf = null, readBuf = null, reading = false;
+  let qset = null, resolveBuf = null, readBuf = null, reading = false, mapping = false;
   if (canTime) {
-    qset = device.createQuerySet({ type: "timestamp", count: 10 });
-    resolveBuf = device.createBuffer({ size: 80, usage: U.QUERY_RESOLVE | U.COPY_SRC });
-    readBuf = device.createBuffer({ size: 80, usage: U.MAP_READ | U.COPY_DST });
+    qset = device.createQuerySet({ type: "timestamp", count: 12 });
+    resolveBuf = device.createBuffer({ size: 96, usage: U.QUERY_RESOLVE | U.COPY_SRC });
+    readBuf = device.createBuffer({ size: 96, usage: U.MAP_READ | U.COPY_DST });
   }
   const err = await device.popErrorScope();
   if (err) throw new Error("WebGPU setup: " + err.message);
 
-  const W = E.W;
   const R = {
-    name: "WebGPU" + (F16 ? " (f16)" : "") + (direct ? "" : " · indirect"), gpuMs: -1, passMs: null, canTime, device,
+    name: "WebGPU" + (F16 ? " (f16)" : ""), gpuMs: -1, passMs: null, canTime, device,
+    passNames: ["clear", "floor", "food", "snakes", "labels", "map"],
     resize() {},
     placeMini(cx, cy, r) { q.writeBuffer(miniUBuf, 0, new Float32Array([cx, cy, r, 0])); },
     labelSlot(src, x, y) {
@@ -382,49 +364,40 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
       const o = E.frameOut, instCount = o[0], nVis = o[1], maxK = o[2], nMini = playing ? o[4] : 0;
       // ONE upload for all per-frame data, straight from WebAssembly memory
       q.writeBuffer(arenaBuf, 0, E.mem, A.base, A.inst + instCount * 16);
-      // trail: only what changed since last frame (a few hundred bytes), applied on the GPU
-      const lo = W.rowsDirtyLo(), hi = W.rowsDirtyHi();
-      if (lo | hi) for (let r = 0; r < NS; r++) if ((r < 32 ? lo >>> r : hi >>> (r - 32)) & 1)
-        q.writeBuffer(trailBuf, r * RING * 4, E.mem, E.ptr.trail + r * RING * 4, RING * 4);
-      const nUpd = E.upd[0];
-      if (nUpd) q.writeBuffer(updBuf, 0, E.mem, E.ptr.upd, (2 + nUpd * 2) * 4);
-
-      const enc = device.createCommandEncoder();
-      if (nUpd) {
-        const cp = enc.beginComputePass();
-        cp.setPipeline(scPipe); cp.setBindGroup(0, scBind); cp.dispatchWorkgroups(Math.ceil(nUpd / 64)); cp.end();
+      // trail: new points of snakes on screen only (runs listed by WASM)
+      for (let i = 0, n = o[3]; i < n; i++) {
+        const off = (E.tup[i * 3] * RING + E.tup[i * 3 + 1]) * 4;
+        q.writeBuffer(trailBuf, off, E.mem, E.ptr.trail + off, E.tup[i * 3 + 2] * 4);
       }
+      const enc = device.createCommandEncoder();
       const view = ctx.getCurrentTexture().createView();
-      const perPass = timing && canTime && !reading;
-      if (!perPass) {
+      setCounts(instCount, maxK, nVis, nMini);
+      if (!(timing && canTime && !reading)) {
         mainAtt.view = view;
         const pass = enc.beginRenderPass(mainDesc);
-        if (direct) {
-          pass.setBindGroup(0, bind);
-          setCounts(instCount, maxK, nVis, nMini);
-          for (let i = 0; i < 5; i++) encodeDirect(pass, i);
-        } else pass.executeBundles(bundles);
+        pass.setBindGroup(0, bind);
+        for (let i = 0; i < 5; i++) encodeDirect(pass, i);
         pass.end();
-      } else { // measuring: one pass per draw, each timestamped
-        setCounts(instCount, maxK, nVis, nMini);
-        for (let i = 0; i < 5; i++) {
+      } else { // measuring: the clear, then one pass per draw, each timestamped
+        for (let i = 0; i < 6; i++) {
           const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: i ? "load" : "clear", storeOp: "store", clearValue: [0, 0, 0, 1] }],
             timestampWrites: { querySet: qset, beginningOfPassWriteIndex: i * 2, endOfPassWriteIndex: i * 2 + 1 } });
-          if (direct) { pass.setBindGroup(0, bind); encodeDirect(pass, i); } else pass.executeBundles([bundles[i]]);
+          if (i) { pass.setBindGroup(0, bind); encodeDirect(pass, i - 1); }
           pass.end();
         }
-        enc.resolveQuerySet(qset, 0, 10, resolveBuf, 0);
-        enc.copyBufferToBuffer(resolveBuf, 0, readBuf, 0, 80);
+        enc.resolveQuerySet(qset, 0, 12, resolveBuf, 0);
+        enc.copyBufferToBuffer(resolveBuf, 0, readBuf, 0, 96);
+        reading = true;
       }
       q.submit([enc.finish()]);
-      if (perPass) {
-        reading = true;
+      if (reading && !mapping) {
+        mapping = true;
         readBuf.mapAsync(GPUMapMode.READ).then(() => {
           const t = new BigUint64Array(readBuf.getMappedRange());
-          const ms = [0, 1, 2, 3, 4].map((i) => Number(t[i * 2 + 1] - t[i * 2]) / 1e6);
-          readBuf.unmap(); reading = false;
+          const ms = [0, 1, 2, 3, 4, 5].map((i) => Number(t[i * 2 + 1] - t[i * 2]) / 1e6);
+          readBuf.unmap(); reading = mapping = false;
           if (ms.every((v) => v >= 0 && v < 1000)) { R.passMs = ms; R.gpuMs = ms.reduce((a, b) => a + b, 0); }
-        }, () => { reading = false; });
+        }, () => { reading = mapping = false; });
       }
     },
   };

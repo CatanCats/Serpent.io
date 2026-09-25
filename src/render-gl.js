@@ -86,7 +86,8 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     float born=smoothstep(0.,10.,float(vI.w));   // fade in over ~0.6 s: no popping
     float rr=r*(.4+.6*born);
     float core=(1.-smoothstep(rr*.7-aa,rr*.7+aa,d))*born;
-    float glow = r/uPxTime.x < 1.6 ? 0. : max(exp(-d*d/(rr*rr*1.1))-.0376,0.)/.9624*.9*pulse*born; // fades to 0 at the quad edge
+    float t=min(d/(rr*1.9),1.), g=1.-t*t;
+    float glow = r/uPxTime.x < 1.6 ? 0. : g*g*pulse*born; // fuller halo, still 0 at the quad edge
     o=vec4(c*glow + mix(c,vec3(1),.55*(1.-d/(rr*.7)))*core, core);
   }`;
 
@@ -135,16 +136,19 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   vec3 shade(float k, vec2 l, float nd, vec2 f){
     uint ki=uint(k);
     vec3 base = ki==0u ? SKA[vSk] : (((ki>>2u)&1u)==0u ? SKA[vSk] : SKB[vSk]);
-    vec3 c=base*(1.05-.55*nd*nd);
+    base=mix(base,SKB[vSk]*.85,smoothstep(.45,1.,abs(vV))*.35);   // flanks lean darker: rounder body
+    vec3 c=base*(1.08-.5*nd*nd);                                   // spherical scale
+    c*=1.+.16*clamp(dot(l,f),0.,1.);                               // front of each scale lit: layered scales
     vec2 sp=l-vec2(-.28,-.36);
-    c+=vec3(.28)*exp(-dot(sp,sp)*7.);
-    c=mix(c*.55,c,1.-smoothstep(.82,1.,nd));
-    if(ki==0u){ // head: eyes
+    c+=vec3(.3)*exp(-dot(sp,sp)*8.);                               // specular
+    c=mix(c*.42,c,1.-smoothstep(.78,1.,nd));                       // crisp scale outline
+    if(ki==0u){ // head: eyes with a glint
       vec2 sd=vec2(-f.y,f.x); float aa=uPxTime.x*1.2/vR;
       for(int e=0;e<2;e++){
-        vec2 ec=f*.32+sd*(e==0?.45:-.45);
-        c=mix(c,vec3(.97),1.-smoothstep(.3-aa,.3+aa,length(l-ec)));
-        c=mix(c,vec3(.03,.04,.07),1.-smoothstep(.16-aa,.16+aa,length(l-ec-f*.11)));
+        vec2 ec=f*.32+sd*(e==0?.45:-.45), pc=ec+f*.11;
+        c=mix(c,vec3(.97),1.-smoothstep(.32-aa,.32+aa,length(l-ec)));
+        c=mix(c,vec3(.03,.04,.07),1.-smoothstep(.17-aa,.17+aa,length(l-pc)));
+        c=mix(c,vec3(1),1.-smoothstep(.055-aa,.055+aa,length(l-pc-f*.05+sd*.06)));
       }
     }
     return c;
@@ -229,20 +233,6 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   }`;
 
 
-  const SC_VS = `#version 300 es
-  layout(location=0) in uvec2 aU; // (index into trail, x | y<<16)
-  flat out ivec2 vV;
-  void main(){
-    uint i=aU.x;
-    vec2 t=vec2(float(i % ${RING}u)+.5, float(i / ${RING}u)+.5);
-    gl_Position=vec4(t/vec2(${RING}., ${NS}.)*2.-1.,0,1); gl_PointSize=1.;
-    int x=int(aU.y & 65535u), y=int(aU.y >> 16u);
-    vV=ivec2(x>32767?x-65536:x, y>32767?y-65536:y);
-  }`;
-  const SC_FS = `#version 300 es
-  precision highp int; flat in ivec2 vV; out ivec4 o;
-  void main(){ o=ivec4(vV,0,0); }`;
-
   function prog(vs, fs, ubo = true) {
     const p = gl.createProgram();
     for (const [t, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
@@ -255,7 +245,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     if (ubo) gl.uniformBlockBinding(p, gl.getUniformBlockIndex(p, "Frame"), 0);
     return p;
   }
-  const bgP = prog(BGW_VS, BG_FS), foodP = prog(VS, FS), ribP = prog(RVS, RFS), lblP = prog(LVS, LFS), miniP = prog(MVS, MFS, false), scP = prog(SC_VS, SC_FS, false);
+  const bgP = prog(BGW_VS, BG_FS), foodP = prog(VS, FS), ribP = prog(RVS, RFS), lblP = prog(LVS, LFS), miniP = prog(MVS, MFS, false);
 
   // Textures live on fixed units for the whole run (no per-frame rebinding):
   // unit 0 trail (two, alternating), unit 1 floor tile, unit 2 label atlas.
@@ -306,26 +296,15 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
     miniVao[i] = gl.createVertexArray(); gl.bindVertexArray(miniVao[i]);
     inst(0, 3, gl.FLOAT, 16, A.mini); inst(1, 1, gl.UNSIGNED_INT, 16, A.mini + 12, true);
   }
-  // Trail: one RG16I texture kept in sync by drawing only the changed points into it.
+  // Trail: one RG16I texture; rows of on-screen snakes are kept in sync from WASM's upload list.
   const trailTex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, trailTex); // unit 0
   gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG16I, RING, NS);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, RING, NS, gl.RG_INTEGER, gl.SHORT, E.trail);
-  const trailFb = gl.createFramebuffer();
-  gl.bindFramebuffer(gl.FRAMEBUFFER, trailFb);
-  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, trailTex, 0);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  const updBytes = new Uint8Array(E.mem, E.ptr.upd, E.upd.byteLength);
-  const scVbo = gl.createBuffer(), scVao = gl.createVertexArray();
-  gl.bindVertexArray(scVao); gl.bindBuffer(gl.ARRAY_BUFFER, scVbo);
-  gl.bufferData(gl.ARRAY_BUFFER, updBytes.byteLength, gl.DYNAMIC_DRAW);
-  gl.enableVertexAttribArray(0); gl.vertexAttribIPointer(0, 2, gl.UNSIGNED_INT, 8, 8);
   const emptyVao = gl.createVertexArray();
   gl.bindVertexArray(null);
-  gl.enable(gl.BLEND); // always on: the floor writes alpha 1, so blending it is a no-op
-  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); // premultiplied
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); // premultiplied (enabled after the floor)
 
   // GPU timing per pass (EXT_disjoint_timer_query_webgl2), read back without stalling.
   const tq = gl.getExtension("EXT_disjoint_timer_query_webgl2");
@@ -334,7 +313,7 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
   let vw = 1, vh = 1;
 
   const R = {
-    name: "WebGL 2", gpuMs: -1, passMs: null, canTime: !!tq,
+    name: "WebGL 2", gpuMs: -1, passMs: null, canTime: !!tq, passNames: ["floor", "food", "snakes", "labels", "map"],
     resize(w, h) { vw = w; vh = h; },
     placeMini(cx, cy, r) { gl.useProgram(miniP); gl.uniform3f(miniU, cx, cy, r); gl.uniform2f(miniRes, vw, vh); },
     labelSlot(src, x, y) {
@@ -355,23 +334,20 @@ const vec3 SKB[12]=vec3[](${PAL.map((p) => `vec3(${p[1]})`).join(",")});`;
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, E.arenaBytes, 0, A.inst + instCount * 16);
       gl.bindBufferRange(gl.UNIFORM_BUFFER, 0, arena[f], 0, 48);
 
-      // trail: rewrite respawned rows, then draw the changed points into the texture
-      const lo = E.W.rowsDirtyLo(), hi = E.W.rowsDirtyHi();
-      if (lo | hi) for (let r = 0; r < NS; r++) if ((r < 32 ? lo >>> r : hi >>> (r - 32)) & 1)
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, r, RING, 1, gl.RG_INTEGER, gl.SHORT, E.trail, r * RING * 2);
-      const nUpd = E.upd[0];
-      if (nUpd) {
-        gl.bindFramebuffer(gl.FRAMEBUFFER, trailFb); gl.viewport(0, 0, RING, NS); gl.disable(gl.BLEND);
-        gl.useProgram(scP); gl.bindVertexArray(scVao); gl.bindBuffer(gl.ARRAY_BUFFER, scVbo);
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, updBytes, 0, (2 + nUpd * 2) * 4);
-        gl.drawArrays(gl.POINTS, 0, nUpd);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.enable(gl.BLEND);
+      // trail: new points of snakes on screen only (runs listed by WASM), unit 0
+      for (let i = 0, n = o[3]; i < n; i++) {
+        const row = E.tup[i * 3], x = E.tup[i * 3 + 1];
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, x, row, E.tup[i * 3 + 2], 1, gl.RG_INTEGER, gl.SHORT, E.trail, (row * RING + x) * 2);
       }
+      // last frame's pixels are never needed: lets tiled/integrated GPUs skip reloading them
+      gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR]);
       gl.viewport(0, 0, vw, vh);
 
-      mark(); // floor
+      mark(); // floor: opaque, so no blending (saves reading the whole screen back)
+      gl.disable(gl.BLEND);
       gl.useProgram(bgP); gl.bindVertexArray(emptyVao);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.enable(gl.BLEND);
       mark(); // food
       if (instCount) { gl.useProgram(foodP); gl.bindVertexArray(foodVao[f]); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instCount); }
       mark(); // snakes

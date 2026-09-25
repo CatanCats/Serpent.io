@@ -25,14 +25,15 @@ Measured headless: about 0.3 ms of simulation per frame with 40 bots and about 3
 - **GPU-built snakes:** the vertex shader builds each snake's ribbon straight from a texture that's a byte copy of the WASM trail memory. The CPU writes 48 bytes per visible snake.
 - **Fixed 60 Hz simulation** with render interpolation, so the game behaves the same at any refresh rate.
 
-- **Two renderers, same look:** WebGPU when available, otherwise WebGL 2 (`?renderer=webgl` forces the backup). Each frame is **one upload** of a contiguous block of WebAssembly memory (frame uniforms, draw counts, snake headers, minimap, food). Trail changes (8 bytes per point) are applied **on the GPU**: a compute shader in WebGPU, and a point-scatter draw into the trail texture in WebGL. WebGPU uses plain direct draws, which measured slightly cheaper than pre-recorded bundles with indirect counts (`?draws=indirect` to compare).
-- **Simulation:** heading kept as a unit vector (no trig per step), far-away snakes move at half rate, and the collision grid only holds segments near the player. Memory clears use WebAssembly's bulk-memory instructions.
+- **Two renderers, same look:** WebGPU when available, otherwise WebGL 2. Choose on the menu (**Renderer: Auto / WebGPU / WebGL**), or add `?renderer=webgl` to the address. Each frame is **one upload** of a contiguous block of WebAssembly memory (frame uniforms, snake headers, minimap, food), plus only the *new* trail points of snakes on screen. Five draws in one pass.
+- **Quality: Sharp / Balanced / Fast** caps the pixel density at 2× / 1.25× / 1×. GPU cost is mostly pixels, so on integrated graphics this is the biggest single saving.
+- **Simulation:** heading kept as a unit vector (no trig per step), far-away snakes move at quarter rate, and the collision grid only holds segments near the player. Memory clears use WebAssembly's bulk-memory instructions.
 - **Measuring:** press **P** for fps, CPU time per part and GPU time per pass (floor, food, snakes, labels, map). On the menu, press **B** to benchmark the simulation; it times 600 steps in one go, so privacy-blurred browser timers can't distort the result.
 
 ## Source layout
 - `src/sim.c`: the whole game simulation, compiled to WebAssembly.
 - `src/app.js`: UI, input, HUD, labels and the main loop.
-- `src/render-gpu.js` / `src/render-gl.js`: the WebGPU and WebGL 2 renderers.
+- `src/render-gpu.js` / `src/render-gl.js`: the WebGPU and WebGL 2 renderers (same interface).
 - `src/index.html`: the page. `node build.mjs` inlines everything into `index.html`.
 
 ## Rebuilding

@@ -132,37 +132,38 @@ typedef struct { float x, y, r; u32 info; } Inst;
 typedef struct { float hx, hy, u, r, spacing, stride, ang, W; u32 row, newest, n, info; } Head;
 typedef struct { float x, y, size; u32 info; } Mini; /* info: kind | skin<<8 | alpha<<16, rect: kind | halfH<<8 */
 /* Everything the GPU needs each frame, contiguous so it goes up in ONE upload:
-   frame uniforms | indirect draw args | snake headers | minimap | food (only
+   frame uniforms | snake headers | minimap | food (only
    the used prefix of the food array is sent). */
+/* GPU copy of the trails: only snakes on screen are kept in sync. For each one we
+   send just the points pushed since its last sync (a contiguous run of the ring,
+   split in two where it wraps), or the whole row if it is stale or respawned. */
+static u32 gpuPc[MAXS]; static u8 gpuOk[MAXS];
+static u32 tup[MAXS * 2 * 3], ntup; /* (row, first index, count) */
+static void trailSync(i32 s) {
+  Snake *k = &S[s];
+  u32 from = gpuPc[s];
+  if (!gpuOk[s] || k->pc - from >= RING) { tup[ntup * 3] = (u32)s; tup[ntup * 3 + 1] = 0; tup[ntup * 3 + 2] = RING; ntup++; }
+  else if (k->pc != from) {
+    u32 a = from & RMASK, n = k->pc - from;
+    u32 first = a + n > RING ? RING - a : n;
+    tup[ntup * 3] = (u32)s; tup[ntup * 3 + 1] = a; tup[ntup * 3 + 2] = first; ntup++;
+    if (first < n) { tup[ntup * 3] = (u32)s; tup[ntup * 3 + 1] = 0; tup[ntup * 3 + 2] = n - first; ntup++; }
+  }
+  gpuPc[s] = k->pc; gpuOk[s] = 1;
+}
+
 static struct {
   float frameBlk[12];  /* std140 Frame block: camX camY halfW halfH | px time lblScale 0 | vw vh WR 0 */
-  u32 indirect[20];    /* WebGPU drawIndirect args x5 */
   Head hdr[MAXS];
   Mini mini[MAXS + 4];
   Inst inst[MAXI];
 } AR __attribute__((aligned(16)));
 #define frameBlk AR.frameBlk
-#define indirect AR.indirect
 #define hdr AR.hdr
 #define mini AR.mini
 #define inst AR.inst
 
-/* Trail changes since the last frame, for the GPU to apply itself:
-   (index into the whole trail array, packed x|y<<16). Rows that were rewritten
-   wholesale (a snake respawned) are flagged instead. */
-#define MAXUPD 4096
-static u32 upd[MAXUPD * 2 + 2], nupd; /* upd[0..1] = count, pad */
-static unsigned long long rowsDirty;
-EXPORT("updPtr") u32 *updPtr(void) { return upd; }
-EXPORT("rowsDirtyLo") u32 rowsDirtyLo(void) { return (u32)rowsDirty; }
-EXPORT("rowsDirtyHi") u32 rowsDirtyHi(void) { return (u32)(rowsDirty >> 32); }
-/* JS calls this once it has handed the changes to the GPU */
-EXPORT("updDone") void updDone(void) { nupd = 0; upd[0] = 0; rowsDirty = 0; }
-static void trailChanged(i32 s, u32 i) {
-  if (nupd >= MAXUPD) { rowsDirty |= 1ull << s; return; }
-  u32 *u = &upd[2 + nupd * 2]; upd[0] = ++nupd;
-  u[0] = (u32)s * RING + i; u[1] = (u32)(unsigned short)tr[s][i][0] | ((u32)(unsigned short)tr[s][i][1] << 16);
-}
+
 
 static u32 tick;
 static i32 playerKiller = -1;
@@ -250,7 +251,6 @@ static void pushTrail(i32 s, float x, float y) {
   Snake *k = &S[s];
   u32 i = k->pc & RMASK;
   tr[s][i][0] = q3(x); tr[s][i][1] = q3(y);
-  trailChanged(s, i);
   segInsert(s, k->pc);
   k->pc++;
 }
@@ -288,7 +288,7 @@ static void spawnSnake(i32 s, float mass, i32 bot, i32 skin) {
     tr[s][i][0] = q3(x - cx * k->spacing * (float)j); tr[s][i][1] = q3(y - sy * k->spacing * (float)j);
   }
   k->alive = 1; k->phx = x; k->phy = y; k->ppc = k->pc;
-  rowsDirty |= 1ull << s; /* whole ring rewritten: upload the row */
+  gpuOk[s] = 0; /* whole ring rewritten: the GPU needs the full row */
   for (i32 j = k->n - 1; j >= 0; j--) segInsert(s, k->pc - 1u - (u32)j);
 }
 
@@ -579,7 +579,7 @@ static void maintainFood(i32 budget) {
   }
 }
 
-EXPORT("refillFood") void refillFood(void);
+static void refillFood(void);
 
 /* ---------- simulation step ---------- */
 static i32 deaths[MAXS * 2];
@@ -593,7 +593,7 @@ static void step(float dt) {
     float dx = k->hx - focX, dy = k->hy - focY, R = focR + k->r * 2.f;
     k->near = s == 0 || dx * dx + dy * dy < R * R;
     if (k->near) moveSnake(s, dt);
-    else if ((tick + (u32)s) & 1u) moveSnake(s, dt * 2.f); /* far away: half rate, same speed */
+    else if (((tick + (u32)s) & 3u) == 0) moveSnake(s, dt * 4.f); /* far away: quarter rate, same speed */
   }
 
   i32 nd = 0;
@@ -642,23 +642,20 @@ EXPORT("init") void init(u32 seed, i32 bots) {
 }
 
 static float camX, camY;
-EXPORT("refillFood") void refillFood(void);
 EXPORT("spawnPlayer") void spawnPlayer(i32 skin) {
   S[0].tier = 3; spawnSnake(0, 10.f, 0, skin); playerKiller = -1;
   camX = focX = S[0].hx; camY = focY = S[0].hy; refillFood();
   rebuild(); /* re-centre the collision window on the new view at once */
 }
 /* Fill food around a new focus at once (spawn, respawn, menu). */
-EXPORT("refillFood") void refillFood(void) { recount = 1; for (i32 t = 0; t < 400; t++) maintainFood(64); }
-EXPORT("setFocus") void setFocus(float x, float y, float r) { focX = x; focY = y; focR = r; }
+static void refillFood(void) { recount = 1; for (i32 t = 0; t < 400; t++) maintainFood(64); }
 EXPORT("killPlayer") void killPlayer(void) { S[0].alive = 0; }
 
-EXPORT("setInput") void setInput(float ang, i32 boost) { S[0].tang = ang; S[0].wantBoost = boost; }
 
 /* Fixed 60 Hz simulation (Fiedler, "Fix Your Timestep"): identical behaviour at
    any refresh rate; rendering interpolates between the last two states. */
 static float acc, alpha;
-EXPORT("update") void update(float dt) {
+static void update(float dt) {
   if (dt > 0.25f) dt = 0.25f; /* tab was asleep: don't fast-forward */
   acc += dt;
   for (i32 n = 0; acc >= DT && n < 8; n++) {
@@ -678,7 +675,7 @@ static void push(float x, float y, float r, u32 kind, u32 skin, u32 extra, u32 f
 }
 
 /* View-culled food sprites. */
-EXPORT("build") i32 build(float cx, float cy, float hw, float hh) {
+static i32 build(float cx, float cy, float hw, float hh) {
   i32 n = 0;
   float x0 = cx - hw - 60.f, x1 = cx + hw + 60.f, y0 = cy - hh - 60.f, y1 = cy + hh + 60.f;
   i32 gx0 = cellX(x0 - CELL), gx1 = cellX(x1 + CELL), gy0 = cellX(y0 - CELL), gy1 = cellX(y1 + CELL);
@@ -731,11 +728,10 @@ EXPORT("snapshot") void snapshot(void) {
   }
 }
 
-static void buildRuns(void);
 
 /* Cull against the camera, write one GPU header per visible snake. */
-EXPORT("renderPrep") i32 renderPrep(float cx, float cy, float hw, float hh, float px) {
-  nvis = 0; maxK = 0;
+static i32 renderPrep(float cx, float cy, float hw, float hh, float px) {
+  nvis = 0; maxK = 0; ntup = 0;
   for (i32 o = 1; o <= NS; o++) {
     i32 s = o == NS ? 0 : o;
     Snake *k = &S[s];
@@ -765,26 +761,11 @@ EXPORT("renderPrep") i32 renderPrep(float cx, float cy, float hw, float hh, floa
     h->hx = hx; h->hy = hy; h->u = iu[s]; h->r = k->r; h->spacing = k->spacing; h->stride = (float)stride;
     h->ang = k->ang; h->W = W; h->row = (u32)s; h->newest = inew[s]; h->n = (u32)n;
     h->info = (u32)k->skin | ((u32)(k->boost | (s == 0 ? 2 : 0) | (k->tier == LEGEND && k->bot ? 4 : 0)) << 8);
+    trailSync(s);
   }
-  buildRuns();
   return nvis;
 }
-/* Trail rows the GPU needs this frame, merged into runs: [start, count]... */
-static u32 runs[MAXS * 2], nruns;
-static void buildRuns(void) {
-  unsigned long long mask = 0;
-  for (i32 i = 0; i < nvis; i++) mask |= 1ull << hdr[i].row;
-  nruns = 0;
-  for (u32 r = 0; r < MAXS; r++) {
-    if (!(mask >> r & 1ull)) continue;
-    u32 e = r; /* extend while the next needed row is at most 2 rows away */
-    while (e + 1 < MAXS && ((mask >> (e + 1)) & 3ull)) e++;
-    runs[nruns * 2] = r; runs[nruns * 2 + 1] = e - r + 1; nruns++;
-    r = e;
-  }
-}
-EXPORT("runsPtr") u32 *runsPtr(void) { return runs; }
-EXPORT("nRuns") u32 nRunsOut(void) { return nruns; }
+
 
 /* Leaderboard: [alive count, player rank (0 = dead), top 10 snake ids...] */
 static i32 lb[12];
@@ -802,6 +783,7 @@ EXPORT("rankPrep") i32 *rankPrep(void) {
   return lb;
 }
 
+EXPORT("tupPtr") u32 *tupPtr(void) { return tup; }
 EXPORT("hdrPtr") Head *hdrPtr(void) { return hdr; }
 EXPORT("maxK") i32 maxKOut(void) { return maxK; }
 EXPORT("snapPtr") Snap *snapPtr(void) { return snap; }
@@ -828,7 +810,7 @@ EXPORT("miniPtr") Mini *miniPtr(void) { return mini; }
 
 /* ---------- one call per frame ----------
    input -> fixed-step sim -> interpolated snapshot -> camera -> culling ->
-   render headers/runs -> minimap -> the std140 "Frame" uniform block that JS
+   render headers + trail sync list -> minimap -> the std140 "Frame" uniform block that JS
    uploads as-is. Timings come from an imported clock. */
 extern double nowMs(void) __attribute__((import_module("env"), import_name("now")));
 static float expf_(float x) { /* 2^(x*log2 e), enough for smoothing factors */
@@ -839,9 +821,7 @@ static float expf_(float x) { /* 2^(x*log2 e), enough for smoothing factors */
 }
 static float camH = 900.f, specT = 99.f;
 static i32 spectate = 1;
-static i32 frameOut[8];        /* food sprites, snakes drawn, maxK, runs, minimap items */
-/* WebGPU drawIndirect args, 4 x u32 per draw: floor, food, snakes, labels, minimap */
-EXPORT("indirectPtr") u32 *indirectPtr(void) { return indirect; }
+static i32 frameOut[8];        /* food sprites, snakes drawn, maxK, trail uploads, minimap items */
 /* Accurate simulation cost on this device: time many steps in one go, so the
    browser's coarse/jittered timer doesn't matter. Advances the game. */
 EXPORT("bench") float bench(i32 steps) {
@@ -879,14 +859,8 @@ EXPORT("frame") void frame(float dt, float aim, i32 boost, i32 mode, float vw, f
   float hh = camH, hw = camH * vw / vh, px = hh * 2.f / vh;
   frameOut[0] = build(camX, camY, hw, hh);
   frameOut[1] = renderPrep(camX, camY, hw, hh, px);
-  frameOut[2] = maxK; frameOut[3] = (i32)nruns;
+  frameOut[2] = maxK; frameOut[3] = (i32)ntup;
   frameOut[4] = miniPrep(camX, camY, hw, hh);
-  u32 *d = indirect;
-  d[0] = 3; d[1] = 1;                                    /* floor: fullscreen triangle */
-  d[4] = 4; d[5] = (u32)frameOut[0];                     /* food quads */
-  d[8] = 2u * (u32)(maxK + 3); d[9] = (u32)frameOut[1];  /* snake ribbons */
-  d[12] = 4; d[13] = (u32)frameOut[1];                   /* labels */
-  d[16] = 4; d[17] = mode == 0 ? (u32)frameOut[4] : 0u;  /* minimap */
   frameBlk[0] = camX; frameBlk[1] = camY; frameBlk[2] = hw; frameBlk[3] = hh;
   frameBlk[4] = px; frameBlk[5] = time; frameBlk[6] = vw / cssW; frameBlk[7] = 0;
   frameBlk[8] = vw; frameBlk[9] = vh; frameBlk[10] = WR; frameBlk[11] = 0;
@@ -897,15 +871,5 @@ EXPORT("instPtr") Inst *instPtr(void) { return inst; }
 EXPORT("maxInst") i32 maxInst(void) { return MAXI; }
 EXPORT("worldRadius") float worldRadius(void) { return WR; }
 EXPORT("snakeCount") i32 snakeCount(void) { return NS; }
-EXPORT("alive") i32 alive(i32 s) { return S[s].alive; }
-EXPORT("mass") float mass(i32 s) { return S[s].mass; }
-EXPORT("radius") float radius(i32 s) { return S[s].r; }
-EXPORT("headX") float headX(i32 s) { return S[s].hx; }
-EXPORT("headY") float headY(i32 s) { return S[s].hy; }
 EXPORT("kills") i32 kills(i32 s) { return S[s].kills; }
-EXPORT("skin") i32 skin(i32 s) { return S[s].skin; }
-EXPORT("segments") i32 segments(i32 s) { return S[s].n; }
-EXPORT("foodCount") i32 foodCount(void) { return foodAlive; }
 EXPORT("killer") i32 killer(void) { return playerKiller; }
-EXPORT("tier") i32 tier(i32 s) { return S[s].tier; }
-EXPORT("isNear") i32 isNear(i32 s) { return S[s].alive && S[s].near; }
