@@ -7,7 +7,7 @@
 -  **Fast** a WebAssembly simulation and WebGPU rendering (with WebGL 2 as backup) means that The game runs fast even on older machines and doesn't hog resources.
 - Mouse, keyboard and touch controls.
 
-**▶ Play it here: [catancats.github.io/Snake-Game](https://catancats.github.io/Snake-Game/)**, will soon be on actual website with multiplayer options, download index.html to play offline
+**Play the game here: [catancats.github.io/Snake-Game](https://catancats.github.io/Snake-Game/)**, will soon be on a actual website with multiplayer options, download the index.html to play offline.
 
 ## Controls
 | Action | Mouse | Keyboard | Touch |
