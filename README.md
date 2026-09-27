@@ -46,7 +46,7 @@ Each frame, JavaScript makes one **WebAssembly call*, and then **one upload* of 
 Press **P* for:
 - fps, and CPU time per part (sim, prep, draw, DOM);
 - GPU time per pass (floor, food, snakes, labels, map), when the browser supports GPU timers;
-- a simulation benchmark in µs per step, taken on the menu after warm-up. Typical is 10–40 µs. If it is far higher, the menu shows a note.
+- a simulation benchmark in µs per step, normal being 10–40 µs.
 
 ## Source layout
 - `src/sim.c`: the whole simulation (WebAssembly).
