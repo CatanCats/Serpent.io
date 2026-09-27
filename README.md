@@ -1,13 +1,13 @@
-# serpent.io – a free slither.io-style snake game for the browser
+# serpent.io  a Open Source slither.io-style snake game for the browser
 
- Serpent.io is a fast, free io game in the style of slither.io. It runs in most browsers on desktop or mobile. The game runs in a self-contained `index.html` (about 125 KB).
+ Serpent.io is a fast, free io game in the style of slither.io. It runs in most browsers on desktop or mobile. The game runs in a self-contained `index.html`.
 
-- 🐍 **AI bots in five tiers:** Rookie, Casual, Hunter, Elite and the rarer Legend.
+-  **Different difficuly levels for the AI bots** Rookie, Casual, Hunter, Elite and the rarer Legend.
 -  Has a minimap, allowing you to the positions of different snakes.
 -  **Fast** a WebAssembly simulation and WebGPU rendering (with WebGL 2 as backup) means that The game runs fast even on older machines and doesn't hog resources.
 - Mouse, keyboard and touch controls.
 
-**▶ Play online: [catancats.github.io/Snake-Game](https://catancats.github.io/Snake-Game/)**, or download `index.html` and open it in your browser.
+**▶ Play it here: [catancats.github.io/Snake-Game](https://catancats.github.io/Snake-Game/)**, will soon be on actual website with multiplayer options, download index.html to play offline
 
 ## Controls
 | Action | Mouse | Keyboard | Touch |
@@ -20,8 +20,10 @@
 On the menu you can also pick Quality (Sharp / Balanced / Fast: caps the pixel density at 2× / 1.25× / 1×) and Renderer (Auto / WebGPU / WebGL). `?renderer=webgl` in the address forces WebGL.
 
 ## The game
-- **Tiers:** bots from Rookie to Legend differ in how far they look ahead, how cleanly they steer, and how much they hunt. Hunters and above predict other heads and swoop on fresh kills.
-- **Map:** the player spawns on the outer rim; big snakes gather in the centre. The whole world wraps around the one snake you control.
+- **Tiers**
+-  bots from Rookie to Legend differ in how far they look ahead, how cleanly they steer, and how much they hunt. Hunters and above predict other heads and swoop on fresh kills.
+- **Map**
+- the player spawns on the outer rim; big snakes gather in the centre. The whole world wraps around the one snake you control.
 
 ## How the game is fast
 Each frame, JavaScript makes one **WebAssembly call*, and then **one upload* of a contiguous block of WebAssembly memory to the GPU, followed by five draws.
