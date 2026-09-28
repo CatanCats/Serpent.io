@@ -44,22 +44,44 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   E.palette = new Float32Array(96);
   SKINS.forEach(([a, b], i) => [a, b].forEach((h, k) => [1, 3, 5].forEach((o, c) => { E.palette[(k * 12 + i) * 4 + c] = parseInt(h.substr(o, 2), 16) / 255; })));
 
-  /* ---------------- Renderer: WebGPU first, WebGL 2 as the backup ----------------
-     ?renderer=webgl forces the backup. If the GPU drops the WebGPU device (driver
-     reset, sleep, GPU process restart) the page reloads into WebGPU again; only a
-     second loss in the same session falls back to WebGL. The menu says why. */
+  /* ---------------- Renderer: WebGPU, or WebGL 2 when chosen ----------------
+     If WebGPU fails (at start or later: driver reset, GPU process restart) the game
+     stops and shows why, with "Try again" and "Use WebGL instead"; it never
+     switches silently. ?renderer=webgl (or the menu) picks WebGL directly. */
   const canvas = $("gl");
   const saved = store.get("serpent.renderer") || "auto";
-  const losses = +(sessionStorage.getItem("serpent.gpuLost") || 0);
-  const want = new URLSearchParams(location.search).get("renderer") || (losses >= 2 && saved !== "webgpu" ? "webgl" : saved);
-  let R = null, why = losses >= 2 && want === "webgl" ? "WebGPU stopped twice this session" : "";
+  const want = new URLSearchParams(location.search).get("renderer") || saved;
+  function gpuProblem(title, detail) { // resolves when the player picks WebGL
+    return new Promise((done) => {
+      const el = document.createElement("div");
+      el.className = "screen"; el.style.cssText = "z-index:50;background:rgba(4,6,12,.9)";
+      el.innerHTML = `<div class="card glass" style="text-align:left"><h2 style="font-size:24px;margin-bottom:10px">${title}</h2>
+        <p style="font:12.5px/1.5 ui-monospace,monospace;color:#fde68a;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);border-radius:10px;padding:10px;word-break:break-word"></p>
+        <p style="margin:12px 0 18px;color:var(--dim);font-size:14px;line-height:1.5">Usually fixed by updating the browser or the graphics driver, or by turning on
+        hardware acceleration (browser settings → System). <b>edge://gpu</b> or <b>chrome://gpu</b> shows whether WebGPU is enabled.</p>
+        <button class="play" data-a="retry">TRY AGAIN</button>
+        <button class="play" data-a="gl" style="margin-top:10px;background:rgba(255,255,255,.08);color:var(--text);box-shadow:none">Use WebGL instead</button></div>`;
+      el.querySelector("p").textContent = detail;
+      el.querySelector('[data-a="retry"]').onclick = () => { location.href = location.pathname; };
+      el.querySelector('[data-a="gl"]').onclick = () => { el.remove(); done(); };
+      document.body.appendChild(el);
+    });
+  }
+  const toWebGL = () => { location.href = location.pathname + "?renderer=webgl"; };
+  let R = null;
   if (want !== "webgl") {
     try { R = await createGPU(canvas, E); }
-    catch (e) { why = String(e.message || e).split("\n")[0].slice(0, 90); console.warn("WebGPU unavailable, using WebGL 2:", e); R = null; }
-    if (!R && canvas.getContext("webgpu")) canvas.replaceWith(canvas.cloneNode()); // a failed WebGPU attempt holds the canvas
+    catch (e) {
+      console.warn("WebGPU failed:", e);
+      // a browser with no WebGPU at all has nothing to fix: Auto goes straight to WebGL
+      if (want !== "auto" || navigator.gpu) await gpuProblem("WebGPU isn't working", String(e && e.message || e));
+      R = null;
+      if (canvas.getContext("webgpu")) canvas.replaceWith(canvas.cloneNode()); // a failed WebGPU attempt holds the canvas
+    }
     if (R) {
-      R.device.lost.then((info) => { if (info.reason !== "destroyed") { sessionStorage.setItem("serpent.gpuLost", losses + 1); location.reload(); } });
-      setTimeout(() => sessionStorage.removeItem("serpent.gpuLost"), 60000); // healthy for a minute: forget earlier losses
+      R.device.lost.then((info) => { if (info.reason !== "destroyed") gpuProblem("WebGPU stopped", `The graphics device was lost: ${info.message || "no reason given"}`).then(toWebGL); });
+      let shown = false; // a WebGPU error while playing: show the first one (the rest are usually the same)
+      R.device.addEventListener("uncapturederror", (ev) => { if (!shown) { shown = true; gpuProblem("WebGPU error", ev.error.message).then(toWebGL); } });
     }
   }
   if (!R) R = createGL($("gl"), E);
@@ -69,9 +91,9 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   let quality = store.get("serpent.quality") || "sharp";
   for (const b of $("rsw").querySelectorAll("button")) {
     b.setAttribute("aria-pressed", b.dataset.r === saved);
-    b.onclick = () => { store.set("serpent.renderer", b.dataset.r); sessionStorage.removeItem("serpent.gpuLost"); location.reload(); };
+    b.onclick = () => { store.set("serpent.renderer", b.dataset.r); location.href = location.pathname; };
   }
-  $("rnow").textContent = R.name + (why && R.name.startsWith("WebGL") ? ` (WebGPU: ${why})` : "");
+  $("rnow").textContent = R.name;
   const qEl = $("qsw");
   const markQ = () => { for (const b of qEl.querySelectorAll("button")) b.setAttribute("aria-pressed", b.dataset.q === quality); };
   for (const b of qEl.querySelectorAll("button")) b.onclick = () => { quality = b.dataset.q; store.set("serpent.quality", quality); markQ(); resize(); };
