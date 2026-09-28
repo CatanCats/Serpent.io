@@ -23,6 +23,7 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::serve::ListenerExt;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -226,10 +227,11 @@ impl Game {
         if let Some(b) = best { self.spectate = b; }
     }
 
-    /// One client's snapshot: nearby snakes (only trail points it lacks) and food diffs in view.
-    fn snapshot(&mut self, id: u64, tick: u32) {
-        let sim = &self.sim;
-        let c = self.clients.get_mut(&id).unwrap();
+}
+
+/// One client's snapshot: nearby snakes (only trail points it lacks) and its food
+/// changes. Reads the shared state only.
+fn snapshot(sim: &Sim, food: &FoodIndex, spectate: usize, c: &mut Client, tick: u32) {
         let me = c.slot;
         let alive = me >= 0 && sim.p(me as usize).alive != 0;
         let (cx, cy, cam_h) = if alive {
@@ -237,7 +239,7 @@ impl Game {
             c.last = (p.hx, p.hy, 560. + (p.r - 12.) * 18.);
             c.last
         } else if me >= 0 { (c.last.0, c.last.1, c.last.2 * 1.6) } // dead: the client zooms out
-        else { let p = sim.p(self.spectate); (p.hx, p.hy, 900.) };
+        else { let p = sim.p(spectate); (p.hx, p.hy, 900.) };
         let (hh, hw) = (cam_h + 250., cam_h * c.aspect + 250.); // + margin for the client's smoothed camera
 
         let reset = c.reset;
@@ -246,7 +248,7 @@ impl Game {
             c.sent_pc.iter_mut().for_each(|v| *v = 0);
         }
         let mut o = Out(Vec::with_capacity(16 * 1024));
-        o.u8(2); o.u32(tick); o.u8(if me >= 0 { me as u8 } else { 255 }); o.u8(self.spectate as u8); o.u8(reset as u8);
+        o.u8(2); o.u32(tick); o.u8(if me >= 0 { me as u8 } else { 255 }); o.u8(spectate as u8); o.u8(reset as u8);
         let n_at = o.0.len(); o.u16(0);
         let mut n = 0u16;
         for s in 0..sim.maxs {
@@ -285,7 +287,7 @@ impl Game {
             for sxx in new.x0.min(old.x0)..=new.x1.max(old.x1) {
                 let (in_new, in_old) = (new.has(sxx, sy), old.has(sxx, sy));
                 if in_new == in_old { continue; }
-                for &i in &self.food.sectors[(sy * NSEC + sxx) as usize] {
+                for &i in &food.sectors[(sy * NSEC + sxx) as usize] {
                     o.u16(i); o.u64(if in_new { sim.food(i as usize) } else { 0 }); m += 1;
                 }
             }
@@ -293,9 +295,10 @@ impl Game {
         c.rect = new;
         if m > 65535 { c.reset = true; m = 65535; o.0.truncate(m_at + 2 + 65535 * 10); } // absurd burst: resync next time
         o.patch16(m_at, m as u16);
-        Self::send(c, o.0);
-    }
+        Game::send(c, o.0);
+}
 
+impl Game {
     fn step(&mut self) {
         // someone on the menu: the snake it shows gets food and full detail, like offline
         let menu = self.clients.values().any(|c| c.slot < 0);
@@ -321,8 +324,10 @@ impl Game {
         if self.spec_t > 8. || self.sim.p(self.spectate).alive == 0 { self.spec_t = 0.; self.pick_spectate(); }
         if tick % 2 == 0 {
             self.food_flush();
-            let ids: Vec<u64> = self.clients.keys().copied().collect();
-            for id in ids { self.snapshot(id, tick); }
+            let (sim, food, sp) = (&self.sim, &self.food, self.spectate);
+            // Sequential on purpose: spreading this over threads was measured slower
+            // (~0.2 ms of work is less than the cost of waking them).
+            for c in self.clients.values_mut() { snapshot(sim, food, sp, c, tick); }
         }
         if tick % 15 == 0 { self.board_and_mini(); }
         let t2 = Instant::now();
@@ -554,6 +559,7 @@ async fn main() {
         .route("/ws", get(ws_route))
         .with_state(app);
     println!("serpent.io server on :{port} · {bots} bots · {}", machine_info());
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.expect("port in use?");
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.expect("port in use?")
+        .tap_io(|tcp| { let _ = tcp.set_nodelay(true); }); // no Nagle delay on small updates
     axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 }
