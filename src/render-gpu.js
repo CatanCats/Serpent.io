@@ -45,23 +45,30 @@ fn quad(vi: u32) -> vec2f { return vec2f(f32(vi & 1u), f32(vi >> 1u)); }
   let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
   return vec4f(p * 2. - 1., 0., 1.);
 }
-struct BgO { @builtin(position) pos: vec4f, @location(0) w: vec2f, @location(1) ndc: vec2f };
+struct BgO { @builtin(position) pos: vec4f, @location(0) w: vec2f, @location(1) v: vec2f, @location(2) uv: vec2f,
+  @location(3) @interpolate(flat) rw: f32 };
+// everything that is linear across the screen is computed here, per corner, and
+// interpolated: world position, tile coordinates, vignette position, rim width
 @vertex fn vsBg(@builtin(vertex_index) i: u32) -> BgO {
   let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u)) * 2. - 1.;
-  var o: BgO; o.pos = vec4f(p, 0., 1.); o.ndc = vec2f(p.x, -p.y);   // y down, like world space
-  o.w = F.camHalf.xy + o.ndc * F.camHalf.zw;                        // interpolated: no per-pixel maths
+  var o: BgO; o.pos = vec4f(p, 0., 1.); o.v = p * .72;
+  o.w = F.camHalf.xy + vec2f(p.x, -p.y) * F.camHalf.zw;             // y down, like world space
+  o.uv = o.w * vec2f(1. / (46. * 1.7320508), 1. / 46.);             // one hex period per tile
+  o.rw = 14. + F.camHalf.w * 2. / F.resWR.y;                        // rim glow width: 14 units + a pixel
   return o;
 }
 @fragment fn fsBg(i: BgO) -> @location(0) vec4f {
-  let ndc = i.ndc; let w = i.w;
-  let tf = textureSample(tileTex, linRep, w / 46. / vec2f(1.7320508, 1.)).rg;
+  let tf = textureSample(tileTex, linRep, i.uv).rg;
   var col = mix(mix(vec3f(.052, .066, .108), vec3f(.07, .088, .14), tf.x), vec3f(.028, .035, .06), tf.y * .85);
-  let px = F.camHalf.w * 2. / F.resWR.y / 46.;
-  let WR = F.resWR.z; let r = length(w); let rw = 14. + px * 46.;
-  if (r > WR - 2.) { col = mix(col, col * vec3f(.55, .22, .28) + vec3f(.05, 0., .01), smoothstep(WR - 2., WR + 2., r)); }
-  if (abs(r - WR) < rw * 6.) { col += vec3f(1., .25, .35) * exp(-abs(r - WR) / rw) * (.7 + .3 * sin(F.pxTime.y * 3.)) * .55; }
-  if (r < WR * .37) { col += vec3f(.9, .3, .4) * .035 * (1. - smoothstep(WR * .3, WR * .37, r)); }
-  col *= 1. - .35 * dot(ndc * .72, ndc * .72);
+  let WR = F.resWR.z; let r2 = dot(i.w, i.w); let lo = WR - 6. * i.rw; let cz = WR * .37;
+  if (r2 > lo * lo) { // near the world's edge (squared distances: no sqrt elsewhere)
+    let r = sqrt(r2); let rw = i.rw;
+    if (r > WR - 2.) { col = mix(col, col * vec3f(.55, .22, .28) + vec3f(.05, 0., .01), smoothstep(WR - 2., WR + 2., r)); }
+    if (abs(r - WR) < rw * 6.) { col += vec3f(1., .25, .35) * exp(-abs(r - WR) / rw) * (.7 + .3 * sin(F.pxTime.y * 3.)) * .55; }
+  } else if (r2 < cz * cz) { // faint glow over the crowded centre zone
+    col += vec3f(.9, .3, .4) * .035 * (1. - smoothstep(WR * .3, cz, sqrt(r2)));
+  }
+  col *= 1. - .35 * dot(i.v, i.v);
   return vec4f(col, 1.);
 }
 fn hexD(p0: vec2f) -> f32 { let p = abs(p0); return max(dot(p, vec2f(.8660254, .5)), p.y); }

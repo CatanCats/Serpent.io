@@ -35,28 +35,33 @@ function createGL(canvas, E) {
   }`;
   const BGW_VS = `#version 300 es
   ${FRAME}
-  out vec2 vW, vN;
+  out vec2 vW, vV, vUV; flat out float vRW;
+  // everything that is linear across the screen is computed here, per corner, and
+  // interpolated: world position, tile coordinates, vignette position, rim width
   void main(){
     vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2))*2.-1.;
-    gl_Position=vec4(p,0,1); vN=p; vW=uCamHalf.xy+vec2(p.x,-p.y)*uCamHalf.zw; // interpolated: no per-pixel maths
+    gl_Position=vec4(p,0,1); vV=p*.72; vW=uCamHalf.xy+vec2(p.x,-p.y)*uCamHalf.zw;
+    vUV=vW*vec2(1./(46.*1.7320508),1./46.);                  // one hex period per tile
+    vRW=14.+uCamHalf.w*2./uResWR.y;                           // rim glow width: 14 units + a pixel
   }`;
   const BG_FS = `#version 300 es
   precision highp float;
-  in vec2 vW, vN;
+  in vec2 vW, vV, vUV; flat in float vRW;
   ${FRAME}
   uniform sampler2D uTile;
   out vec4 o;
   void main(){
-    vec2 ndc=vN, w=vW;
-    float px=uCamHalf.w*2./uResWR.y/46.;
-    vec2 tf=texture(uTile, w/46./vec2(1.7320508,1.)).rg;
+    vec2 tf=texture(uTile, vUV).rg;
     vec3 col=mix(mix(vec3(.052,.066,.108),vec3(.07,.088,.14),tf.x),vec3(.028,.035,.06),tf.y*.85);
-    float WRr=uResWR.z, r=length(w), rw=14.+px*46.;
-    if(r>WRr-2.) col=mix(col,col*vec3(.55,.22,.28)+vec3(.05,0,.01),smoothstep(WRr-2.,WRr+2.,r));
-    if(abs(r-WRr)<rw*6.) col+=vec3(1.,.25,.35)*exp(-abs(r-WRr)/rw)*(.7+.3*sin(uPxTime.y*3.))*.55;
-    // faint glow over the crowded centre zone
-    if(r<WRr*.37) col+=vec3(.9,.3,.4)*.035*(1.-smoothstep(WRr*.3,WRr*.37,r));
-    col*=1.-.35*dot(ndc*.72,ndc*.72);
+    float WRr=uResWR.z, r2=dot(vW,vW), lo=WRr-6.*vRW, cz=WRr*.37;
+    if(r2>lo*lo){ // near the world's edge (squared distances: no sqrt elsewhere)
+      float r=sqrt(r2), rw=vRW;
+      if(r>WRr-2.) col=mix(col,col*vec3(.55,.22,.28)+vec3(.05,0,.01),smoothstep(WRr-2.,WRr+2.,r));
+      if(abs(r-WRr)<rw*6.) col+=vec3(1.,.25,.35)*exp(-abs(r-WRr)/rw)*(.7+.3*sin(uPxTime.y*3.))*.55;
+    } else if(r2<cz*cz){ // faint glow over the crowded centre zone
+      col+=vec3(.9,.3,.4)*.035*(1.-smoothstep(WRr*.3,cz,sqrt(r2)));
+    }
+    col*=1.-.35*dot(vV,vV);
     o=vec4(col,1);
   }`;
 

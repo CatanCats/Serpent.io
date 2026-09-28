@@ -231,28 +231,33 @@ function createGL(canvas, E) {
   }`;
   const BGW_VS = `#version 300 es
   ${FRAME}
-  out vec2 vW, vN;
+  out vec2 vW, vV, vUV; flat out float vRW;
+  // everything that is linear across the screen is computed here, per corner, and
+  // interpolated: world position, tile coordinates, vignette position, rim width
   void main(){
     vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2))*2.-1.;
-    gl_Position=vec4(p,0,1); vN=p; vW=uCamHalf.xy+vec2(p.x,-p.y)*uCamHalf.zw; // interpolated: no per-pixel maths
+    gl_Position=vec4(p,0,1); vV=p*.72; vW=uCamHalf.xy+vec2(p.x,-p.y)*uCamHalf.zw;
+    vUV=vW*vec2(1./(46.*1.7320508),1./46.);                  // one hex period per tile
+    vRW=14.+uCamHalf.w*2./uResWR.y;                           // rim glow width: 14 units + a pixel
   }`;
   const BG_FS = `#version 300 es
   precision highp float;
-  in vec2 vW, vN;
+  in vec2 vW, vV, vUV; flat in float vRW;
   ${FRAME}
   uniform sampler2D uTile;
   out vec4 o;
   void main(){
-    vec2 ndc=vN, w=vW;
-    float px=uCamHalf.w*2./uResWR.y/46.;
-    vec2 tf=texture(uTile, w/46./vec2(1.7320508,1.)).rg;
+    vec2 tf=texture(uTile, vUV).rg;
     vec3 col=mix(mix(vec3(.052,.066,.108),vec3(.07,.088,.14),tf.x),vec3(.028,.035,.06),tf.y*.85);
-    float WRr=uResWR.z, r=length(w), rw=14.+px*46.;
-    if(r>WRr-2.) col=mix(col,col*vec3(.55,.22,.28)+vec3(.05,0,.01),smoothstep(WRr-2.,WRr+2.,r));
-    if(abs(r-WRr)<rw*6.) col+=vec3(1.,.25,.35)*exp(-abs(r-WRr)/rw)*(.7+.3*sin(uPxTime.y*3.))*.55;
-    // faint glow over the crowded centre zone
-    if(r<WRr*.37) col+=vec3(.9,.3,.4)*.035*(1.-smoothstep(WRr*.3,WRr*.37,r));
-    col*=1.-.35*dot(ndc*.72,ndc*.72);
+    float WRr=uResWR.z, r2=dot(vW,vW), lo=WRr-6.*vRW, cz=WRr*.37;
+    if(r2>lo*lo){ // near the world's edge (squared distances: no sqrt elsewhere)
+      float r=sqrt(r2), rw=vRW;
+      if(r>WRr-2.) col=mix(col,col*vec3(.55,.22,.28)+vec3(.05,0,.01),smoothstep(WRr-2.,WRr+2.,r));
+      if(abs(r-WRr)<rw*6.) col+=vec3(1.,.25,.35)*exp(-abs(r-WRr)/rw)*(.7+.3*sin(uPxTime.y*3.))*.55;
+    } else if(r2<cz*cz){ // faint glow over the crowded centre zone
+      col+=vec3(.9,.3,.4)*.035*(1.-smoothstep(WRr*.3,cz,sqrt(r2)));
+    }
+    col*=1.-.35*dot(vV,vV);
     o=vec4(col,1);
   }`;
 
@@ -622,23 +627,30 @@ fn quad(vi: u32) -> vec2f { return vec2f(f32(vi & 1u), f32(vi >> 1u)); }
   let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
   return vec4f(p * 2. - 1., 0., 1.);
 }
-struct BgO { @builtin(position) pos: vec4f, @location(0) w: vec2f, @location(1) ndc: vec2f };
+struct BgO { @builtin(position) pos: vec4f, @location(0) w: vec2f, @location(1) v: vec2f, @location(2) uv: vec2f,
+  @location(3) @interpolate(flat) rw: f32 };
+// everything that is linear across the screen is computed here, per corner, and
+// interpolated: world position, tile coordinates, vignette position, rim width
 @vertex fn vsBg(@builtin(vertex_index) i: u32) -> BgO {
   let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u)) * 2. - 1.;
-  var o: BgO; o.pos = vec4f(p, 0., 1.); o.ndc = vec2f(p.x, -p.y);   // y down, like world space
-  o.w = F.camHalf.xy + o.ndc * F.camHalf.zw;                        // interpolated: no per-pixel maths
+  var o: BgO; o.pos = vec4f(p, 0., 1.); o.v = p * .72;
+  o.w = F.camHalf.xy + vec2f(p.x, -p.y) * F.camHalf.zw;             // y down, like world space
+  o.uv = o.w * vec2f(1. / (46. * 1.7320508), 1. / 46.);             // one hex period per tile
+  o.rw = 14. + F.camHalf.w * 2. / F.resWR.y;                        // rim glow width: 14 units + a pixel
   return o;
 }
 @fragment fn fsBg(i: BgO) -> @location(0) vec4f {
-  let ndc = i.ndc; let w = i.w;
-  let tf = textureSample(tileTex, linRep, w / 46. / vec2f(1.7320508, 1.)).rg;
+  let tf = textureSample(tileTex, linRep, i.uv).rg;
   var col = mix(mix(vec3f(.052, .066, .108), vec3f(.07, .088, .14), tf.x), vec3f(.028, .035, .06), tf.y * .85);
-  let px = F.camHalf.w * 2. / F.resWR.y / 46.;
-  let WR = F.resWR.z; let r = length(w); let rw = 14. + px * 46.;
-  if (r > WR - 2.) { col = mix(col, col * vec3f(.55, .22, .28) + vec3f(.05, 0., .01), smoothstep(WR - 2., WR + 2., r)); }
-  if (abs(r - WR) < rw * 6.) { col += vec3f(1., .25, .35) * exp(-abs(r - WR) / rw) * (.7 + .3 * sin(F.pxTime.y * 3.)) * .55; }
-  if (r < WR * .37) { col += vec3f(.9, .3, .4) * .035 * (1. - smoothstep(WR * .3, WR * .37, r)); }
-  col *= 1. - .35 * dot(ndc * .72, ndc * .72);
+  let WR = F.resWR.z; let r2 = dot(i.w, i.w); let lo = WR - 6. * i.rw; let cz = WR * .37;
+  if (r2 > lo * lo) { // near the world's edge (squared distances: no sqrt elsewhere)
+    let r = sqrt(r2); let rw = i.rw;
+    if (r > WR - 2.) { col = mix(col, col * vec3f(.55, .22, .28) + vec3f(.05, 0., .01), smoothstep(WR - 2., WR + 2., r)); }
+    if (abs(r - WR) < rw * 6.) { col += vec3f(1., .25, .35) * exp(-abs(r - WR) / rw) * (.7 + .3 * sin(F.pxTime.y * 3.)) * .55; }
+  } else if (r2 < cz * cz) { // faint glow over the crowded centre zone
+    col += vec3f(.9, .3, .4) * .035 * (1. - smoothstep(WR * .3, cz, sqrt(r2)));
+  }
+  col *= 1. - .35 * dot(i.v, i.v);
   return vec4f(col, 1.);
 }
 fn hexD(p0: vec2f) -> f32 { let p = abs(p0); return max(dot(p, vec2f(.8660254, .5)), p.y); }
@@ -1038,6 +1050,24 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const canvas = $("gl");
   const saved = store.get("serpent.renderer") || "auto";
   const want = new URLSearchParams(location.search).get("renderer") || saved;
+  // Is this browser running the site with its JavaScript/WebAssembly optimizer off
+  // (Edge "Enhance your security on the web", Chrome "V8 optimizer" blocked)? That
+  // mode also turns WebGPU off and makes the game ~30x slower. A tight loop tells:
+  // a few ms with the optimizer, 10x more without it.
+  function optimizerOff() { // fastest of 3 runs: the first one includes compiling
+    let best = 1e9;
+    for (let k = 0; k < 3; k++) {
+      const t = performance.now(); let x = 0;
+      for (let i = 0; i < 3e6; i++) x = (x + i * 7) | 0;
+      best = Math.min(best, performance.now() - t + (x & 0));
+    }
+    return best > 25; // ~5 ms with the optimizer, 50+ without
+  }
+  const site = location.hostname || "this file";
+  const securityHint = () => `<p style="margin:0 0 14px;padding:10px;border-radius:10px;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.3);font-size:14px;line-height:1.5">
+    <b>Likely cause:</b> your browser runs this site in a high-security mode (its JavaScript/WebAssembly optimizer is off here), which also turns off WebGPU and makes the game run about 30× slower.
+    <b>Edge:</b> Settings → Privacy, search and services → “Enhance your security on the web” → Exceptions → add <b>${site}</b> (or choose Basic).
+    <b>Chrome:</b> Settings → Privacy and security → Site settings → JavaScript optimization → allow <b>${site}</b>. Then reload.</p>`;
   function gpuProblem(title, detail) { // resolves when the player picks WebGL
     return new Promise((done) => {
       const el = document.createElement("div");
@@ -1046,6 +1076,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         <p style="font:12.5px/1.5 ui-monospace,monospace;color:#fde68a;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);border-radius:10px;padding:10px;word-break:break-word"></p>
         <p style="margin:12px 0 18px;color:var(--dim);font-size:14px;line-height:1.5">Usually fixed by updating the browser or the graphics driver, or by turning on
         hardware acceleration (browser settings → System). <b>edge://gpu</b> or <b>chrome://gpu</b> shows whether WebGPU is enabled.</p>
+        ${optimizerOff() ? securityHint() : ""}
         <button class="play" data-a="retry">TRY AGAIN</button>
         <button class="play" data-a="gl" style="margin-top:10px;background:rgba(255,255,255,.08);color:var(--text);box-shadow:none">Use WebGL instead</button></div>`;
       el.querySelector("p").textContent = detail;
@@ -1286,9 +1317,10 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (state !== "menu") return;
     const us = W.bench(120);
     benchTxt = `<br>sim benchmark: <b>${us.toFixed(1)} µs</b> per step`;
-    if (us > 400) {
+    if (us > 150) {
       const n = $("slowNote"); n.hidden = false;
-      n.innerHTML = `The simulation is running very slowly here (${Math.round(us)} µs per step; typical is 10–40). Check for battery saver / efficiency mode, a browser setting that disables its JavaScript/WebAssembly compilers, or a busy CPU.`;
+      n.innerHTML = optimizerOff() ? securityHint() :
+        `The simulation is running slowly here (${Math.round(us)} µs per step; typical is 10–40). Check for battery saver / efficiency mode or a busy CPU.`;
     }
   }, 2500);
   W.snapshot(); updateHud();

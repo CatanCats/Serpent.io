@@ -57,6 +57,24 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const canvas = $("gl");
   const saved = store.get("serpent.renderer") || "auto";
   const want = new URLSearchParams(location.search).get("renderer") || saved;
+  // Is this browser running the site with its JavaScript/WebAssembly optimizer off
+  // (Edge "Enhance your security on the web", Chrome "V8 optimizer" blocked)? That
+  // mode also turns WebGPU off and makes the game ~30x slower. A tight loop tells:
+  // a few ms with the optimizer, 10x more without it.
+  function optimizerOff() { // fastest of 3 runs: the first one includes compiling
+    let best = 1e9;
+    for (let k = 0; k < 3; k++) {
+      const t = performance.now(); let x = 0;
+      for (let i = 0; i < 3e6; i++) x = (x + i * 7) | 0;
+      best = Math.min(best, performance.now() - t + (x & 0));
+    }
+    return best > 25; // ~5 ms with the optimizer, 50+ without
+  }
+  const site = location.hostname || "this file";
+  const securityHint = () => `<p style="margin:0 0 14px;padding:10px;border-radius:10px;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.3);font-size:14px;line-height:1.5">
+    <b>Likely cause:</b> your browser runs this site in a high-security mode (its JavaScript/WebAssembly optimizer is off here), which also turns off WebGPU and makes the game run about 30× slower.
+    <b>Edge:</b> Settings → Privacy, search and services → “Enhance your security on the web” → Exceptions → add <b>${site}</b> (or choose Basic).
+    <b>Chrome:</b> Settings → Privacy and security → Site settings → JavaScript optimization → allow <b>${site}</b>. Then reload.</p>`;
   function gpuProblem(title, detail) { // resolves when the player picks WebGL
     return new Promise((done) => {
       const el = document.createElement("div");
@@ -65,6 +83,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         <p style="font:12.5px/1.5 ui-monospace,monospace;color:#fde68a;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);border-radius:10px;padding:10px;word-break:break-word"></p>
         <p style="margin:12px 0 18px;color:var(--dim);font-size:14px;line-height:1.5">Usually fixed by updating the browser or the graphics driver, or by turning on
         hardware acceleration (browser settings → System). <b>edge://gpu</b> or <b>chrome://gpu</b> shows whether WebGPU is enabled.</p>
+        ${optimizerOff() ? securityHint() : ""}
         <button class="play" data-a="retry">TRY AGAIN</button>
         <button class="play" data-a="gl" style="margin-top:10px;background:rgba(255,255,255,.08);color:var(--text);box-shadow:none">Use WebGL instead</button></div>`;
       el.querySelector("p").textContent = detail;
@@ -305,9 +324,10 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (state !== "menu") return;
     const us = W.bench(120);
     benchTxt = `<br>sim benchmark: <b>${us.toFixed(1)} µs</b> per step`;
-    if (us > 400) {
+    if (us > 150) {
       const n = $("slowNote"); n.hidden = false;
-      n.innerHTML = `The simulation is running very slowly here (${Math.round(us)} µs per step; typical is 10–40). Check for battery saver / efficiency mode, a browser setting that disables its JavaScript/WebAssembly compilers, or a busy CPU.`;
+      n.innerHTML = optimizerOff() ? securityHint() :
+        `The simulation is running slowly here (${Math.round(us)} µs per step; typical is 10–40). Check for battery saver / efficiency mode or a busy CPU.`;
     }
   }, 2500);
   W.snapshot(); updateHud();
