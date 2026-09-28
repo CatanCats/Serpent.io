@@ -52,7 +52,7 @@ function createGL(canvas, E) {
   out vec4 o;
   void main(){
     vec2 tf=texture(uTile, vUV).rg;
-    vec3 col=mix(mix(vec3(.052,.066,.108),vec3(.07,.088,.14),tf.x),vec3(.028,.035,.06),tf.y*.85);
+    mediump vec3 col=mix(mix(vec3(.052,.066,.108),vec3(.07,.088,.14),tf.x),vec3(.028,.035,.06),tf.y*.85);
     float WRr=uResWR.z, r2=dot(vW,vW), lo=WRr-6.*vRW, cz=WRr*.37;
     if(r2>lo*lo){ // near the world's edge (squared distances: no sqrt elsewhere)
       float r=sqrt(r2), rw=vRW;
@@ -96,6 +96,7 @@ function createGL(canvas, E) {
     float pulse=.75+.25*sin(ph);
     float born=smoothstep(0.,10.,float(vI.w));   // fade in over ~0.6 s: no popping
     float rr=r*(.4+.6*born);
+    if(d>=max(rr*1.9,rr*.7+aa)) discard; // corner of the quad, outside the glow: nothing to blend
     float core=(1.-smoothstep(rr*.7-aa,rr*.7+aa,d))*born;
     float t=min(d/(rr*1.9),1.), g=1.-t*t;
     float glow = r/uPxTime.x < 1.6 ? 0. : g*g*pulse*born; // fuller halo, still 0 at the quad edge

@@ -252,7 +252,7 @@ function createGL(canvas, E) {
   out vec4 o;
   void main(){
     vec2 tf=texture(uTile, vUV).rg;
-    vec3 col=mix(mix(vec3(.052,.066,.108),vec3(.07,.088,.14),tf.x),vec3(.028,.035,.06),tf.y*.85);
+    mediump vec3 col=mix(mix(vec3(.052,.066,.108),vec3(.07,.088,.14),tf.x),vec3(.028,.035,.06),tf.y*.85);
     float WRr=uResWR.z, r2=dot(vW,vW), lo=WRr-6.*vRW, cz=WRr*.37;
     if(r2>lo*lo){ // near the world's edge (squared distances: no sqrt elsewhere)
       float r=sqrt(r2), rw=vRW;
@@ -296,6 +296,7 @@ function createGL(canvas, E) {
     float pulse=.75+.25*sin(ph);
     float born=smoothstep(0.,10.,float(vI.w));   // fade in over ~0.6 s: no popping
     float rr=r*(.4+.6*born);
+    if(d>=max(rr*1.9,rr*.7+aa)) discard; // corner of the quad, outside the glow: nothing to blend
     float core=(1.-smoothstep(rr*.7-aa,rr*.7+aa,d))*born;
     float t=min(d/(rr*1.9),1.), g=1.-t*t;
     float glow = r/uPxTime.x < 1.6 ? 0. : g*g*pulse*born; // fuller halo, still 0 at the quad edge
@@ -645,17 +646,19 @@ struct BgO { @builtin(position) pos: vec4f, @location(0) w: vec2f, @location(1) 
 }
 @fragment fn fsBg(i: BgO) -> @location(0) vec4f {
   let tf = textureSample(tileTex, linRep, i.uv).rg;
-  var col = mix(mix(vec3f(.052, .066, .108), vec3f(.07, .088, .14), tf.x), vec3f(.028, .035, .06), tf.y * .85);
+  // colour maths in half precision where supported (Intel runs it at twice the rate);
+  // positions stay f32 (world coordinates are too large for f16)
+  var col = mix(mix(hv3(.052, .066, .108), hv3(.07, .088, .14), hf(tf.x)), hv3(.028, .035, .06), hf(tf.y * .85));
   let WR = F.resWR.z; let r2 = dot(i.w, i.w); let lo = WR - 6. * i.rw; let cz = WR * .37;
   if (r2 > lo * lo) { // near the world's edge (squared distances: no sqrt elsewhere)
     let r = sqrt(r2); let rw = i.rw;
-    if (r > WR - 2.) { col = mix(col, col * vec3f(.55, .22, .28) + vec3f(.05, 0., .01), smoothstep(WR - 2., WR + 2., r)); }
-    if (abs(r - WR) < rw * 6.) { col += vec3f(1., .25, .35) * exp(-abs(r - WR) / rw) * (.7 + .3 * sin(F.pxTime.y * 3.)) * .55; }
+    if (r > WR - 2.) { col = mix(col, col * hv3(.55, .22, .28) + hv3(.05, 0., .01), hf(smoothstep(WR - 2., WR + 2., r))); }
+    if (abs(r - WR) < rw * 6.) { col += hv3(1., .25, .35) * hf(exp(-abs(r - WR) / rw) * (.7 + .3 * sin(F.pxTime.y * 3.)) * .55); }
   } else if (r2 < cz * cz) { // faint glow over the crowded centre zone
-    col += vec3f(.9, .3, .4) * .035 * (1. - smoothstep(WR * .3, cz, sqrt(r2)));
+    col += hv3(.9, .3, .4) * hf(.035 * (1. - smoothstep(WR * .3, cz, sqrt(r2))));
   }
-  col *= 1. - .35 * dot(i.v, i.v);
-  return vec4f(col, 1.);
+  col *= hf(1. - .35 * dot(i.v, i.v));
+  return vec4f(vec3f(col), 1.);
 }
 fn hexD(p0: vec2f) -> f32 { let p = abs(p0); return max(dot(p, vec2f(.8660254, .5)), p.y); }
 @fragment fn fsTile(@builtin(position) fc: vec4f) -> @location(0) vec4f {
@@ -693,6 +696,7 @@ struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
   let pulse = .75 + .25 * sin(F.pxTime.y * 4. + f32(i.info.z) * .0245);
   let born = smoothstep(0., 10., f32(i.info.w));
   let rr = r * (.4 + .6 * born);
+  if (d >= max(rr * 1.9, rr * .7 + aa)) { discard; } // corner of the quad, outside the glow: nothing to blend
   let core = hf((1. - smoothstep(rr * .7 - aa, rr * .7 + aa, d)) * born);
   var glow = hf(0.);
   if (r / F.pxTime.x >= 1.6) { let t = min(d / (rr * 1.9), 1.); let g = 1. - t * t; glow = hf(g * g * pulse * born); } // fuller halo, same quad
