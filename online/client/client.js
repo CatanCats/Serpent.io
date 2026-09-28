@@ -63,7 +63,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         <button class="play" data-a="gl" style="margin-top:10px;background:rgba(255,255,255,.08);color:var(--text);box-shadow:none">Use WebGL instead</button></div>`;
       el.querySelector("p").textContent = detail;
       el.querySelector('[data-a="retry"]').onclick = () => { location.href = location.pathname; };
-      el.querySelector('[data-a="gl"]').onclick = () => { el.remove(); done(); };
+      el.querySelector('[data-a="gl"]').onclick = () => { store.set("serpent.renderer", "webgl"); el.remove(); done(); }; // remembered; the menu switch changes it back
       document.body.appendChild(el);
     });
   }
