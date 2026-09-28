@@ -117,6 +117,9 @@ static float frT[256]; /* pellet radius by value byte (the food shader has the s
 static i32 gHead[GC], gNext[NODES], gPrev[NODES], gCell[NODES], gOm[NODES];
 /* food cells: exact doubly linked lists (fCell = the cell a pellet is in, -1 = none) */
 static short fHead[GC], fNext[MAXF], fPrev[MAXF], fCell[MAXF];
+/* one bit per cell: has food. Lets the renderer jump straight to non-empty cells. */
+#define FW (GN / 32) /* 32-bit words per grid row (GN = 160: 5) */
+static u32 fBits[GN * FW];
 
 /* Level of detail: only snakes near the focus (the camera) get collisions,
    eating and real AI. Everything else runs a cheap statistical model. */
@@ -249,11 +252,12 @@ static void foodLink(i32 i, i32 c) {
   fCell[i] = (short)c; fPrev[i] = -1; fNext[i] = (short)h;
   if (h >= 0) fPrev[h] = (short)i;
   fHead[c] = (short)i;
+  fBits[c >> 5] |= 1u << (c & 31); /* rows are exactly FW words, so cell c's bit is bit c */
 }
 static void foodUnlink(i32 i) {
   i32 c = fCell[i], p = fPrev[i], n = fNext[i];
   if (c < 0) return;
-  if (p >= 0) fNext[p] = (short)n; else fHead[c] = (short)n;
+  if (p >= 0) fNext[p] = (short)n; else { fHead[c] = (short)n; if (n < 0) fBits[c >> 5] &= ~(1u << (c & 31)); }
   if (n >= 0) fPrev[n] = (short)p;
   fCell[i] = -1;
 }
@@ -740,7 +744,7 @@ EXPORT("init") void init(u32 seed, i32 bots) {
   NS = bots + 1 > MAXS ? MAXS : bots + 1;
   nfree = 0; foodHigh = 0; tick = 0; playerKiller = -1;
   for (i32 i = 0; i < MAXF; i++) { F[i].v = 0; fCell[i] = -1; }
-  __builtin_memset(fHead, 0xff, sizeof fHead); /* -1: every cell empty */
+  __builtin_memset(fHead, 0xff, sizeof fHead); __builtin_memset(fBits, 0, sizeof fBits); /* every cell empty */
   for (i32 s = 0; s < MAXS; s++) S[s].alive = 0;
   rebuild();
   for (i32 i = 0; i < 256; i++) frT[i] = minf(3.5f + sqrtf_((float)i / 16.f) * 2.6f, 15.f);
@@ -810,9 +814,19 @@ EXPORT("snapshot") void snapshot(void) {
    ever hold live pellets. */
 static i32 foodInView(float cx, float cy, float hw, float hh) {
   i32 n = 0, x0 = cellX(cx - hw - 60.f), x1 = cellX(cx + hw + 60.f), y0 = cellX(cy - hh - 60.f), y1 = cellX(cy + hh + 60.f);
-  for (i32 gy = y0; gy <= y1; gy++)
-    for (i32 c = gy * GN + x0, e = gy * GN + x1; c <= e; c++)
-      for (i32 i = fHead[c]; i >= 0 && n < MAXF; i = fNext[i]) VIS[n++] = F[i];
+  for (i32 gy = y0; gy <= y1; gy++) {
+    i32 a = gy * GN + x0, b = gy * GN + x1; /* cell range of this row: visit only cells with food */
+    for (i32 w = a >> 5; w <= b >> 5; w++) {
+      u32 bits = fBits[w];
+      if (w == a >> 5) bits &= ~0u << (a & 31);
+      if (w == b >> 5 && (b & 31) != 31) bits &= (1u << ((b & 31) + 1)) - 1;
+      while (bits) {
+        i32 c = (w << 5) + __builtin_ctz(bits);
+        bits &= bits - 1;
+        for (i32 i = fHead[c]; i >= 0 && n < MAXF; i = fNext[i]) VIS[n++] = F[i];
+      }
+    }
+  }
   return n;
 }
 
@@ -834,10 +848,10 @@ static i32 renderPrep(float cx, float cy, float hw, float hh, float px) {
     i32 any = hx > x0 && hx < x1 && hy > y0 && hy < y1;
     float reach = (float)n * k->spacing;
     if (!any && (hx < x0 - reach || hx > x1 + reach || hy < y0 - reach || hy > y1 + reach)) continue;
-    if (!any) { /* every 4th point, box grown by 3 spacings: points in between can't be further out */
-      float g = k->spacing * 3.f;
+    if (!any) { /* every 16th point, box grown by 15 spacings: points in between can't be further out */
+      float g = k->spacing * 15.f;
       i32 qx0 = (i32)((x0 - g) * 4.f), qx1 = (i32)((x1 + g) * 4.f), qy0 = (i32)((y0 - g) * 4.f), qy1 = (i32)((y1 + g) * 4.f);
-      for (i32 i = 0; i < n && !any; i += 4) {
+      for (i32 i = 0; i < n && !any; i += 16) {
         const short *t = tr[s][(k->pc - 1u - (u32)i) & RMASK];
         any = t[0] > qx0 && t[0] < qx1 && t[1] > qy0 && t[1] < qy1;
       }

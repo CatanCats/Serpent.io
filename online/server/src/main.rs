@@ -28,6 +28,9 @@ use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
+#[cfg(target_endian = "big")]
+compile_error!("the trail is sent as raw little-endian bytes");
+
 /* ---------------- the simulation (C, native) ---------------- */
 
 #[repr(C)]
@@ -73,9 +76,9 @@ impl Sim {
         }
     }
     #[inline] fn p(&self, s: usize) -> Pub { unsafe { *self.pubs.add(s) } }
-    #[inline] fn pt(&self, s: usize, pc: u32) -> (i16, i16) {
-        let i = (s * self.ring + (pc as usize & (self.ring - 1))) * 2;
-        unsafe { (*self.trail.add(i), *self.trail.add(i + 1)) }
+    /// `count` trail points of snake s from ring slot a, as raw bytes (4 per point).
+    #[inline] fn trail_bytes(&self, s: usize, a: usize, count: usize) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.trail.add((s * self.ring + a) * 2) as *const u8, count * 4) }
     }
     #[inline] fn food(&self, i: usize) -> u64 { unsafe { *self.food.add(i) } }
 }
@@ -138,7 +141,7 @@ fn clean_name(b: &[u8]) -> String {
 
 struct Game {
     sim: Sim, clients: HashMap<u64, Client>, names: Vec<String>,
-    spectate: usize, spec_t: f32, stats: Arc<Stats>,
+    spectate: usize, spec_t: f32, stats: Arc<Stats>, snakes_out: Vec<SnakeOut>,
     food: FoodIndex,
 }
 
@@ -167,7 +170,7 @@ impl Game {
                 self.clients.insert(id, c);
             }
             Ev::Msg { id, data } => self.on_msg(id, &data),
-            Ev::Close { id } => { if let Some(mut c) = self.clients.remove(&id) { self.leave(&mut c); } }
+            Ev::Close { id } => { if let Some(mut c) = self.clients.remove(&id) { self.food.resubscribe(id, c.rect, Rect::EMPTY); self.leave(&mut c); } }
         }
     }
 
@@ -231,7 +234,28 @@ impl Game {
 
 /// One client's snapshot: nearby snakes (only trail points it lacks) and its food
 /// changes. Reads the shared state only.
-fn snapshot(sim: &Sim, food: &FoodIndex, spectate: usize, c: &mut Client, tick: u32) {
+/// Per snake, what every client's snapshot shares this update: built once, then
+/// copied into each snapshot (only the "full" flag and point count differ).
+struct SnakeOut { alive: bool, hx: f32, hy: f32, reach: f32, pc: u32, n: u32, hdr: [u8; 22] }
+fn shared_snakes(sim: &Sim, out: &mut Vec<SnakeOut>) {
+    out.clear();
+    for s in 0..sim.maxs {
+        let p = sim.p(s);
+        let mut h = [0u8; 22];
+        if p.alive != 0 {
+            let mut o = Out(Vec::with_capacity(22));
+            o.u8(s as u8); o.u8(p.boost as u8 | if p.human != 0 { 2 } else { 0 }); o.u8(p.skin as u8); o.u8(p.tier as u8);
+            // head in Q2 fixed point like the trail, heading as u16: 22 bytes per snake
+            o.i16(q2(p.hx)); o.i16(q2(p.hy)); o.u16(((p.ang + std::f32::consts::PI) / std::f32::consts::TAU * 65535.) as u16); o.f32(p.mass);
+            o.u16(p.n as u16); o.u16(p.pc as u16); o.u16(p.kills.min(65535) as u16); o.u16(0);
+            h.copy_from_slice(&o.0);
+        }
+        out.push(SnakeOut { alive: p.alive != 0, hx: p.hx, hy: p.hy, reach: p.n as f32 * p.spacing + p.r * 2. + 50., pc: p.pc, n: p.n, hdr: h });
+    }
+}
+
+/// Returns the client's previous and new food rectangle when it changed (for the subscriber lists).
+fn snapshot(sim: &Sim, food: &FoodIndex, snakes: &[SnakeOut], spectate: usize, c: &mut Client, tick: u32) -> Option<(Rect, Rect)> {
         let me = c.slot;
         let alive = me >= 0 && sim.p(me as usize).alive != 0;
         let (cx, cy, cam_h) = if alive {
@@ -247,15 +271,13 @@ fn snapshot(sim: &Sim, food: &FoodIndex, spectate: usize, c: &mut Client, tick: 
             c.reset = false;
             c.sent_pc.iter_mut().for_each(|v| *v = 0);
         }
-        let mut o = Out(Vec::with_capacity(16 * 1024));
+        let mut o = Out(Vec::with_capacity(4096));
         o.u8(2); o.u32(tick); o.u8(if me >= 0 { me as u8 } else { 255 }); o.u8(spectate as u8); o.u8(reset as u8);
         let n_at = o.0.len(); o.u16(0);
         let mut n = 0u16;
-        for s in 0..sim.maxs {
-            let p = sim.p(s);
-            if p.alive == 0 { c.sent_pc[s] = 0; continue; }
-            let reach = p.n as f32 * p.spacing + p.r * 2. + 50.;
-            if s as i32 != me && ((p.hx - cx).abs() > hw + reach || (p.hy - cy).abs() > hh + reach) { c.sent_pc[s] = 0; continue; }
+        for (s, p) in snakes.iter().enumerate() {
+            if !p.alive { c.sent_pc[s] = 0; continue; }
+            if s as i32 != me && ((p.hx - cx).abs() > hw + p.reach || (p.hy - cy).abs() > hh + p.reach) { c.sent_pc[s] = 0; continue; }
             let prev = c.sent_pc[s];
             let (mut full, mut count) = (0u8, p.pc.wrapping_sub(prev));
             // full resend if it has nothing, fell behind, or the body grew past the oldest point it has
@@ -263,12 +285,15 @@ fn snapshot(sim: &Sim, food: &FoodIndex, spectate: usize, c: &mut Client, tick: 
                 full = 4; count = (p.n + 34).min(sim.ring as u32); // + margin: the client draws from ~70 ms back
                 c.sent_from[s] = p.pc.wrapping_sub(count);
             }
-            o.u8(s as u8); o.u8(p.boost as u8 | if p.human != 0 { 2 } else { 0 } | full); o.u8(p.skin as u8); o.u8(p.tier as u8);
-            // head in Q2 fixed point like the trail, heading as u16: 22 bytes per snake
-            o.i16(q2(p.hx)); o.i16(q2(p.hy)); o.u16(((p.ang + std::f32::consts::PI) / std::f32::consts::TAU * 65535.) as u16); o.f32(p.mass);
-            o.u16(p.n as u16); o.u16(p.pc as u16); o.u16(p.kills.min(65535) as u16); o.u16(count as u16);
-            let mut q = p.pc.wrapping_sub(count);
-            while q != p.pc { let (x, y) = sim.pt(s, q); o.i16(x); o.i16(y); q = q.wrapping_add(1); }
+            let at = o.0.len();
+            o.0.extend_from_slice(&p.hdr);
+            o.0[at + 1] |= full; o.0[at + 20..at + 22].copy_from_slice(&(count as u16).to_le_bytes());
+            // the points: the trail ring already holds them as i16 x, y little-endian,
+            // exactly the wire format, so they are copied as raw bytes (1-2 runs)
+            let a = (p.pc.wrapping_sub(count) as usize) & (sim.ring - 1);
+            let first = (count as usize).min(sim.ring - a);
+            o.0.extend_from_slice(sim.trail_bytes(s, a, first));
+            if first < count as usize { o.0.extend_from_slice(sim.trail_bytes(s, 0, count as usize - first)); }
             c.sent_pc[s] = p.pc; n += 1;
         }
         o.patch16(n_at, n);
@@ -278,12 +303,13 @@ fn snapshot(sim: &Sim, food: &FoodIndex, spectate: usize, c: &mut Client, tick: 
         let m_at = o.0.len(); o.u16(0);
         let sx = |x: f32| FoodIndex::sec_x(x, sim.wr);
         let new = Rect { x0: sx(cx - hw), x1: sx(cx + hw), y0: sx(cy - hh), y1: sx(cy + hh) }; // hw, hh include a 250-unit margin
-        let old = if reset { Rect::EMPTY } else { c.rect };
+        let prev = c.rect;
+        let old = if reset { Rect::EMPTY } else { prev };
         if reset { c.pend.clear(); c.npend = 0; }
         let mut m = c.npend;
         o.0.extend_from_slice(&c.pend);
         c.pend.clear(); c.npend = 0;
-        for sy in new.y0.min(old.y0)..=new.y1.max(old.y1) {
+        if new != old { for sy in new.y0.min(old.y0)..=new.y1.max(old.y1) {
             for sxx in new.x0.min(old.x0)..=new.x1.max(old.x1) {
                 let (in_new, in_old) = (new.has(sxx, sy), old.has(sxx, sy));
                 if in_new == in_old { continue; }
@@ -291,11 +317,12 @@ fn snapshot(sim: &Sim, food: &FoodIndex, spectate: usize, c: &mut Client, tick: 
                     o.u16(i); o.u64(if in_new { sim.food(i as usize) } else { 0 }); m += 1;
                 }
             }
-        }
+        } }
         c.rect = new;
         if m > 65535 { c.reset = true; m = 65535; o.0.truncate(m_at + 2 + 65535 * 10); } // absurd burst: resync next time
         o.patch16(m_at, m as u16);
         Game::send(c, o.0);
+        if prev != new { Some((prev, new)) } else { None }
 }
 
 impl Game {
@@ -324,10 +351,13 @@ impl Game {
         if self.spec_t > 8. || self.sim.p(self.spectate).alive == 0 { self.spec_t = 0.; self.pick_spectate(); }
         if tick % 2 == 0 {
             self.food_flush();
-            let (sim, food, sp) = (&self.sim, &self.food, self.spectate);
+            shared_snakes(&self.sim, &mut self.snakes_out);
+            let (sim, food, sp, sn) = (&self.sim, &self.food, self.spectate, &self.snakes_out);
             // Sequential on purpose: spreading this over threads was measured slower
             // (~0.2 ms of work is less than the cost of waking them).
-            for c in self.clients.values_mut() { snapshot(sim, food, sp, c, tick); }
+            let mut moved = Vec::new();
+            for (id, c) in self.clients.iter_mut() { if let Some((a, b)) = snapshot(sim, food, sn, sp, c, tick) { moved.push((*id, a, b)); } }
+            for (id, a, b) in moved { self.food.resubscribe(id, a, b); }
         }
         if tick % 15 == 0 { self.board_and_mini(); }
         let t2 = Instant::now();
@@ -374,7 +404,7 @@ const SEC: f32 = 200.;
 const NSEC: i32 = 80; // 16000 / 200: sectors per side
 const NONE: u16 = u16::MAX;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct Rect { x0: i32, x1: i32, y0: i32, y1: i32 }
 impl Rect {
     const EMPTY: Rect = Rect { x0: NSEC, x1: -1, y0: NSEC, y1: -1 };
@@ -385,17 +415,30 @@ struct FoodIndex {
     sec_of: Vec<u16>, pos: Vec<u32>, sectors: Vec<Vec<u16>>,
     dirty: Vec<u16>, is_dirty: Vec<bool>, // slots changed since the last snapshot (each once)
     sent_sec: Vec<u16>,                   // sector each slot was in at the last snapshot
+    subs: Vec<Vec<u64>>,                  // per sector: the clients whose view covers it
 }
 impl FoodIndex {
     fn new(maxf: usize) -> Self {
         FoodIndex { sec_of: vec![NONE; maxf], pos: vec![0; maxf], sectors: vec![Vec::new(); (NSEC * NSEC) as usize],
-                    dirty: Vec::new(), is_dirty: vec![false; maxf], sent_sec: vec![NONE; maxf] }
+                    dirty: Vec::new(), is_dirty: vec![false; maxf], sent_sec: vec![NONE; maxf],
+                    subs: vec![Vec::new(); (NSEC * NSEC) as usize] }
     }
     #[inline] fn sec_x(x: f32, wr: f32) -> i32 { (((x + wr) / SEC) as i32).clamp(0, NSEC - 1) }
     #[inline] fn sector(w: u64, wr: f32) -> u16 {
         if (w >> 32) as u8 == 0 { return NONE; } // value 0: empty slot
         let (x, y) = (w as u16 as i16 as f32 * 0.25, (w >> 16) as u16 as i16 as f32 * 0.25);
         (Self::sec_x(y, wr) * NSEC + Self::sec_x(x, wr)) as u16
+    }
+    /// Client `id` now covers `new` instead of `old`: update the sector subscriber lists.
+    fn resubscribe(&mut self, id: u64, old: Rect, new: Rect) {
+        for y in new.y0.min(old.y0)..=new.y1.max(old.y1) {
+            for x in new.x0.min(old.x0)..=new.x1.max(old.x1) {
+                let (a, b) = (old.has(x, y), new.has(x, y));
+                if a == b { continue; }
+                let list = &mut self.subs[(y * NSEC + x) as usize];
+                if b { list.push(id); } else if let Some(k) = list.iter().position(|&v| v == id) { list.swap_remove(k); }
+            }
+        }
     }
     /// Moves slot i to sector `new`; returns the sector it was in.
     fn place(&mut self, i: usize, new: u16) -> u16 {
@@ -442,14 +485,14 @@ impl Game {
             let (new, old) = (f.sec_of[iu], f.sent_sec[iu]);
             f.sent_sec[iu] = new;
             if new == NONE && old == NONE { continue; }
+            // only the clients subscribed to its sectors: usually a few, not everyone
             let w = self.sim.food(iu);
-            let (nx, ny, ox, oy) = ((new as i32) % NSEC, (new as i32) / NSEC, (old as i32) % NSEC, (old as i32) / NSEC);
-            for c in self.clients.values_mut() {
-                let in_new = new != NONE && c.rect.has(nx, ny);
-                if in_new || (old != NONE && c.rect.has(ox, oy)) {
-                    c.pend.extend_from_slice(&i.to_le_bytes());
-                    c.pend.extend_from_slice(&(if in_new { w } else { 0 }).to_le_bytes());
-                    c.npend += 1;
+            let (nx, ny) = ((new as i32) % NSEC, (new as i32) / NSEC);
+            let push = |c: &mut Client, v: u64| { c.pend.extend_from_slice(&i.to_le_bytes()); c.pend.extend_from_slice(&v.to_le_bytes()); c.npend += 1; };
+            if new != NONE { for id in &f.subs[new as usize] { if let Some(c) = self.clients.get_mut(id) { push(c, w); } } }
+            if old != NONE && old != new {
+                for id in &f.subs[old as usize] {
+                    if let Some(c) = self.clients.get_mut(id) { if new == NONE || !c.rect.has(nx, ny) { push(c, 0); } } // left its view
                 }
             }
         }
@@ -461,7 +504,7 @@ fn game_thread(rx: smpsc::Receiver<Ev>, stats: Arc<Stats>, bots: i32) {
     let seed = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u32) | 1;
     let sim = Sim::new(seed, bots);
     let (maxs, maxf) = (sim.maxs, sim.maxf);
-    let mut g = Game { sim, clients: HashMap::new(), names: vec![String::new(); maxs], spectate: 1, spec_t: 99., stats: stats.clone(), food: FoodIndex::new(maxf) };
+    let mut g = Game { sim, clients: HashMap::new(), names: vec![String::new(); maxs], spectate: 1, spec_t: 99., stats: stats.clone(), food: FoodIndex::new(maxf), snakes_out: Vec::new() };
     let dt = Duration::from_nanos(1_000_000_000 / 60);
     let mut next = Instant::now();
     let mut log_t = Instant::now();
@@ -502,7 +545,9 @@ async fn ws_route(ws: WebSocketUpgrade, ConnectInfo(addr): ConnectInfo<SocketAdd
         if *n >= app.max_per_ip { return (StatusCode::TOO_MANY_REQUESTS, "too many connections").into_response(); }
         *n += 1;
     }
-    ws.max_message_size(256).on_upgrade(move |sock| connection(sock, app, ip))
+    // small buffers: messages are tiny, and the library zero-fills its read buffer
+    // on every read (a 128 KB default cost ~70% of the whole server's CPU)
+    ws.max_message_size(256).read_buffer_size(512).write_buffer_size(0).on_upgrade(move |sock| connection(sock, app, ip))
 }
 
 async fn connection(sock: WebSocket, app: Arc<App>, ip: IpAddr) {

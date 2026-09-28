@@ -98,6 +98,7 @@ static float frT[256]; /* pellet radius by value byte (the food shader has the s
 static i32 gHead[GC], gNext[NODES], gPrev[NODES], gCell[NODES], gOm[NODES];
 /* food cells: exact doubly linked lists (fCell = the cell a pellet is in, -1 = none) */
 static i32 fHead[GC], fNext[MAXF], fPrev[MAXF], fCell[MAXF];
+static unsigned short fCnt[GC]; /* pellets per cell: whole cells are counted without walking them */
 
 /* Level of detail: one focus per human player (its view). Snakes near any focus
    get collisions, eating and real AI; everything else runs the statistical model. */
@@ -111,11 +112,21 @@ static i32 killedBy[MAXS];       /* who killed each human (-1: the world edge) *
 static float aspect[MAXS];       /* each player's screen width/height: sets its view */
 static i32 NB = 60;              /* bots live in slots 1..NB */
 static i32 isBot(i32 s) { return s >= 1 && s <= NB; }
+static i32 inFocus(i32 f, float x, float y, float extra) {
+  float dx = x - focX[f], dy = y - focY[f], R = focR[f] + extra;
+  return dx * dx + dy * dy < R * R;
+}
 static i32 nearFocus(float x, float y, float extra) {
-  for (i32 f = 0; f < nfoc; f++) {
-    float dx = x - focX[f], dy = y - focY[f], R = focR[f] + extra;
-    if (dx * dx + dy * dy < R * R) return 1;
-  }
+  for (i32 f = 0; f < nfoc; f++) if (inFocus(f, x, y, extra)) return 1;
+  return 0;
+}
+/* Snake s is near a player? It almost always stays near the same one, so that one
+   is tried first (one check) before the whole list. The hint never changes the answer. */
+static i32 lastFoc[MAXS];
+static i32 snakeNear(i32 s, float x, float y, float extra) {
+  i32 h = lastFoc[s];
+  if (h < nfoc && inFocus(h, x, y, extra)) return 1;
+  for (i32 f = 0; f < nfoc; f++) if (inFocus(f, x, y, extra)) { lastFoc[s] = f; return 1; }
   return 0;
 }
 
@@ -219,6 +230,7 @@ static void foodLink(i32 i, i32 c) {
   fCell[i] = c; fPrev[i] = -1; fNext[i] = h;
   if (h >= 0) fPrev[h] = i;
   fHead[c] = i;
+  fCnt[c]++;
 }
 static void foodUnlink(i32 i) {
   i32 c = fCell[i], p = fPrev[i], n = fNext[i];
@@ -226,19 +238,34 @@ static void foodUnlink(i32 i) {
   if (p >= 0) fNext[p] = n; else fHead[c] = n;
   if (n >= 0) fPrev[n] = p;
   fCell[i] = -1;
+  fCnt[c]--;
 }
 
 /* (The body grid never needs rebuilding here: its window is the whole world.) */
 /* Count the food in each player's disk by walking only the grid cells it covers
    (cost: that disk's cells and pellets, not all food times all players). */
 static void countFood(i32 f) {
-  float R = foodR(f), R2 = R * R;
+  float R = foodR(f), R2 = R * R, fx = focX[f], fy = focY[f];
   i32 n = 0;
-  FOR_CELLS(focX[f], focY[f], R, c)
-    for (i32 i = fHead[c]; i >= 0; i = fNext[i]) {
-      float dx = UQ(F[i].x) - focX[f], dy = UQ(F[i].y) - focY[f];
-      n += dx * dx + dy * dy < R2;
+  i32 gy0 = cellX(fy - R), gy1 = cellX(fy + R);
+  for (i32 gy = gy0; gy <= gy1; gy++) {
+    /* this row of cells: the x-range that touches the disk and the x-range of cells wholly
+       inside it (one sqrt each); inside cells add their count, edge cells check each pellet */
+    float y0 = (float)gy * CELL - WR - fy, y1 = y0 + CELL;
+    float ny = y0 > 0 ? y0 : y1 < 0 ? -y1 : 0, fy2 = maxf(y0 * y0, y1 * y1);
+    if (ny * ny >= R2) continue;
+    float tx = sqrtf_(R2 - ny * ny), ix = fy2 < R2 ? sqrtf_(R2 - fy2) : -1.f;
+    i32 ta = cellX(fx - tx), tb = cellX(fx + tx);
+    i32 ia = ix > 0 ? (i32)((fx - ix + WR) / CELL) + 1 : 1, ib = ix > 0 ? (i32)((fx + ix + WR) / CELL) - 1 : 0; /* cells wholly within +-ix */
+    for (i32 gx = ta, c = gy * GN + ta; gx <= tb; gx++, c++) {
+      if (!fCnt[c]) continue;
+      if (gx >= ia && gx <= ib) { n += fCnt[c]; continue; }
+      for (i32 i = fHead[c]; i >= 0; i = fNext[i]) {
+        float dx = UQ(F[i].x) - fx, dy = UQ(F[i].y) - fy;
+        n += dx * dx + dy * dy < R2;
+      }
     }
+  }
   foodNear[focS[f]] = n;
 }
 /* Every REBUILD steps: count, drop pellets far from every player (their cell is
@@ -686,7 +713,10 @@ static void step(float dt) {
   for (i32 s = 0; s < NS; s++) {
     Snake *k = &S[s];
     if (!k->alive) continue;
-    k->near = human[s] || nearFocus(k->hx, k->hy, k->r * 2.f);
+    /* far bots move every 4th step; they recheck on those steps too (the near
+       zone already reaches 450 units past each player's screen) */
+    if (human[s]) k->near = 1;
+    else if (k->near || ((tick + (u32)s) & 3u) == 0) k->near = snakeNear(s, k->hx, k->hy, k->r * 2.f);
     if (k->near) moveSnake(s, dt);
     else if (((tick + (u32)s) & 3u) == 0) moveSnake(s, dt * 4.f); /* far away: quarter rate, same speed */
   }
@@ -725,7 +755,7 @@ void sim_init(u32 seed, i32 bots) {
   nfree = 0; foodHigh = 0; tick = 0; nfoc = 0;
   for (i32 i = 0; i < MAXF; i++) { F[i].v = 0; fCell[i] = -1; }
   __builtin_memset(gHead, 0xff, sizeof gHead); __builtin_memset(gCell, 0xff, sizeof gCell); /* empty body grid */
-  __builtin_memset(fHead, 0xff, sizeof fHead); /* -1: every cell empty */
+  __builtin_memset(fHead, 0xff, sizeof fHead); __builtin_memset(fCnt, 0, sizeof fCnt); /* every cell empty */
   for (i32 s = 0; s < MAXS; s++) { S[s].alive = 0; human[s] = 0; killedBy[s] = -1; aspect[s] = 1.78f; }
   rebuild();
   for (i32 i = 0; i < 256; i++) frT[i] = minf(3.5f + sqrtf_((float)i / 16.f) * 2.6f, 15.f);

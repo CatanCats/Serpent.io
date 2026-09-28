@@ -34,13 +34,17 @@ online/
 
 Measured on a 4-core 2.1 GHz Xeon, 60 bots (each step has a 16.7 ms budget):
 
-| players | simulation | networking | whole process | RAM | download per player |
+| players | simulation | networking (game thread) | whole process | RAM | download per player |
 | --- | --- | --- | --- | --- | --- |
-| 8  | 0.04 ms/step | 0.03 ms/step | 4% of one core | 7 MB | ~12 KB/s |
-| 50 | 0.10 ms/step | 0.16 ms/step | 11% of one core | 14 MB | ~12 KB/s |
-| 66 | 0.13 ms/step | 0.27 ms/step | 13% of one core | 17 MB | ~12 KB/s |
+| 8  | 0.05 ms/step | 0.03 ms/step | 4% of one core | 7 MB | ~12 KB/s |
+| 50 | 0.11 ms/step | 0.10 ms/step | 8% of one core | 9 MB | ~12 KB/s |
+| 66 | 0.12 ms/step | 0.16 ms/step | 8% of one core | 10 MB | ~12 KB/s |
 
-(Before the food events: 0.9–1.4 ms/step of networking at 50–66 players.)
+Notable wins, each measured: food as events instead of comparisons (networking
+1.2-1.4 -> 0.27 ms/step), per-sector subscriber lists, shared snake headers with
+trail points copied as raw bytes, grid-based food counting, and small WebSocket
+read buffers (the library zero-filled a 128 KB buffer on every read: ~70% of all
+server CPU). Building snapshots on several threads was measured slower and is not used.
 
 ## Run it
 ```sh
