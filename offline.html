@@ -273,7 +273,7 @@ function createGL(canvas, E) {
     vec2 c = (c0+l)/uCamHalf.zw;
     gl_Position = vec4(c.x,-c.y,0,1);
     uint age=(uint(uPxTime.w)-(aB.z|(aB.w<<8)))&0xffffu;
-    vL=l; vR=r; vI=uvec4(0u,aB.y,((aB.z|(aB.w<<8))*37u+uint(aP.x&255))&255u,min(age,255u)); // pulse phase: from the pellet itself, stable whatever its place in the list vC=uPal[aB.y%12u].rgb;
+    vL=l; vR=r; vI=uvec4(0u,aB.y,((aB.z|(aB.w<<8))*37u+uint(aP.x&255))&255u,min(age,255u)); vC=uPal[aB.y%12u].rgb; // pulse phase: from the pellet itself
   }`;
   const FS = `#version 300 es
   precision mediump float;
