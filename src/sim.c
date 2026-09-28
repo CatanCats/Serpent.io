@@ -17,8 +17,11 @@
  *  - Spatial hash is incremental (nodes linked as they appear, stale ones
  *    skipped) and compacted every REBUILD steps; queries visit only the cells
  *    their reach overlaps.
- *  - Food is stored in the GPU's own vertex layout and drawn in full; the
- *    vertex shader culls it, so food costs no CPU work per frame.
+ *  - Food cells are exact: a pellet is linked into its grid cell when it spawns
+ *    and unlinked the moment it is eaten or moves out, so eating, bots and the
+ *    renderer walk only pellets that really are there, with no "still here?"
+ *    tests. Each frame the pellets of the cells in view are copied (8 bytes
+ *    each, already in the GPU's vertex layout) into the draw list.
  */
 typedef unsigned int u32;
 typedef int i32;
@@ -96,18 +99,19 @@ static Snake S[MAXS];
 static short tr[MAXS][RING][2];
 static i32 NS = 40;
 
-/* Food, 8 bytes per pellet, in the exact layout the GPU draws from: the whole
-   array is uploaded as-is and culled by the vertex shader, so the CPU does no
-   per-frame food work at all. v = value in 1/16ths (0 = empty slot),
-   born = tick/4 at spawn (fade-in); the pulse phase comes from the slot index. */
+/* Food, 8 bytes per pellet, in the exact layout the GPU draws from.
+   v = value in 1/16ths (0 = empty slot), born = tick/4 at spawn (fade-in). */
 typedef struct { short x, y; u8 v, skin; unsigned short born; } Food;
-static short freeList[MAXF]; /* empty slots below foodHigh (eaten pellets join at the next rebuild) */
+static Food F[MAXF];
+static short freeList[MAXF]; /* empty slots below foodHigh */
 static i32 nfree, foodHigh, foodNear; /* foodNear: pellets inside the food disk */
 #define FOOD_DENSITY 7.2e-5f /* pellets per square unit around the player */
 static float frT[256]; /* pellet radius by value byte (the food shader has the same formula) */
 #define FV(i) ((float)F[i].v * (1.f / 16.f))
 
-static short gHead[GC], gNext[POOL], fHead[GC], fNext[MAXF];
+static short gHead[GC], gNext[POOL];
+/* food cells: exact doubly linked lists (fCell = the cell a pellet is in, -1 = none) */
+static short fHead[GC], fNext[MAXF], fPrev[MAXF], fCell[MAXF];
 static u32 gC[POOL]; static u8 gS[POOL]; static i32 gN;
 
 /* Level of detail: only snakes near the focus (the camera) get collisions,
@@ -163,12 +167,12 @@ static struct {
   float frameBlk[12];  /* std140 Frame block: camX camY halfW halfH | px time lblScale tick/4 | vw vh WR 0 */
   Head hdr[MAXS];
   Mini mini[MAXS + 4];
-  Food food[MAXF];
+  Food vis[MAXF];       /* this frame's pellets in view, copied from F */
 } AR __attribute__((aligned(16)));
 #define frameBlk AR.frameBlk
 #define hdr AR.hdr
 #define mini AR.mini
-#define F AR.food
+#define VIS AR.vis
 
 static u32 tick;
 static i32 playerKiller = -1;
@@ -211,11 +215,22 @@ static i32 segLive(i32 i) {
   Snake *o = &S[gS[i]];
   return o->alive && o->pc - gC[i] <= (u32)o->n;
 }
-static void foodInsert(i32 i) { i32 c = cellOf(UQ(F[i].x), UQ(F[i].y)); fNext[i] = fHead[c]; fHead[c] = (short)i; }
+static void foodLink(i32 i, i32 c) {
+  i32 h = fHead[c];
+  fCell[i] = (short)c; fPrev[i] = -1; fNext[i] = (short)h;
+  if (h >= 0) fPrev[h] = (short)i;
+  fHead[c] = (short)i;
+}
+static void foodUnlink(i32 i) {
+  i32 c = fCell[i], p = fPrev[i], n = fNext[i];
+  if (c < 0) return;
+  if (p >= 0) fNext[p] = (short)n; else fHead[c] = (short)n;
+  if (n >= 0) fPrev[n] = (short)p;
+  fCell[i] = -1;
+}
 
 static void rebuild(void) {
   __builtin_memset(gHead, 0xff, sizeof gHead); /* -1 = empty cell (bulk memory.fill) */
-  __builtin_memset(fHead, 0xff, sizeof fHead);
   __builtin_memset(omap, 0, sizeof omap);
   omX0 = focX - MN * MC * 0.5f; omY0 = focY - MN * MC * 0.5f;
   gN = 0;
@@ -226,27 +241,27 @@ static void rebuild(void) {
       if (hx < omX0 - reach || hy < omY0 - reach || hx > omX0 + MN * MC + reach || hy > omY0 + MN * MC + reach) continue;
       for (i32 j = S[s].n - 1; j >= 0; j--) segInsert(s, S[s].pc - 1u - (u32)j);
     }
-  /* food: drop pellets left far behind, count the ones near, relink the rest, and
-     list the holes lowest-first so the array the GPU draws in full stays short */
+  /* food: drop pellets left far behind, count the ones near, and list the holes
+     lowest-first so the slots in use stay packed */
   nfree = 0;
   i32 hi = 0; float FR2 = foodR() * foodR();
   foodNear = 0;
   for (i32 i = 0; i < foodHigh; i++) {
     if (!F[i].v) continue;
     float dx = UQ(F[i].x) - focX, dy = UQ(F[i].y) - focY, d2 = dx * dx + dy * dy;
-    if (d2 > FR2 * 1.6f) { F[i].v = 0; continue; } /* left far behind, off screen: dropped */
-    foodInsert(i); hi = i + 1; foodNear += d2 < FR2;
+    if (d2 > FR2 * 1.6f) { foodUnlink(i); F[i].v = 0; continue; } /* left far behind, off screen: dropped */
+    hi = i + 1; foodNear += d2 < FR2;
   }
   for (i32 i = hi - 1; i >= 0; i--) if (!F[i].v) freeList[nfree++] = (short)i; /* holes, lowest on top */
   foodHigh = hi;
 }
 
-static void killFood(i32 i) { F[i].v = 0; } /* stays linked in the hash (skipped) until the next rebuild */
+static void killFood(i32 i) { foodUnlink(i); F[i].v = 0; freeList[nfree++] = (short)i; }
 static void spawnFood(float x, float y, float v, i32 skin) {
   i32 i = nfree ? freeList[--nfree] : foodHigh < MAXF ? foodHigh++ : -1;
   if (i < 0) return;
   F[i] = (Food){fix(x), fix(y), (u8)(i32)minf(v * 16.f + 0.5f, 255.f), (u8)skin, (unsigned short)(tick >> 2)};
-  foodInsert(i);
+  foodLink(i, cellOf(x, y));
 }
 static void randomDisk(float rad, float *x, float *y) {
   float a = frand() * TAU, d = rad * sqrtf_(frand());
@@ -398,12 +413,17 @@ static void eat(i32 s, float dt) {
   float hx = k->hx, hy = k->hy;
   float att = k->r * 1.5f + 34.f, att2 = att * att, pull = minf(1.f, dt * 10.f);
   FOR_CELLS(hx, hy, att, c)
-    for (i32 i = fHead[c]; i >= 0; i = fNext[i]) {
-      if (!F[i].v) continue;
+    for (i32 i = fHead[c], nx; i >= 0; i = nx) {
+      nx = fNext[i]; /* read first: eating unlinks i */
       float px = UQ(F[i].x), py = UQ(F[i].y);
       float dx = px - hx, dy = py - hy, d2 = dx * dx + dy * dy, er = k->r + frT[F[i].v] * 0.5f;
       if (d2 < er * er) { k->mass += FV(i) * 0.75f; killFood(i); }
-      else if (d2 < att2) { F[i].x = fix(px - dx * pull); F[i].y = fix(py - dy * pull); }
+      else if (d2 < att2) { /* pulled toward the mouth; moves to another cell if it crosses */
+        float qx = px - dx * pull, qy = py - dy * pull;
+        F[i].x = fix(qx); F[i].y = fix(qy);
+        i32 nc = cellOf(qx, qy);
+        if (nc != fCell[i]) { foodUnlink(i); foodLink(i, nc); }
+      }
     }
 }
 
@@ -498,7 +518,6 @@ static void botThink(i32 s, float dt) {
       float ca = k->dcx, sa = k->dcy, bestScore = 0;
       FOR_CELLS(hx, hy, tier == 0 ? CELL : 2.f * CELL, c) /* rookies look less far */
         for (i32 i = fHead[c]; i >= 0; i = fNext[i]) {
-          if (!F[i].v) continue;
           float px = UQ(F[i].x), py = UQ(F[i].y);
           float dx = px - hx, dy = py - hy, d = sqrtf_(dx * dx + dy * dy) + 1.f;
           float score = FV(i) / (d + 60.f) * (1.6f + (dx * ca + dy * sa) / d);
@@ -648,7 +667,8 @@ EXPORT("init") void init(u32 seed, i32 bots) {
   rs = seed ? seed : 1u;
   NS = bots + 1 > MAXS ? MAXS : bots + 1;
   nfree = 0; foodHigh = 0; tick = 0; playerKiller = -1;
-  for (i32 i = 0; i < MAXF; i++) F[i].v = 0;
+  for (i32 i = 0; i < MAXF; i++) { F[i].v = 0; fCell[i] = -1; }
+  __builtin_memset(fHead, 0xff, sizeof fHead); /* -1: every cell empty */
   for (i32 s = 0; s < MAXS; s++) S[s].alive = 0;
   rebuild();
   for (i32 i = 0; i < 256; i++) frT[i] = minf(3.5f + sqrtf_((float)i / 16.f) * 2.6f, 15.f);
@@ -712,6 +732,17 @@ EXPORT("snapshot") void snapshot(void) {
   }
 }
 
+
+/* The pellets in view: walk the (exact) cells the view overlaps and copy each
+   8-byte record into the draw list. No per-pellet tests: the cell lists only
+   ever hold live pellets. */
+static i32 foodInView(float cx, float cy, float hw, float hh) {
+  i32 n = 0, x0 = cellX(cx - hw - 60.f), x1 = cellX(cx + hw + 60.f), y0 = cellX(cy - hh - 60.f), y1 = cellX(cy + hh + 60.f);
+  for (i32 gy = y0; gy <= y1; gy++)
+    for (i32 c = gy * GN + x0, e = gy * GN + x1; c <= e; c++)
+      for (i32 i = fHead[c]; i >= 0 && n < MAXF; i = fNext[i]) VIS[n++] = F[i];
+  return n;
+}
 
 /* Cull against the camera, write one GPU header per visible snake. */
 static i32 renderPrep(float cx, float cy, float hw, float hh, float px) {
@@ -852,7 +883,7 @@ EXPORT("frame") void frame(float dt, float aim, i32 boost, i32 mode, float vw, f
   camX += (tx - camX) * kp; camY += (ty - camY) * kp; camH += (tH - camH) * kz;
 
   float hh = camH, hw = camH * vw / vh, px = hh * 2.f / vh;
-  frameOut[0] = foodHigh; /* food: the GPU draws every slot and culls */
+  frameOut[0] = foodInView(camX, camY, hw, hh);
   frameOut[1] = renderPrep(camX, camY, hw, hh, px);
   frameOut[2] = maxK; frameOut[3] = (i32)ntup;
   frameOut[4] = miniPrep(camX, camY, hw, hh);
@@ -862,7 +893,7 @@ EXPORT("frame") void frame(float dt, float aim, i32 boost, i32 mode, float vw, f
   frameMs[0] = (float)(t1 - t0); frameMs[1] = (float)(nowMs() - t1);
 }
 
-EXPORT("foodPtr") Food *foodPtr(void) { return F; }
+EXPORT("foodPtr") Food *foodPtr(void) { return VIS; }
 EXPORT("maxFood") i32 maxFood(void) { return MAXF; }
 EXPORT("worldRadius") float worldRadius(void) { return WR; }
 EXPORT("snakeCount") i32 snakeCount(void) { return NS; }

@@ -66,8 +66,8 @@ function createGL(canvas, E) {
   ${PAL}
   layout(location=0) in ivec2 aP; layout(location=1) in uvec4 aB; // x, y (Q2) | value, skin, born lo, born hi
   out vec2 vL; out float vR; flat out uvec4 vI; flat out vec3 vC;
-  // Every food slot is an instance, straight from WASM memory: empty and off-screen
-  // pellets are culled here, so the CPU never builds a sprite list.
+  // One instance per pellet, straight from memory. The list holds the pellets of the
+  // cells in view; the rest of the margin is culled here.
   void main(){
     vec2 p=vec2(aP)*.25, c0=p-uCamHalf.xy; float r=min(3.5+sqrt(float(aB.x)/16.)*2.6,15.);
     if(aB.x==0u || any(greaterThan(abs(c0),uCamHalf.zw+r*1.9+uPxTime.x*1.5))){ gl_Position=vec4(2,2,2,1); return; }
@@ -77,7 +77,7 @@ function createGL(canvas, E) {
     vec2 c = (c0+l)/uCamHalf.zw;
     gl_Position = vec4(c.x,-c.y,0,1);
     uint age=(uint(uPxTime.w)-(aB.z|(aB.w<<8)))&0xffffu;
-    vL=l; vR=r; vI=uvec4(0u,aB.y,(uint(gl_InstanceID)*157u)&255u,min(age,255u)); vC=uPal[aB.y%12u].rgb;
+    vL=l; vR=r; vI=uvec4(0u,aB.y,((aB.z|(aB.w<<8))*37u+uint(aP.x&255))&255u,min(age,255u)); // pulse phase: from the pellet itself, stable whatever its place in the list vC=uPal[aB.y%12u].rgb;
   }`;
   const FS = `#version 300 es
   precision mediump float;

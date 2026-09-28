@@ -266,8 +266,8 @@ function createGL(canvas, E) {
   ${PAL}
   layout(location=0) in ivec2 aP; layout(location=1) in uvec4 aB; // x, y (Q2) | value, skin, born lo, born hi
   out vec2 vL; out float vR; flat out uvec4 vI; flat out vec3 vC;
-  // Every food slot is an instance, straight from WASM memory: empty and off-screen
-  // pellets are culled here, so the CPU never builds a sprite list.
+  // One instance per pellet, straight from memory. The list holds the pellets of the
+  // cells in view; the rest of the margin is culled here.
   void main(){
     vec2 p=vec2(aP)*.25, c0=p-uCamHalf.xy; float r=min(3.5+sqrt(float(aB.x)/16.)*2.6,15.);
     if(aB.x==0u || any(greaterThan(abs(c0),uCamHalf.zw+r*1.9+uPxTime.x*1.5))){ gl_Position=vec4(2,2,2,1); return; }
@@ -277,7 +277,7 @@ function createGL(canvas, E) {
     vec2 c = (c0+l)/uCamHalf.zw;
     gl_Position = vec4(c.x,-c.y,0,1);
     uint age=(uint(uPxTime.w)-(aB.z|(aB.w<<8)))&0xffffu;
-    vL=l; vR=r; vI=uvec4(0u,aB.y,(uint(gl_InstanceID)*157u)&255u,min(age,255u)); vC=uPal[aB.y%12u].rgb;
+    vL=l; vR=r; vI=uvec4(0u,aB.y,((aB.z|(aB.w<<8))*37u+uint(aP.x&255))&255u,min(age,255u)); // pulse phase: from the pellet itself, stable whatever its place in the list vC=uPal[aB.y%12u].rgb;
   }`;
   const FS = `#version 300 es
   precision mediump float;
@@ -579,7 +579,6 @@ function createGL(canvas, E) {
   };
   return R;
 }
-
 /* ============================================================================
    WebGPU renderer (preferred). Same passes and same look as the WebGL one.
    - One upload per frame (a byte copy of the WASM per-frame block), plus the
@@ -660,9 +659,9 @@ fn hexD(p0: vec2f) -> f32 { let p = abs(p0); return max(dot(p, vec2f(.8660254, .
 // ---------- food ----------
 struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
   @location(1) @interpolate(flat) r: f32, @location(2) @interpolate(flat) info: vec4u, @location(3) @interpolate(flat) col: vec3f };
-// Every food slot is an instance, straight from WASM memory (x, y Q2 | value, skin, born lo, born hi):
-// empty and off-screen pellets are culled here, so the CPU never builds a sprite list.
-@vertex fn vsFood(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32,
+// One instance per pellet, straight from memory (x, y Q2 | value, skin, born lo, born hi).
+// The list holds the pellets of the cells in view; the rest of the margin is culled here.
+@vertex fn vsFood(@builtin(vertex_index) vi: u32,
                   @location(0) pq: vec2i, @location(1) b: vec4u) -> FoodO {
   var o: FoodO;
   let p = vec2f(pq) * .25; let r = min(3.5 + sqrt(f32(b.x) / 16.) * 2.6, 15.);
@@ -673,7 +672,7 @@ struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
   let l = q * select(r * 1.9, r * .7 + F.pxTime.x * 1.5, tiny);
   let c = (c0 + l) / F.camHalf.zw;
   let age = (u32(F.pxTime.w) - (b.z | (b.w << 8u))) & 0xffffu;
-  o.pos = vec4f(c.x, -c.y, 0., 1.); o.l = l; o.r = r; o.info = vec4u(0u, b.y, (ii * 157u) & 255u, min(age, 255u));
+  o.pos = vec4f(c.x, -c.y, 0., 1.); o.l = l; o.r = r; o.info = vec4u(0u, b.y, (((b.z | (b.w << 8u)) * 37u + u32(pq.x & 255)) & 255u), min(age, 255u)); // pulse phase: from the pellet itself
   o.col = PAL[b.y % 12u].rgb; return o;
 }
 @fragment fn fsFood(i: FoodO) -> @location(0) vec4f {
@@ -984,7 +983,6 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   };
   return R;
 }
-
 "use strict";
 /* Serpent.io ONLINE client. Based on src/app.js (offline), but the world comes
    from the server (online/server): this page only draws it, with the same two
@@ -1104,10 +1102,10 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     for (let k = 0; k < n; k++) {
       const s = d.getUint8(o), fl = d.getUint8(o + 1);
       skin[s] = d.getUint8(o + 2) % 12; tier[s] = d.getUint8(o + 3); boost[s] = fl & 1; human[s] = fl & 2 ? 1 : 0;
-      const x = d.getFloat32(o + 4, true), y = d.getFloat32(o + 8, true), a = d.getFloat32(o + 12, true);
-      mass[s] = d.getFloat32(o + 16, true); segN[s] = d.getUint16(o + 20, true);
-      const pc = d.getUint32(o + 22, true); kills[s] = d.getUint16(o + 26, true);
-      const cnt = d.getUint16(o + 28, true); o += 30;
+      const x = d.getInt16(o + 4, true) * 0.25, y = d.getInt16(o + 6, true) * 0.25, a = (d.getUint16(o + 8, true) / 65535) * 2 * Math.PI - Math.PI;
+      mass[s] = d.getFloat32(o + 10, true); segN[s] = d.getUint16(o + 14, true);
+      const pc = d.getUint16(o + 16, true); kills[s] = d.getUint16(o + 18, true); // pc: low 16 bits (only used modulo the ring)
+      const cnt = d.getUint16(o + 20, true); o += 22;
       if ((fl & 4) || !alive[s]) hist[s].length = 0; // new/returning snake: no stale positions
       for (let p = pc - cnt, i = 0; i < cnt; i++, p++) {
         const j = (s * RING + ((p >>> 0) & RMASK)) * 2;
@@ -1443,7 +1441,6 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   window.__serpent = { renderer: () => R.name, state: () => ({ connected, me, state, foodHigh, alive: [...alive].reduce((a, b) => a + b, 0) }) };
   requestAnimationFrame((t) => { last = t; frame(t); });
 })();
-
 </script>
 </body>
 </html>

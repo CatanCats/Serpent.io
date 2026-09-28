@@ -78,9 +78,9 @@ fn hexD(p0: vec2f) -> f32 { let p = abs(p0); return max(dot(p, vec2f(.8660254, .
 // ---------- food ----------
 struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
   @location(1) @interpolate(flat) r: f32, @location(2) @interpolate(flat) info: vec4u, @location(3) @interpolate(flat) col: vec3f };
-// Every food slot is an instance, straight from WASM memory (x, y Q2 | value, skin, born lo, born hi):
-// empty and off-screen pellets are culled here, so the CPU never builds a sprite list.
-@vertex fn vsFood(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32,
+// One instance per pellet, straight from memory (x, y Q2 | value, skin, born lo, born hi).
+// The list holds the pellets of the cells in view; the rest of the margin is culled here.
+@vertex fn vsFood(@builtin(vertex_index) vi: u32,
                   @location(0) pq: vec2i, @location(1) b: vec4u) -> FoodO {
   var o: FoodO;
   let p = vec2f(pq) * .25; let r = min(3.5 + sqrt(f32(b.x) / 16.) * 2.6, 15.);
@@ -91,7 +91,7 @@ struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
   let l = q * select(r * 1.9, r * .7 + F.pxTime.x * 1.5, tiny);
   let c = (c0 + l) / F.camHalf.zw;
   let age = (u32(F.pxTime.w) - (b.z | (b.w << 8u))) & 0xffffu;
-  o.pos = vec4f(c.x, -c.y, 0., 1.); o.l = l; o.r = r; o.info = vec4u(0u, b.y, (ii * 157u) & 255u, min(age, 255u));
+  o.pos = vec4f(c.x, -c.y, 0., 1.); o.l = l; o.r = r; o.info = vec4u(0u, b.y, (((b.z | (b.w << 8u)) * 37u + u32(pq.x & 255)) & 255u), min(age, 255u)); // pulse phase: from the pellet itself
   o.col = PAL[b.y % 12u].rgb; return o;
 }
 @fragment fn fsFood(i: FoodO) -> @location(0) vec4f {

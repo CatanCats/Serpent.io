@@ -117,10 +117,10 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     for (let k = 0; k < n; k++) {
       const s = d.getUint8(o), fl = d.getUint8(o + 1);
       skin[s] = d.getUint8(o + 2) % 12; tier[s] = d.getUint8(o + 3); boost[s] = fl & 1; human[s] = fl & 2 ? 1 : 0;
-      const x = d.getFloat32(o + 4, true), y = d.getFloat32(o + 8, true), a = d.getFloat32(o + 12, true);
-      mass[s] = d.getFloat32(o + 16, true); segN[s] = d.getUint16(o + 20, true);
-      const pc = d.getUint32(o + 22, true); kills[s] = d.getUint16(o + 26, true);
-      const cnt = d.getUint16(o + 28, true); o += 30;
+      const x = d.getInt16(o + 4, true) * 0.25, y = d.getInt16(o + 6, true) * 0.25, a = (d.getUint16(o + 8, true) / 65535) * 2 * Math.PI - Math.PI;
+      mass[s] = d.getFloat32(o + 10, true); segN[s] = d.getUint16(o + 14, true);
+      const pc = d.getUint16(o + 16, true); kills[s] = d.getUint16(o + 18, true); // pc: low 16 bits (only used modulo the ring)
+      const cnt = d.getUint16(o + 20, true); o += 22;
       if ((fl & 4) || !alive[s]) hist[s].length = 0; // new/returning snake: no stale positions
       for (let p = pc - cnt, i = 0; i < cnt; i++, p++) {
         const j = (s * RING + ((p >>> 0) & RMASK)) * 2;

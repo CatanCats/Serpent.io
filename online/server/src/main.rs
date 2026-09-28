@@ -46,10 +46,10 @@ extern "C" {
     fn sim_pub() -> *const Pub;
     fn sim_trail() -> *const i16;
     fn sim_food() -> *const u64;
-    fn sim_food_head() -> *const i32;
-    fn sim_food_next() -> *const i32;
-    fn sim_grid_n() -> i32;
-    fn sim_cell() -> f32;
+    fn sim_food_events() -> *const u32;
+    fn sim_food_event_count() -> i32;
+    fn sim_food_events_lost() -> i32;
+    fn sim_food_events_clear();
     fn sim_max_food() -> i32;
     fn sim_ring() -> i32;
     fn sim_max_snakes() -> i32;
@@ -60,15 +60,15 @@ extern "C" {
 
 /// Read-only views of the simulation's static memory. Only the game thread uses
 /// them, and never while a sim_* call is running, so plain pointer reads are sound.
-struct Sim { pubs: *const Pub, trail: *const i16, food: *const u64, fhead: *const i32, fnext: *const i32,
-             maxs: usize, ring: usize, maxf: usize, bots: usize, wr: f32, gn: i32, cell: f32 }
+struct Sim { pubs: *const Pub, trail: *const i16, food: *const u64,
+             maxs: usize, ring: usize, maxf: usize, bots: usize, wr: f32 }
 impl Sim {
     fn new(seed: u32, bots: i32) -> Sim {
         unsafe {
             sim_init(seed, bots);
-            Sim { pubs: sim_pub(), trail: sim_trail(), food: sim_food(), fhead: sim_food_head(), fnext: sim_food_next(),
+            Sim { pubs: sim_pub(), trail: sim_trail(), food: sim_food(),
                   maxs: sim_max_snakes() as usize, ring: sim_ring() as usize, maxf: sim_max_food() as usize,
-                  bots: sim_bot_count() as usize, wr: sim_world_radius(), gn: sim_grid_n(), cell: sim_cell() }
+                  bots: sim_bot_count() as usize, wr: sim_world_radius() }
         }
     }
     #[inline] fn p(&self, s: usize) -> Pub { unsafe { *self.pubs.add(s) } }
@@ -77,7 +77,6 @@ impl Sim {
         unsafe { (*self.trail.add(i), *self.trail.add(i + 1)) }
     }
     #[inline] fn food(&self, i: usize) -> u64 { unsafe { *self.food.add(i) } }
-    #[inline] fn cell_x(&self, x: f32) -> i32 { (((x + self.wr) / self.cell) as i32).clamp(0, self.gn - 1) }
 }
 
 /* ---------------- protocol (little-endian; mirrored in online/client/client.js) ----------------
@@ -87,14 +86,17 @@ impl Sim {
                     4 LEAVE (back to the menu)
  server -> client:  1 WELCOME u8 maxSnakes, u16 ring, f32 worldRadius, u8 bots, u8 players
                     2 SNAP  u32 tick, u8 you (255 none), u8 spectate, u8 flags (1 = reset), u16 n, snakes, u16 m, food
-                        snake: u8 slot, u8 flags (1 boost, 2 human, 4 full trail), u8 skin, u8 tier, f32 x, f32 y,
-                               f32 ang, f32 mass, u16 n, u32 pc, u16 kills, u16 count, count x (i16 x, i16 y) in Q2
+                        snake: u8 slot, u8 flags (1 boost, 2 human, 4 full trail), u8 skin, u8 tier, i16 x, i16 y (Q2),
+                               u16 ang, f32 mass, u16 n, u16 pc, u16 kills, u16 count, count x (i16 x, i16 y) in Q2
                         food:  u16 slot, 8 bytes (i16 x, i16 y, u8 value, u8 skin, u16 born); value 0 = gone
                     3 BOARD u16 alive, u16 yourRank, u8 k, k x (u8 slot, u8 tier, u8 skin, u8 human, f32 mass)
                     4 NAME  u8 slot, u8 len, name
                     5 DEATH u8 killer (255 = world edge), u16 kills, f32 mass
                     6 MINI  u16 k, k x (u8 slot, u8 skin, i16 x, i16 y, u16 mass)
                     7 FULL  (server full) */
+
+/// World units to 16-bit fixed point (quarter units), the trail's own format.
+#[inline] fn q2(v: f32) -> i16 { (v * 4.).round().clamp(-32767., 32767.) as i16 }
 
 struct Out(Vec<u8>);
 impl Out {
@@ -115,8 +117,9 @@ struct Client {
     last: (f32, f32, f32), // last camera (x, y, half height) while alive
     sent_pc: Vec<u32>,     // per snake: trail points this client has up to
     sent_from: Vec<u32>,   // per snake: the oldest trail point it has
-    shadow: Vec<u64>,      // per food slot: the record this client holds (0 = none)
-    held: Vec<u16>,        // food slots this client holds
+    rect: Rect,            // food sectors this client is subscribed to (its view)
+    pend: Vec<u8>,         // food changes in those sectors since the last snapshot
+    npend: u32,
     reset: bool,           // a snapshot was dropped: resend everything
     msgs: u32,
 }
@@ -134,7 +137,8 @@ fn clean_name(b: &[u8]) -> String {
 
 struct Game {
     sim: Sim, clients: HashMap<u64, Client>, names: Vec<String>,
-    spectate: usize, spec_t: f32, mark: Vec<u32>, gen: u32, stats: Arc<Stats>,
+    spectate: usize, spec_t: f32, stats: Arc<Stats>,
+    food: FoodIndex,
 }
 
 impl Game {
@@ -154,7 +158,7 @@ impl Game {
             Ev::Open { id, tx } => {
                 let players = self.clients.values().filter(|c| c.slot >= 0).count().min(255) as u8;
                 let mut c = Client { tx, slot: -1, alive: false, aspect: 1.78, last: (0., 0., 900.), sent_pc: vec![0; self.sim.maxs], sent_from: vec![0; self.sim.maxs],
-                                     shadow: vec![0; self.sim.maxf], held: Vec::new(), reset: false, msgs: 0 };
+                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, reset: false, msgs: 0 };
                 let mut o = Out(Vec::new());
                 o.u8(1); o.u8(self.sim.maxs as u8); o.u16(self.sim.ring as u16); o.f32(self.sim.wr); o.u8(self.sim.bots as u8); o.u8(players);
                 Self::send(&mut c, o.0);
@@ -239,8 +243,6 @@ impl Game {
         let reset = c.reset;
         if reset {
             c.reset = false;
-            for &i in &c.held { c.shadow[i as usize] = 0; }
-            c.held.clear();
             c.sent_pc.iter_mut().for_each(|v| *v = 0);
         }
         let mut o = Out(Vec::with_capacity(16 * 1024));
@@ -260,59 +262,36 @@ impl Game {
                 c.sent_from[s] = p.pc.wrapping_sub(count);
             }
             o.u8(s as u8); o.u8(p.boost as u8 | if p.human != 0 { 2 } else { 0 } | full); o.u8(p.skin as u8); o.u8(p.tier as u8);
-            o.f32(p.hx); o.f32(p.hy); o.f32(p.ang); o.f32(p.mass);
-            o.u16(p.n as u16); o.u32(p.pc); o.u16(p.kills.min(65535) as u16); o.u16(count as u16);
+            // head in Q2 fixed point like the trail, heading as u16: 22 bytes per snake
+            o.i16(q2(p.hx)); o.i16(q2(p.hy)); o.u16(((p.ang + std::f32::consts::PI) / std::f32::consts::TAU * 65535.) as u16); o.f32(p.mass);
+            o.u16(p.n as u16); o.u16(p.pc as u16); o.u16(p.kills.min(65535) as u16); o.u16(count as u16);
             let mut q = p.pc.wrapping_sub(count);
             while q != p.pc { let (x, y) = sim.pt(s, q); o.i16(x); o.i16(y); q = q.wrapping_add(1); }
             c.sent_pc[s] = p.pc; n += 1;
         }
         o.patch16(n_at, n);
 
-        // Food: only cells the view overlaps (plus what the client already holds).
-        // A record is 8 bytes, so "changed?" is a single 64-bit compare.
+        // Food: the changes logged in its sectors since the last snapshot, then whole
+        // sectors that came into view (all their food) or left it (removals).
         let m_at = o.0.len(); o.u16(0);
-        let mut m = 0u32;
-        self.gen = self.gen.wrapping_add(1);
-        let gen = self.gen;
-        let (fx0, fx1, fy0, fy1) = (((cx - hw - 100.) * 4.) as i32, ((cx + hw + 100.) * 4.) as i32, ((cy - hh - 100.) * 4.) as i32, ((cy + hh + 100.) * 4.) as i32);
-        let visible = |w: u64| {
-            let (x, y, v) = (w as u16 as i16 as i32, (w >> 16) as u16 as i16 as i32, (w >> 32) as u8);
-            v != 0 && x > fx0 && x < fx1 && y > fy0 && y < fy1
-        };
-        let mut held = std::mem::take(&mut c.held);
-        held.retain(|&i| {
-            let i = i as usize;
-            let w = sim.food(i);
-            if visible(w) {
-                self.mark[i] = gen;
-                if w != c.shadow[i] && m < 60000 { c.shadow[i] = w; o.u16(i as u16); o.u64(w); m += 1; }
-                true
-            } else {
-                c.shadow[i] = 0; o.u16(i as u16); o.u64(0); m += 1;
-                false
-            }
-        });
-        let (gx0, gx1, gy0, gy1) = (sim.cell_x(cx - hw - 100.), sim.cell_x(cx + hw + 100.), sim.cell_x(cy - hh - 100.), sim.cell_x(cy + hh + 100.));
-        'cells: for gy in gy0..=gy1 {
-            for gx in gx0..=gx1 {
-                let mut i = unsafe { *sim.fhead.add((gy * sim.gn + gx) as usize) };
-                let mut guard = 0;
-                while i >= 0 && guard < 4096 {
-                    let iu = i as usize;
-                    if self.mark[iu] != gen {
-                        self.mark[iu] = gen;
-                        let w = sim.food(iu);
-                        if c.shadow[iu] == 0 && visible(w) {
-                            if m >= 60000 { break 'cells; }
-                            c.shadow[iu] = w; held.push(iu as u16); o.u16(iu as u16); o.u64(w); m += 1;
-                        }
-                    }
-                    i = unsafe { *sim.fnext.add(iu) };
-                    guard += 1;
+        let sx = |x: f32| FoodIndex::sec_x(x, sim.wr);
+        let new = Rect { x0: sx(cx - hw), x1: sx(cx + hw), y0: sx(cy - hh), y1: sx(cy + hh) }; // hw, hh include a 250-unit margin
+        let old = if reset { Rect::EMPTY } else { c.rect };
+        if reset { c.pend.clear(); c.npend = 0; }
+        let mut m = c.npend;
+        o.0.extend_from_slice(&c.pend);
+        c.pend.clear(); c.npend = 0;
+        for sy in new.y0.min(old.y0)..=new.y1.max(old.y1) {
+            for sxx in new.x0.min(old.x0)..=new.x1.max(old.x1) {
+                let (in_new, in_old) = (new.has(sxx, sy), old.has(sxx, sy));
+                if in_new == in_old { continue; }
+                for &i in &self.food.sectors[(sy * NSEC + sxx) as usize] {
+                    o.u16(i); o.u64(if in_new { sim.food(i as usize) } else { 0 }); m += 1;
                 }
             }
         }
-        c.held = held;
+        c.rect = new;
+        if m > 65535 { c.reset = true; m = 65535; o.0.truncate(m_at + 2 + 65535 * 10); } // absurd burst: resync next time
         o.patch16(m_at, m as u16);
         Self::send(c, o.0);
     }
@@ -325,6 +304,7 @@ impl Game {
         let t0 = Instant::now();
         unsafe { sim_step() };
         let t1 = Instant::now();
+        self.food_events();
         let tick = unsafe { sim_tick() };
         // players who just died
         let dead: Vec<u64> = self.clients.iter().filter(|(_, c)| c.slot >= 0 && c.alive && self.sim.p(c.slot as usize).alive == 0).map(|(id, _)| *id).collect();
@@ -340,6 +320,7 @@ impl Game {
         self.spec_t += 1. / 60.;
         if self.spec_t > 8. || self.sim.p(self.spectate).alive == 0 { self.spec_t = 0.; self.pick_spectate(); }
         if tick % 2 == 0 {
+            self.food_flush();
             let ids: Vec<u64> = self.clients.keys().copied().collect();
             for id in ids { self.snapshot(id, tick); }
         }
@@ -378,11 +359,104 @@ impl Game {
     }
 }
 
+/* ---------------- food: sectors + change events ----------------
+   The world is split into 200-unit sectors (slither.io uses 300). Each food slot is
+   listed in the sector it lies in. A client subscribes to the sectors its view
+   covers: entering one sends its food once; after that only the simulation's
+   change events (spawned, eaten, moved) in those sectors are forwarded. Nothing
+   is compared or scanned per update. */
+const SEC: f32 = 200.;
+const NSEC: i32 = 80; // 16000 / 200: sectors per side
+const NONE: u16 = u16::MAX;
+
+#[derive(Clone, Copy)]
+struct Rect { x0: i32, x1: i32, y0: i32, y1: i32 }
+impl Rect {
+    const EMPTY: Rect = Rect { x0: NSEC, x1: -1, y0: NSEC, y1: -1 };
+    #[inline] fn has(&self, x: i32, y: i32) -> bool { x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1 }
+}
+
+struct FoodIndex {
+    sec_of: Vec<u16>, pos: Vec<u32>, sectors: Vec<Vec<u16>>,
+    dirty: Vec<u16>, is_dirty: Vec<bool>, // slots changed since the last snapshot (each once)
+    sent_sec: Vec<u16>,                   // sector each slot was in at the last snapshot
+}
+impl FoodIndex {
+    fn new(maxf: usize) -> Self {
+        FoodIndex { sec_of: vec![NONE; maxf], pos: vec![0; maxf], sectors: vec![Vec::new(); (NSEC * NSEC) as usize],
+                    dirty: Vec::new(), is_dirty: vec![false; maxf], sent_sec: vec![NONE; maxf] }
+    }
+    #[inline] fn sec_x(x: f32, wr: f32) -> i32 { (((x + wr) / SEC) as i32).clamp(0, NSEC - 1) }
+    #[inline] fn sector(w: u64, wr: f32) -> u16 {
+        if (w >> 32) as u8 == 0 { return NONE; } // value 0: empty slot
+        let (x, y) = (w as u16 as i16 as f32 * 0.25, (w >> 16) as u16 as i16 as f32 * 0.25);
+        (Self::sec_x(y, wr) * NSEC + Self::sec_x(x, wr)) as u16
+    }
+    /// Moves slot i to sector `new`; returns the sector it was in.
+    fn place(&mut self, i: usize, new: u16) -> u16 {
+        let old = self.sec_of[i];
+        if old == new { return old; }
+        if old != NONE { // swap-remove from the old sector's list
+            let list = &mut self.sectors[old as usize];
+            let p = self.pos[i] as usize;
+            list.swap_remove(p);
+            if p < list.len() { self.pos[list[p] as usize] = p as u32; }
+        }
+        if new != NONE { let list = &mut self.sectors[new as usize]; self.pos[i] = list.len() as u32; list.push(i as u16); }
+        self.sec_of[i] = new;
+        old
+    }
+}
+
+impl Game {
+    /// After every step: file this step's food changes (a pellet pulled toward a
+    /// mouth changes every step; it is sent once per snapshot, in its final state).
+    fn food_events(&mut self) {
+        let (n, lost) = unsafe { (sim_food_event_count() as usize, sim_food_events_lost() != 0) };
+        let ev = unsafe { std::slice::from_raw_parts(sim_food_events(), n) };
+        let (wr, f) = (self.sim.wr, &mut self.food);
+        if lost { // log overflowed: re-index everything and resync every client
+            for i in 0..self.sim.maxf { let s = FoodIndex::sector(self.sim.food(i), wr); f.place(i, s); f.sent_sec[i] = s; }
+            for c in self.clients.values_mut() { c.reset = true; }
+        } else {
+            for &i in ev {
+                let i = i as usize;
+                f.place(i, FoodIndex::sector(self.sim.food(i), wr));
+                if !f.is_dirty[i] { f.is_dirty[i] = true; f.dirty.push(i as u16); }
+            }
+        }
+        unsafe { sim_food_events_clear() };
+    }
+    /// Before the snapshots: queue each changed pellet for the clients whose
+    /// sectors it was in or is now in (removal if it left their view).
+    fn food_flush(&mut self) {
+        let f = &mut self.food;
+        for &i in &f.dirty {
+            let iu = i as usize;
+            f.is_dirty[iu] = false;
+            let (new, old) = (f.sec_of[iu], f.sent_sec[iu]);
+            f.sent_sec[iu] = new;
+            if new == NONE && old == NONE { continue; }
+            let w = self.sim.food(iu);
+            let (nx, ny, ox, oy) = ((new as i32) % NSEC, (new as i32) / NSEC, (old as i32) % NSEC, (old as i32) / NSEC);
+            for c in self.clients.values_mut() {
+                let in_new = new != NONE && c.rect.has(nx, ny);
+                if in_new || (old != NONE && c.rect.has(ox, oy)) {
+                    c.pend.extend_from_slice(&i.to_le_bytes());
+                    c.pend.extend_from_slice(&(if in_new { w } else { 0 }).to_le_bytes());
+                    c.npend += 1;
+                }
+            }
+        }
+        f.dirty.clear();
+    }
+}
+
 fn game_thread(rx: smpsc::Receiver<Ev>, stats: Arc<Stats>, bots: i32) {
     let seed = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u32) | 1;
     let sim = Sim::new(seed, bots);
     let (maxs, maxf) = (sim.maxs, sim.maxf);
-    let mut g = Game { sim, clients: HashMap::new(), names: vec![String::new(); maxs], spectate: 1, spec_t: 99., mark: vec![0; maxf], gen: 0, stats: stats.clone() };
+    let mut g = Game { sim, clients: HashMap::new(), names: vec![String::new(); maxs], spectate: 1, spec_t: 99., stats: stats.clone(), food: FoodIndex::new(maxf) };
     let dt = Duration::from_nanos(1_000_000_000 / 60);
     let mut next = Instant::now();
     let mut log_t = Instant::now();
@@ -410,7 +484,7 @@ struct App { ev: Mutex<smpsc::Sender<Ev>>, next_id: AtomicU64, per_ip: Mutex<Has
 async fn page(app: &App, file: &str) -> Response {
     match tokio::fs::read(format!("{}/{}", app.web_root, file)).await {
         Ok(b) => ([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], b).into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, format!("{file} not found: run `node build.mjs` in the repository")).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, format!("{file} not found: run `./build.sh` in the repository")).into_response(),
     }
 }
 

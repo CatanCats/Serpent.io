@@ -56,9 +56,9 @@ Press **P* for:
 - `src/app.js`: UI, input, HUD, labels and the main loop.
 - `src/render-gpu.js` / `src/render-gl.js`: the two renderers.
 - `src/index.html`: the page.
-- `build.mjs` builds `offline.html` (the offline game) and `index.html` (the online front page).
+- `build.sh` builds `offline.html` (the offline game) and `index.html` (the online front page).
 
 ## Rebuilding
 ```sh
-node build.mjs   # needs clang with the wasm32 target; uses Binaryen's wasm-opt if it is on PATH
+./build.sh   # needs bash and clang with the wasm32 target; uses Binaryen's wasm-opt if it is on PATH
 ```

@@ -93,7 +93,9 @@ static i32 nfree, foodHigh;
 static float frT[256]; /* pellet radius by value byte (the food shader has the same formula) */
 #define FV(i) ((float)F[i].v * (1.f / 16.f))
 
-static i32 gHead[GC], gNext[POOL], fHead[GC], fNext[MAXF];
+static i32 gHead[GC], gNext[POOL];
+/* food cells: exact doubly linked lists (fCell = the cell a pellet is in, -1 = none) */
+static i32 fHead[GC], fNext[MAXF], fPrev[MAXF], fCell[MAXF];
 static u32 gC[POOL]; static u8 gS[POOL]; static i32 gN;
 
 /* Level of detail: one focus per human player (its view). Snakes near any focus
@@ -136,6 +138,12 @@ static u8 omap[MN * MN + 16];
 static const float omX0 = -MN * MC * 0.5f, omY0 = -MN * MC * 0.5f; /* fixed: the map covers the world */
 
 static Food F[MAXF] __attribute__((aligned(16))); /* same 8-byte layout the client's GPU draws */
+/* Food change log: every slot that spawned, was eaten or moved this step. The
+   server forwards these to the players who can see them, instead of comparing
+   all food every update. On overflow it rescans everything. */
+#define MAXEV 65536
+static u32 fev[MAXEV]; static i32 nfev, fevLost;
+static void foodChanged(i32 i) { if (nfev < MAXEV) fev[nfev++] = (u32)i; else fevLost = 1; }
 
 static u32 tick;
 
@@ -177,11 +185,22 @@ static i32 segLive(i32 i) {
   Snake *o = &S[gS[i]];
   return o->alive && o->pc - gC[i] <= (u32)o->n;
 }
-static void foodInsert(i32 i) { i32 c = cellOf(UQ(F[i].x), UQ(F[i].y)); fNext[i] = fHead[c]; fHead[c] = i; }
+static void foodLink(i32 i, i32 c) {
+  i32 h = fHead[c];
+  fCell[i] = c; fPrev[i] = -1; fNext[i] = h;
+  if (h >= 0) fPrev[h] = i;
+  fHead[c] = i;
+}
+static void foodUnlink(i32 i) {
+  i32 c = fCell[i], p = fPrev[i], n = fNext[i];
+  if (c < 0) return;
+  if (p >= 0) fNext[p] = n; else fHead[c] = n;
+  if (n >= 0) fPrev[n] = p;
+  fCell[i] = -1;
+}
 
 static void rebuild(void) {
   __builtin_memset(gHead, 0xff, sizeof gHead); /* -1 = empty cell (bulk memory.fill) */
-  __builtin_memset(fHead, 0xff, sizeof fHead);
   __builtin_memset(omap, 0, sizeof omap);
   gN = 0;
   for (i32 s = 0; s < NS; s++)
@@ -205,19 +224,19 @@ static void rebuild(void) {
       if (d2 < FR2 * 1.6f) keep = 1;
       foodNear[f] += d2 < FR2;
     }
-    if (!keep) { F[i].v = 0; continue; } /* far from everyone: dropped */
-    foodInsert(i); hi = i + 1;
+    if (!keep) { foodUnlink(i); F[i].v = 0; foodChanged(i); continue; } /* far from everyone: dropped */
+    hi = i + 1;
   }
   for (i32 i = hi - 1; i >= 0; i--) if (!F[i].v) freeList[nfree++] = i; /* holes, lowest on top */
   foodHigh = hi;
 }
 
-static void killFood(i32 i) { F[i].v = 0; } /* stays linked in the hash (skipped) until the next rebuild */
+static void killFood(i32 i) { foodUnlink(i); F[i].v = 0; freeList[nfree++] = i; foodChanged(i); }
 static void spawnFood(float x, float y, float v, i32 skin) {
   i32 i = nfree ? freeList[--nfree] : foodHigh < MAXF ? foodHigh++ : -1;
   if (i < 0) return;
   F[i] = (Food){fix(x), fix(y), (u8)(i32)minf(v * 16.f + 0.5f, 255.f), (u8)skin, (unsigned short)(tick >> 2)};
-  foodInsert(i);
+  foodLink(i, cellOf(x, y)); foodChanged(i);
 }
 static void randomDisk(float rad, float *x, float *y) {
   float a = frand() * TAU, d = rad * sqrtf_(frand());
@@ -367,12 +386,17 @@ static void eat(i32 s, float dt) {
   float hx = k->hx, hy = k->hy;
   float att = k->r * 1.5f + 34.f, att2 = att * att, pull = minf(1.f, dt * 10.f);
   FOR_CELLS(hx, hy, att, c)
-    for (i32 i = fHead[c]; i >= 0; i = fNext[i]) {
-      if (!F[i].v) continue;
+    for (i32 i = fHead[c], nx; i >= 0; i = nx) {
+      nx = fNext[i]; /* read first: eating unlinks i */
       float px = UQ(F[i].x), py = UQ(F[i].y);
       float dx = px - hx, dy = py - hy, d2 = dx * dx + dy * dy, er = k->r + frT[F[i].v] * 0.5f;
       if (d2 < er * er) { k->mass += FV(i) * 0.75f; killFood(i); }
-      else if (d2 < att2) { F[i].x = fix(px - dx * pull); F[i].y = fix(py - dy * pull); }
+      else if (d2 < att2) { /* pulled toward the mouth; moves to another cell if it crosses */
+        float qx = px - dx * pull, qy = py - dy * pull;
+        F[i].x = fix(qx); F[i].y = fix(qy); foodChanged(i);
+        i32 nc = cellOf(qx, qy);
+        if (nc != fCell[i]) { foodUnlink(i); foodLink(i, nc); }
+      }
     }
 }
 
@@ -467,7 +491,6 @@ static void botThink(i32 s, float dt) {
       float ca = k->dcx, sa = k->dcy, bestScore = 0;
       FOR_CELLS(hx, hy, tier == 0 ? CELL : 2.f * CELL, c) /* rookies look less far */
         for (i32 i = fHead[c]; i >= 0; i = fNext[i]) {
-          if (!F[i].v) continue;
           float px = UQ(F[i].x), py = UQ(F[i].y);
           float dx = px - hx, dy = py - hy, d = sqrtf_(dx * dx + dy * dy) + 1.f;
           float score = FV(i) / (d + 60.f) * (1.6f + (dx * ca + dy * sa) / d);
@@ -643,7 +666,8 @@ void sim_init(u32 seed, i32 bots) {
   rs = seed ? seed : 1u;
   NS = MAXS; NB = bots < MAXS - 2 ? bots : MAXS - 2;
   nfree = 0; foodHigh = 0; tick = 0; nfoc = 0;
-  for (i32 i = 0; i < MAXF; i++) F[i].v = 0;
+  for (i32 i = 0; i < MAXF; i++) { F[i].v = 0; fCell[i] = -1; }
+  __builtin_memset(fHead, 0xff, sizeof fHead); /* -1: every cell empty */
   for (i32 s = 0; s < MAXS; s++) { S[s].alive = 0; human[s] = 0; killedBy[s] = -1; aspect[s] = 1.78f; }
   rebuild();
   for (i32 i = 0; i < 256; i++) frT[i] = minf(3.5f + sqrtf_((float)i / 16.f) * 2.6f, 15.f);
@@ -683,13 +707,11 @@ void sim_set_aspect(i32 s, float a) { if (s >= 0 && s < MAXS) aspect[s] = a < 0.
 void sim_step(void) { step(DT); }
 u32 sim_tick(void) { return tick; }
 
-/* The food grid (cell -> first pellet, pellet -> next), so the server sends each
-   client only the pellets in cells its view overlaps. Chains may run into other
-   cells after reuse, so callers check positions. */
-i32 *sim_food_head(void) { return fHead; }
-i32 *sim_food_next(void) { return fNext; }
-i32 sim_grid_n(void) { return GN; }
-float sim_cell(void) { return CELL; }
+/* Food change log (see foodChanged), drained by the server after every step. */
+u32 *sim_food_events(void) { return fev; }
+i32 sim_food_event_count(void) { return nfev; }
+i32 sim_food_events_lost(void) { return fevLost; }
+void sim_food_events_clear(void) { nfev = 0; fevLost = 0; }
 
 Pub *sim_pub(void) { return pub; }
 short *sim_trail(void) { return &tr[0][0][0]; }
