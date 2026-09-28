@@ -81,8 +81,8 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       el.className = "screen"; el.style.cssText = "z-index:50;background:rgba(4,6,12,.9)";
       el.innerHTML = `<div class="card glass" style="text-align:left"><h2 style="font-size:24px;margin-bottom:10px">${title}</h2>
         <p style="font:12.5px/1.5 ui-monospace,monospace;color:#fde68a;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);border-radius:10px;padding:10px;word-break:break-word"></p>
-        <p style="margin:12px 0 18px;color:var(--dim);font-size:14px;line-height:1.5">Usually fixed by updating the browser or the graphics driver, or by turning on
-        hardware acceleration (browser settings → System). <b>edge://gpu</b> or <b>chrome://gpu</b> shows whether WebGPU is enabled.</p>
+        <p style="margin:12px 0 18px;color:var(--dim);font-size:14px;line-height:1.5">Step-by-step fixes: <a href="https://developer.chrome.com/docs/web-platform/webgpu/troubleshooting-tips"
+        target="_blank" rel="noopener" style="color:var(--accent2)">WebGPU troubleshooting guide</a>.</p>
         ${optimizerOff() ? securityHint() : ""}
         <button class="play" data-a="retry">TRY AGAIN</button>
         <button class="play" data-a="gl" style="margin-top:10px;background:rgba(255,255,255,.08);color:var(--text);box-shadow:none">Use WebGL instead</button></div>`;
@@ -120,7 +120,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   // Renderer switch (Auto = WebGPU if available). Applying it needs a fresh page.
   const rsEl = $("rsw");
   for (const b of rsEl.querySelectorAll("button")) {
-    b.setAttribute("aria-pressed", b.dataset.r === saved);
+    b.setAttribute("aria-pressed", b.dataset.r === (store.get("serpent.renderer") || "auto")); // after any "Use WebGL instead"
     b.onclick = () => { store.set("serpent.renderer", b.dataset.r); location.href = location.pathname; };
   }
   $("rnow").textContent = R.name;
