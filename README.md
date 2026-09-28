@@ -2,7 +2,7 @@
 
  Serpent.io is a fast, free io game in the style of slither.io. It runs in most browsers on desktop or mobile. The offline game is a single self-contained `offline.html`.
 
--  **Different difficuly levels for the AI bots** Rookie, Casual, Hunter, Elite and the rarer Legend.
+-  **Different difficuly levels for the AI bots** Rookie, Casual, Hunter, Elite and Legend.
 -  Has a minimap, allowing you to the positions of different snakes.
 -  **Fast** a WebAssembly simulation and WebGPU rendering (with WebGL 2 as backup) means that The game runs fast even on older machines and doesn't hog resources.
 - Mouse, keyboard and touch controls.

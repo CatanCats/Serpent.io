@@ -27,7 +27,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   /* ---------------- Zero-copy views into WebAssembly memory ----------------
      Memory never grows (all static), so these stay valid forever. */
   const mem = W.memory.buffer, NS = W.snakeCount(), RING = W.ring();
-  const snap = new Float32Array(mem, W.snapPtr(), NS * 10); // alive,x,y,mass,r,skin,tier,near,onScreen,kills
+  const SN = 8, snap = new Float32Array(mem, W.snapPtr(), NS * SN); // per snake: alive, x, y, mass, skin, tier, near, kills
   const lb = new Int32Array(mem, W.rankPrep(), 12);
   const frameBlk = new Float32Array(mem, W.frameBlkPtr(), 12); // std140 Frame block, written by WASM
   const frameOut = new Int32Array(mem, W.frameOutPtr(), 8);    // counts for this frame
@@ -51,18 +51,22 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   SKINS.forEach(([a, b], i) => [a, b].forEach((h, k) => [1, 3, 5].forEach((o, c) => { E.palette[(k * 12 + i) * 4 + c] = parseInt(h.substr(o, 2), 16) / 255; })));
 
   /* ---------------- Renderer: WebGPU first, WebGL 2 as the backup ----------------
-     ?renderer=webgl forces the backup. A lost WebGPU device reloads into WebGL. */
+     ?renderer=webgl forces the backup. If the GPU drops the WebGPU device (driver
+     reset, sleep, GPU process restart) the page reloads into WebGPU again; only a
+     second loss in the same session falls back to WebGL. The menu says why. */
   const canvas = $("gl");
   const saved = store.get("serpent.renderer") || "auto";
-  const want = new URLSearchParams(location.search).get("renderer") || (sessionStorage.getItem("serpent.gl") ? "webgl" : saved);
-  let R = null;
+  const losses = +(sessionStorage.getItem("serpent.gpuLost") || 0);
+  const want = new URLSearchParams(location.search).get("renderer") || (losses >= 2 && saved !== "webgpu" ? "webgl" : saved);
+  let R = null, why = losses >= 2 && want === "webgl" ? "WebGPU stopped twice this session" : "";
   if (want !== "webgl") {
     try { R = await createGPU(canvas, E); }
-    catch (e) { console.warn("WebGPU unavailable, using WebGL 2:", e); R = null; }
-    if (!R && canvas.getContext("webgpu")) { // the canvas is taken by a failed WebGPU attempt: swap it
-      const c2 = canvas.cloneNode(); canvas.replaceWith(c2);
+    catch (e) { why = String(e.message || e).split("\n")[0].slice(0, 90); console.warn("WebGPU unavailable, using WebGL 2:", e); R = null; }
+    if (!R && canvas.getContext("webgpu")) canvas.replaceWith(canvas.cloneNode()); // a failed WebGPU attempt holds the canvas
+    if (R) {
+      R.device.lost.then((info) => { if (info.reason !== "destroyed") { sessionStorage.setItem("serpent.gpuLost", losses + 1); location.reload(); } });
+      setTimeout(() => sessionStorage.removeItem("serpent.gpuLost"), 60000); // healthy for a minute: forget earlier losses
     }
-    if (R) R.device.lost.then((info) => { if (info.reason !== "destroyed") { sessionStorage.setItem("serpent.gl", "1"); location.reload(); } });
   }
   if (!R) R = createGL($("gl"), E);
   if (!R) { document.body.innerHTML = '<p style="padding:40px;font:18px system-ui;color:#fff">This game needs WebGPU or WebGL 2.</p>'; return; }
@@ -76,9 +80,9 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const rsEl = $("rsw");
   for (const b of rsEl.querySelectorAll("button")) {
     b.setAttribute("aria-pressed", b.dataset.r === saved);
-    b.onclick = () => { store.set("serpent.renderer", b.dataset.r); sessionStorage.removeItem("serpent.gl"); location.href = location.pathname; };
+    b.onclick = () => { store.set("serpent.renderer", b.dataset.r); sessionStorage.removeItem("serpent.gpuLost"); location.href = location.pathname; };
   }
-  $("rnow").textContent = R.name;
+  $("rnow").textContent = R.name + (why && R.name.startsWith("WebGL") ? ` (WebGPU: ${why})` : "");
   const qEl = $("qsw");
   const markQ = () => { for (const b of qEl.querySelectorAll("button")) b.setAttribute("aria-pressed", b.dataset.q === quality); };
   for (const b of qEl.querySelectorAll("button")) b.onclick = () => { quality = b.dataset.q; store.set("serpent.quality", quality); markQ(); resize(); };
@@ -183,21 +187,21 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     W.rankPrep(); // fills lb: [alive, player rank, top 10 ids...]
     let html = "";
     for (let i = 0; i < 10 && lb[2 + i] >= 0; i++) {
-      const s = lb[2 + i], b = s * 10, t = snap[b + 6];
+      const s = lb[2 + i], b = s * SN, t = snap[b + 5];
       const tag = s === 0 ? `<span class="tg you">YOU</span>` : `<span class="tg t${t}">${TIERS[t]}</span>`;
-      html += `<li class="${s === 0 ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[snap[b + 5]][0]}"></span><span class="nm">${esc(s === 0 ? playerName() : names[s])}</span>${tag}<span class="sc">${Math.floor(snap[b + 3] * 10)}</span></li>`;
+      html += `<li class="${s === 0 ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[snap[b + 4]][0]}"></span><span class="nm">${esc(s === 0 ? playerName() : names[s])}</span>${tag}<span class="sc">${Math.floor(snap[b + 3] * 10)}</span></li>`;
     }
     if (html !== lastLb) { lbEl.innerHTML = html; lastLb = html; }
     // keep label atlas slots in sync (bots change level when they respawn)
     for (let s = 0; s < NS; s++) {
-      const key = s === 0 ? "p:" + playerName() : snap[s * 10] ? "t" + snap[s * 10 + 6] : slotKey[s];
+      const key = s === 0 ? "p:" + playerName() : snap[s * SN] ? "t" + snap[s * SN + 5] : slotKey[s];
       if (key !== slotKey[s]) drawSlot(s, key);
     }
     if (state !== "play") return;
     $("len").textContent = Math.floor(snap[3] * 10);
     $("rank").textContent = lb[1];
     $("total").textContent = lb[0];
-    $("kills").textContent = snap[9];
+    $("kills").textContent = snap[7];
   }
 
   /* ---------------- Name + level labels (GPU) ----------------
@@ -265,7 +269,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     T.sim += frameMs[0]; T.prep += frameMs[1]; T.gl += t3 - t2; T.hud += t4 - t3; T.n++; fpsAcc += dt;
     if ((perfT += dt) > 0.5 && !perfEl.classList.contains("off")) {
       const a = (v) => (v / T.n).toFixed(2);
-      let near = 0; for (let s = 1; s < NS; s++) near += snap[s * 10] && snap[s * 10 + 7] ? 1 : 0;
+      let near = 0; for (let s = 1; s < NS; s++) near += snap[s * SN] && snap[s * SN + 6] ? 1 : 0;
       const gpu = R.gpuMs >= 0 ? `<b>${R.gpuMs.toFixed(2)} ms</b>` + (R.passMs ? " (" + R.passMs.map((v, i) => `${R.passNames[i]} ${v.toFixed(2)}`).join(" · ") + ")" : "") : R.canTime ? "…" : "n/a";
       perfEl.innerHTML = `<b>${Math.round(T.n / fpsAcc)}</b> fps · <b>${R.name}</b> · CPU/frame: sim <b>${a(T.sim)}</b> · prep <b>${a(T.prep)}</b> · draw <b>${a(T.gl)}</b> · dom <b>${a(T.hud)}</b> ms` +
         `<br>GPU ${gpu}<br>${frameOut[0]} food slots (GPU-culled) · ${frameOut[1]} snakes drawn · res <b>${Math.round(resScale * 100)}%</b> · full-detail bots <b>${near}</b> / ${NS - 1}` + benchTxt;

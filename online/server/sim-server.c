@@ -130,7 +130,7 @@ static i32 snakeNear(i32 s, float x, float y, float extra) {
   return 0;
 }
 
-/* Bot tiers: rookie, casual, hunter, elite, legend (rare) */
+/* Bot tiers: rookie, casual, hunter, elite, legend */
 #define LEGEND 4
 static const i32 T_EVERY[5] = {4, 2, 2, 1, 1};                    /* think every N steps */
 static const float T_LOOK[5] = {0.6f, 1.f, 1.2f, 1.45f, 1.8f};    /* probe reach */
@@ -657,7 +657,8 @@ static void spawnBot(i32 s) {
   float r = frand(), t = frand();
   i32 legends = 0;
   for (i32 o = 1; o <= NB; o++) legends += S[o].alive && S[o].tier == LEGEND;
-  i32 tier = r < 0.34f ? 0 : r < 0.67f ? 1 : r < 0.87f ? 2 : r < 0.985f || legends >= 2 ? 3 : LEGEND;
+  /* rookie 30%, casual 28%, hunter 20%, elite 12%, legend 10% (at most 6 alive at once) */
+  i32 tier = r < 0.30f ? 0 : r < 0.58f ? 1 : r < 0.78f ? 2 : r < 0.90f || legends >= 6 ? 3 : LEGEND;
   S[s].tier = tier;
   spawnSnake(s, T_MASS0[tier] + t * t * T_MASS[tier], tier == LEGEND ? 11 : (i32)(rnd() % 11));
 }

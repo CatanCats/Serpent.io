@@ -7,13 +7,13 @@
    - Optional per-pass GPU timestamps (when the browser exposes them).
    ========================================================================== */
 async function createGPU(canvas, E) {
-  if (!navigator.gpu) return null;
+  if (!navigator.gpu) throw new Error("this browser has no WebGPU");
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
-  if (!adapter) return null;
+  if (!adapter) throw new Error("no WebGPU adapter (graphics driver)");
   const canTime = adapter.features.has("timestamp-query"), F16 = adapter.features.has("shader-f16");
   const device = await adapter.requestDevice({ requiredFeatures: [...(canTime ? ["timestamp-query"] : []), ...(F16 ? ["shader-f16"] : [])] });
   const ctx = canvas.getContext("webgpu");
-  if (!ctx) return null;
+  if (!ctx) throw new Error("canvas has no webgpu context");
   const format = navigator.gpu.getPreferredCanvasFormat();
   ctx.configure({ device, format, alphaMode: "opaque" });
   const { NS, RING } = E;

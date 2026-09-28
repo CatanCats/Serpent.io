@@ -126,7 +126,7 @@ static u32 fBits[GN * FW];
 static float focX, focY, focR = 2000.f;
 static float foodR(void) { return focR * 1.25f; } /* food exists inside this disk */
 
-/* Bot tiers: rookie, casual, hunter, elite, legend (rare) */
+/* Bot tiers: rookie, casual, hunter, elite, legend */
 #define LEGEND 4
 static const i32 T_EVERY[5] = {4, 2, 2, 1, 1};                    /* think every N steps */
 static const float T_LOOK[5] = {0.6f, 1.f, 1.2f, 1.45f, 1.8f};    /* probe reach */
@@ -676,7 +676,8 @@ static void spawnBot(i32 s) {
   float r = frand(), t = frand();
   i32 legends = 0;
   for (i32 o = 1; o < NS; o++) legends += S[o].alive && S[o].tier == LEGEND;
-  i32 tier = r < 0.34f ? 0 : r < 0.67f ? 1 : r < 0.87f ? 2 : r < 0.985f || legends >= 2 ? 3 : LEGEND;
+  /* rookie 30%, casual 28%, hunter 20%, elite 12%, legend 10% (at most 6 alive at once) */
+  i32 tier = r < 0.30f ? 0 : r < 0.58f ? 1 : r < 0.78f ? 2 : r < 0.90f || legends >= 6 ? 3 : LEGEND;
   S[s].tier = tier;
   spawnSnake(s, T_MASS0[tier] + t * t * T_MASS[tier], tier == LEGEND ? 11 : (i32)(rnd() % 11));
 }
@@ -791,7 +792,7 @@ static void update(float dt) {
 
 static i32 nvis, maxK;
 /* per-snake snapshot for JS (camera, HUD, minimap, labels): one read, no calls */
-typedef struct { float alive, x, y, mass, r, skin, tier, near, onScreen, kills; } Snap;
+typedef struct { float alive, x, y, mass, skin, tier, near, kills; } Snap;
 static Snap snap[MAXS];
 
 
@@ -801,9 +802,9 @@ EXPORT("snapshot") void snapshot(void) {
     Snake *k = &S[s];
     Snap *sn = &snap[s];
     sn->alive = (float)k->alive;
-    if (!k->alive) { sn->onScreen = 0; continue; }
+    if (!k->alive) continue;
     float hx = k->phx + (k->hx - k->phx) * alpha, hy = k->phy + (k->hy - k->phy) * alpha;
-    sn->x = hx; sn->y = hy; sn->mass = k->mass; sn->r = k->r; sn->skin = (float)k->skin;
+    sn->x = hx; sn->y = hy; sn->mass = k->mass; sn->skin = (float)k->skin;
     sn->tier = (float)k->tier; sn->near = (float)k->near; sn->kills = (float)k->kills;
   }
 }
@@ -839,7 +840,6 @@ static i32 renderPrep(float cx, float cy, float hw, float hh, float px) {
     k->seen = 0;
     if (!k->alive) continue;
     float hx = snap[s].x, hy = snap[s].y; /* interpolated head */
-    snap[s].onScreen = (float)(hx > cx - hw && hx < cx + hw && hy > cy - hh && hy < cy + hh);
     i32 n = k->n;
     i32 legend = s != 0 && k->tier == LEGEND;
     float W = k->boost ? 1.9f : legend ? 1.5f : 1.08f, m = k->r * W * 2.f + 20.f;
@@ -897,7 +897,6 @@ EXPORT("rankPrep") i32 *rankPrep(void) {
 
 EXPORT("tupPtr") u32 *tupPtr(void) { return tup; }
 EXPORT("hdrPtr") Head *hdrPtr(void) { return hdr; }
-EXPORT("maxK") i32 maxKOut(void) { return maxK; }
 EXPORT("snapPtr") Snap *snapPtr(void) { return snap; }
 EXPORT("trailPtr") short *trailPtr(void) { return &tr[0][0][0]; }
 EXPORT("ring") i32 ringSize(void) { return RING; }

@@ -44,15 +44,23 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   E.palette = new Float32Array(96);
   SKINS.forEach(([a, b], i) => [a, b].forEach((h, k) => [1, 3, 5].forEach((o, c) => { E.palette[(k * 12 + i) * 4 + c] = parseInt(h.substr(o, 2), 16) / 255; })));
 
-  /* ---------------- renderer (same choice logic as offline) ---------------- */
+  /* ---------------- Renderer: WebGPU first, WebGL 2 as the backup ----------------
+     ?renderer=webgl forces the backup. If the GPU drops the WebGPU device (driver
+     reset, sleep, GPU process restart) the page reloads into WebGPU again; only a
+     second loss in the same session falls back to WebGL. The menu says why. */
   const canvas = $("gl");
   const saved = store.get("serpent.renderer") || "auto";
-  const want = new URLSearchParams(location.search).get("renderer") || (sessionStorage.getItem("serpent.gl") ? "webgl" : saved);
-  let R = null;
+  const losses = +(sessionStorage.getItem("serpent.gpuLost") || 0);
+  const want = new URLSearchParams(location.search).get("renderer") || (losses >= 2 && saved !== "webgpu" ? "webgl" : saved);
+  let R = null, why = losses >= 2 && want === "webgl" ? "WebGPU stopped twice this session" : "";
   if (want !== "webgl") {
-    try { R = await createGPU(canvas, E); } catch (e) { console.warn("WebGPU unavailable, using WebGL 2:", e); R = null; }
-    if (!R && canvas.getContext("webgpu")) canvas.replaceWith(canvas.cloneNode());
-    if (R) R.device.lost.then((info) => { if (info.reason !== "destroyed") { sessionStorage.setItem("serpent.gl", "1"); location.reload(); } });
+    try { R = await createGPU(canvas, E); }
+    catch (e) { why = String(e.message || e).split("\n")[0].slice(0, 90); console.warn("WebGPU unavailable, using WebGL 2:", e); R = null; }
+    if (!R && canvas.getContext("webgpu")) canvas.replaceWith(canvas.cloneNode()); // a failed WebGPU attempt holds the canvas
+    if (R) {
+      R.device.lost.then((info) => { if (info.reason !== "destroyed") { sessionStorage.setItem("serpent.gpuLost", losses + 1); location.reload(); } });
+      setTimeout(() => sessionStorage.removeItem("serpent.gpuLost"), 60000); // healthy for a minute: forget earlier losses
+    }
   }
   if (!R) R = createGL($("gl"), E);
   if (!R) { document.body.innerHTML = '<p style="padding:40px;font:18px system-ui;color:#fff">This game needs WebGPU or WebGL 2.</p>'; return; }
@@ -61,9 +69,9 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   let quality = store.get("serpent.quality") || "sharp";
   for (const b of $("rsw").querySelectorAll("button")) {
     b.setAttribute("aria-pressed", b.dataset.r === saved);
-    b.onclick = () => { store.set("serpent.renderer", b.dataset.r); sessionStorage.removeItem("serpent.gl"); location.reload(); };
+    b.onclick = () => { store.set("serpent.renderer", b.dataset.r); sessionStorage.removeItem("serpent.gpuLost"); location.reload(); };
   }
-  $("rnow").textContent = R.name;
+  $("rnow").textContent = R.name + (why && R.name.startsWith("WebGL") ? ` (WebGPU: ${why})` : "");
   const qEl = $("qsw");
   const markQ = () => { for (const b of qEl.querySelectorAll("button")) b.setAttribute("aria-pressed", b.dataset.q === quality); };
   for (const b of qEl.querySelectorAll("button")) b.onclick = () => { quality = b.dataset.q; store.set("serpent.quality", quality); markQ(); resize(); };
@@ -198,8 +206,6 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       case 3: {
         board = { alive: d.getUint16(1, true), rank: d.getUint16(3, true), top: [] };
         for (let i = 0, k = d.getUint8(5), o = 6; i < k; i++, o += 8) board.top.push([d.getUint8(o), d.getUint8(o + 1), d.getUint8(o + 2), d.getUint8(o + 3), d.getFloat32(o + 4, true)]);
-        let players = 0; // humans are counted from the minimap list below
-        for (const e of miniList) players += human[e[0]] ? 1 : 0;
         break;
       }
       case 4: { const s = d.getUint8(1), len = d.getUint8(2); pnames[s] = new TextDecoder().decode(new Uint8Array(d.buffer, d.byteOffset + 3, len)); human[s] = len ? 1 : human[s]; slotKey[s] = ""; break; }
