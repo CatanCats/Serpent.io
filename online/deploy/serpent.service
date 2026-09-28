@@ -1,0 +1,21 @@
+# systemd unit: runs the Serpent.io server at boot and restarts it if it stops.
+# Install: sudo cp online/deploy/serpent.service /etc/systemd/system/ && sudo systemctl enable --now serpent
+[Unit]
+Description=Serpent.io online game server
+After=network-online.target
+
+[Service]
+User=serpent
+WorkingDirectory=/opt/serpent/online/server
+Environment=PORT=8080 BOTS=60 WEB_ROOT=/opt/serpent
+ExecStart=/opt/serpent/online/server/target/release/serpent-server
+Restart=always
+RestartSec=2
+# hardening: the server needs nothing but its port and the page files
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

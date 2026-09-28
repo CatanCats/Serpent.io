@@ -13,7 +13,8 @@ typedef unsigned int u32;
 typedef int i32;
 typedef unsigned char u8;
 
-#define EXPORT(n) __attribute__((export_name(n)))
+/* Built natively (linked into the Rust server). Exported functions are sim_*. */
+#define EXPORT(n)
 #define PI 3.14159265f
 #define TAU 6.28318531f
 #define MAXS 128         /* snakes: bots in slots 1..NB, humans in every other slot */
@@ -30,10 +31,6 @@ typedef unsigned char u8;
 #define POOL 65536       /* segment grid nodes */
 #define REBUILD 32       /* steps between grid compactions */
 
-/* Freestanding: the compiler may call these; with -mbulk-memory they become the
-   native memory.copy / memory.fill instructions. */
-void *memcpy(void *d, const void *s, unsigned long n) { __builtin_memcpy(d, s, n); return d; }
-void *memset(void *d, int v, unsigned long n) { __builtin_memset(d, v, n); return d; }
 
 /* ---------- math (no libm available) ---------- */
 static float sqrtf_(float x) { return __builtin_sqrtf(x); }
@@ -101,7 +98,7 @@ static u32 gC[POOL]; static u8 gS[POOL]; static i32 gN;
 
 /* Level of detail: one focus per human player (its view). Snakes near any focus
    get collisions, eating and real AI; everything else runs the statistical model. */
-static float focX[MAXS], focY[MAXS], focR[MAXS]; static i32 foodNear[MAXS], nfoc;
+static float focX[MAXS + 1], focY[MAXS + 1], focR[MAXS + 1]; static i32 foodNear[MAXS + 1], nfoc;
 static float foodR(i32 f) { return focR[f] * 1.25f; } /* food exists inside this disk */
 static u8 human[MAXS];           /* slot belongs to a network player */
 static i32 killedBy[MAXS];       /* who killed each human (-1: the world edge) */
@@ -587,9 +584,12 @@ static void publish(void) {
 /* ---------- simulation step ---------- */
 static i32 deaths[MAXS * 2];
 
-/* one focus per living human: its view, sized exactly like the offline camera */
+/* one focus per living human: its view, sized exactly like the offline camera;
+   plus the snake the menu is showing, while anyone is on the menu */
+static float exX, exY, exR; static i32 exOn;
 static void setFoci(void) {
   nfoc = 0;
+  if (exOn) { focX[0] = exX; focY[0] = exY; focR[0] = exR; nfoc = 1; }
   for (i32 s = 0; s < NS; s++) {
     if (!human[s] || !S[s].alive) continue;
     float camH = 560.f + (S[s].r - 12.f) * 18.f, a = aspect[s];
@@ -639,7 +639,7 @@ static void step(float dt) {
 }
 
 /* ---------- exports (used by server.js) ---------- */
-EXPORT("init") void init(u32 seed, i32 bots) {
+void sim_init(u32 seed, i32 bots) {
   rs = seed ? seed : 1u;
   NS = MAXS; NB = bots < MAXS - 2 ? bots : MAXS - 2;
   nfree = 0; foodHigh = 0; tick = 0; nfoc = 0;
@@ -655,16 +655,16 @@ EXPORT("init") void init(u32 seed, i32 bots) {
 }
 
 /* A player joins: claim a free non-bot slot (-1 = server full). */
-EXPORT("addHuman") i32 addHuman(void) {
+i32 sim_add_human(void) {
   for (i32 s = 0; s < MAXS; s++) if (!isBot(s) && !human[s] && !S[s].alive) { human[s] = 1; killedBy[s] = -1; return s; }
   return -1;
 }
-EXPORT("removeHuman") void removeHuman(i32 s) {
+void sim_remove_human(i32 s) {
   if (s < 0 || s >= MAXS || !human[s]) return;
   killSnake(s, -1); human[s] = 0; /* leaves food behind, like any death */
 }
 /* (Re)spawn a player's snake on the outer rim, like offline. */
-EXPORT("spawnHuman") void spawnHuman(i32 s, i32 skin) {
+void sim_spawn_human(i32 s, i32 skin) {
   if (s < 0 || s >= MAXS || !human[s] || S[s].alive) return;
   S[s].tier = 0; killedBy[s] = -1;
   spawnSnake(s, 10.f, (skin % 12 + 12) % 12);
@@ -672,31 +672,32 @@ EXPORT("spawnHuman") void spawnHuman(i32 s, i32 skin) {
   for (i32 f = 0; f < nfoc; f++) maintainFood(f, 4000);
   publish();
 }
-EXPORT("setInput") void setInput(i32 s, float aim, i32 boost) {
+void sim_set_input(i32 s, float aim, i32 boost) {
   if (s < 0 || s >= MAXS || !human[s] || !S[s].alive) return;
   S[s].tang = wrapa(aim); S[s].wantBoost = boost != 0;
 }
-EXPORT("setAspect") void setAspect(i32 s, float a) { if (s >= 0 && s < MAXS) aspect[s] = a < 0.3f ? 0.3f : a > 4.f ? 4.f : a; }
+void sim_set_menu_focus(i32 on, float x, float y, float r) { exOn = on; exX = x; exY = y; exR = r; }
+void sim_set_aspect(i32 s, float a) { if (s >= 0 && s < MAXS) aspect[s] = a < 0.3f ? 0.3f : a > 4.f ? 4.f : a; }
 
 /* Fixed 60 Hz steps, driven by server.js. */
-EXPORT("tick") void stepExport(void) { step(DT); }
-EXPORT("now") u32 nowTick(void) { return tick; }
+void sim_step(void) { step(DT); }
+u32 sim_tick(void) { return tick; }
 
-/* Timing of many steps in one go (server benchmark). */
-extern double nowMs(void) __attribute__((import_module("env"), import_name("now")));
-EXPORT("bench") float bench(i32 steps) {
-  double t = nowMs();
-  for (i32 i = 0; i < steps; i++) step(DT);
-  return (float)((nowMs() - t) * 1000.0 / steps); /* microseconds per step */
-}
+/* The food grid (cell -> first pellet, pellet -> next), so the server sends each
+   client only the pellets in cells its view overlaps. Chains may run into other
+   cells after reuse, so callers check positions. */
+i32 *sim_food_head(void) { return fHead; }
+i32 *sim_food_next(void) { return fNext; }
+i32 sim_grid_n(void) { return GN; }
+float sim_cell(void) { return CELL; }
 
-EXPORT("pubPtr") Pub *pubPtr(void) { return pub; }
-EXPORT("trailPtr") short *trailPtr(void) { return &tr[0][0][0]; }
-EXPORT("foodPtr") Food *foodPtr(void) { return F; }
-EXPORT("foodCount") i32 foodCount(void) { return foodHigh; }
-EXPORT("maxFood") i32 maxFood(void) { return MAXF; }
-EXPORT("ring") i32 ringSize(void) { return RING; }
-EXPORT("maxSnakes") i32 maxSnakes(void) { return MAXS; }
-EXPORT("botCount") i32 botCount(void) { return NB; }
-EXPORT("worldRadius") float worldRadius(void) { return WR; }
-EXPORT("killedBy") i32 killedByExport(i32 s) { return killedBy[s]; }
+Pub *sim_pub(void) { return pub; }
+short *sim_trail(void) { return &tr[0][0][0]; }
+Food *sim_food(void) { return F; }
+i32 sim_food_count(void) { return foodHigh; }
+i32 sim_max_food(void) { return MAXF; }
+i32 sim_ring(void) { return RING; }
+i32 sim_max_snakes(void) { return MAXS; }
+i32 sim_bot_count(void) { return NB; }
+float sim_world_radius(void) { return WR; }
+i32 sim_killed_by(i32 s) { return killedBy[s]; }

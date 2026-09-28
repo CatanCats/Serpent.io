@@ -4,13 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#070a12">
-<title>Serpent.io – free slither.io-style snake game in your browser</title>
-<meta name="description" content="Serpent.io is a free, fast slither.io-style snake game that runs in any browser: grow by eating, cut off 60 AI snakes in five difficulty tiers, and climb the leaderboard. No download, no sign-up, works offline.">
+<title>Serpent.io – play online: free slither.io-style snake game</title>
+<meta name="description" content="Serpent.io is a free, fast slither.io-style snake game in your browser: play online with other people and 60 AI snakes in five difficulty tiers, or offline on your own device. No download, no sign-up.">
 <meta name="keywords" content="snake game, slither.io, slither io clone, io game, browser game, html5 game, free online game, offline game, snake io, webgpu game, webassembly game, single file game">
 <meta name="author" content="CatanCats">
 <meta name="robots" content="index, follow">
-<link rel="canonical" href="https://catancats.github.io/Snake-Game/offline.html">
-<meta property="og:url" content="https://catancats.github.io/Snake-Game/offline.html">
+<link rel="canonical" href="https://catancats.github.io/Snake-Game/">
+<meta property="og:url" content="https://catancats.github.io/Snake-Game/">
 <meta name="application-name" content="Serpent.io">
 <meta name="apple-mobile-web-app-title" content="Serpent.io">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -129,8 +129,13 @@
   .grid3 b { display: block; font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums; }
   .grid3 span { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); }
   .new { color: var(--accent) !important; }
-  a.mode { display: inline-block; margin-top: 12px; font-size: 14px; color: var(--accent2); text-decoration: none; border-bottom: 1px solid rgba(56,189,248,.35); }
+  .tg.pl { color: #e0e7ff; background: rgba(129,140,248,.22); }
+  .net { margin-top: 12px; font-size: 13px; color: var(--dim); min-height: 1.3em; }
+  .net.ok::before { content: "● "; color: var(--accent); }
+  .net.bad { color: #fde68a; }
+  a.mode { display: inline-block; margin-top: 10px; font-size: 14px; color: var(--accent2); text-decoration: none; border-bottom: 1px solid rgba(56,189,248,.35); }
   a.mode:hover { color: #fff; }
+  button.play:disabled { filter: grayscale(.8) brightness(.7); cursor: default; box-shadow: none; }
 
   @media (max-width: 640px) {
     #board { width: 164px; padding: 10px 12px; }
@@ -158,11 +163,12 @@
 <div id="menu" class="screen">
   <div class="card glass">
     <div class="logo">serpent<span>.io</span></div>
-    <p class="tag">Eat. Grow. Cut them off.</p>
+    <p class="tag">Online · eat, grow, cut them off.</p>
     <input id="name" maxlength="16" placeholder="Your nickname" autocomplete="off" spellcheck="false">
     <div class="skins" id="skins" role="group" aria-label="Skin"></div>
-    <button class="play" id="play">PLAY</button>
-    <a class="mode" href="./">← Play online with others</a>
+    <button class="play" id="play">PLAY ONLINE</button>
+    <div class="net" id="net">Connecting…</div>
+    <a class="mode" href="offline.html">Play offline instead (runs on this device) →</a>
     <div class="keys"><kbd>Mouse</kbd> steer · <kbd>Click</kbd>/<kbd>Space</kbd> boost<br><kbd>←</kbd><kbd>→</kbd> steer with keys · Touch: drag to steer, 2 fingers boost · <kbd>P</kbd> perf</div>
     <div class="rsw" id="qsw" role="group" aria-label="Quality">
       <span>Quality</span>
@@ -172,8 +178,7 @@
       <span>Renderer</span>
       <button data-r="auto">Auto</button><button data-r="webgpu">WebGPU</button><button data-r="webgl">WebGL</button>
     </div>
-    <div class="tech"><span id="tech"></span> · now: <span id="rnow">…</span></div>
-    <div class="slow" id="slowNote" hidden></div>
+    <div class="tech">Server-run world · GPU-drawn · now: <span id="rnow">…</span></div>
   </div>
 </div>
 
@@ -193,7 +198,6 @@
 
 <script>
 "use strict";
-const WASM_BASE64 = "__WASM_BASE64__";
 /*__RENDER_GL__*/
 /*__RENDER_GPU__*/
 /*__APP__*/

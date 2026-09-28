@@ -1,0 +1,7 @@
+# Caddy: HTTPS (automatic Let's Encrypt certificate) in front of the game server.
+# Replace play.example.com with your domain (or <server-ip-with-dashes>.sslip.io
+# if you have no domain), point it at the server, then: sudo systemctl reload caddy
+play.example.com {
+	encode gzip
+	reverse_proxy 127.0.0.1:8080
+}

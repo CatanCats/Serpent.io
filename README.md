@@ -1,13 +1,16 @@
 # serpent.io  a Open Source slither.io-style snake game for the browser
 
- Serpent.io is a fast, free io game in the style of slither.io. It runs in most browsers on desktop or mobile. The game runs in a self-contained `index.html`.
+ Serpent.io is a fast, free io game in the style of slither.io. It runs in most browsers on desktop or mobile. The offline game is a single self-contained `offline.html`.
 
 -  **Different difficuly levels for the AI bots** Rookie, Casual, Hunter, Elite and the rarer Legend.
 -  Has a minimap, allowing you to the positions of different snakes.
 -  **Fast** a WebAssembly simulation and WebGPU rendering (with WebGL 2 as backup) means that The game runs fast even on older machines and doesn't hog resources.
 - Mouse, keyboard and touch controls.
 
-**Play the game here: [catancats.github.io/Snake-Game](https://catancats.github.io/Snake-Game/)**, will soon be on a actual website with multiplayer options, download the index.html to play offline.
+**Play the game here: [catancats.github.io/Snake-Game](https://catancats.github.io/Snake-Game/)**. The front page plays **online** with other people once the server is up; **[offline.html](https://catancats.github.io/Snake-Game/offline.html)** is the original offline game, running entirely on your device (download it to play without internet). Each menu has a link to switch.
+
+## Online
+The online version uses the same rules and bots. A server runs the world (the offline game's C simulation compiled to native code, plus Rust networking), and your browser only draws it. Details, measurements and how to run or deploy it: [online/README.md](online/README.md).
 
 ## Controls
 | Action | Mouse | Keyboard | Touch |
@@ -53,7 +56,7 @@ Press **P* for:
 - `src/app.js`: UI, input, HUD, labels and the main loop.
 - `src/render-gpu.js` / `src/render-gl.js`: the two renderers.
 - `src/index.html`: the page.
-- `build.mjs` inlines everything into `index.html`.
+- `build.mjs` builds `offline.html` (the offline game) and `index.html` (the online front page).
 
 ## Rebuilding
 ```sh
