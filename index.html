@@ -1353,7 +1353,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       let any = x > x0 && x < x1 && y > y0 && y < y1;
       const reach = n * sp;
       if (!any && (x < x0 - reach || x > x1 + reach || y < y0 - reach || y > y1 + reach)) continue;
-      for (let i = 0; i < n && !any; i += 16) { const [tx, ty] = TXY(s, i), g = sp * 15; // every 16th point, margin 15 spacings any = tx > x0 - g && tx < x1 + g && ty > y0 - g && ty < y1 + g; }
+      for (let i = 0; i < n && !any; i += 16) { const [tx, ty] = TXY(s, i), g = sp * 15; any = tx > x0 - g && tx < x1 + g && ty > y0 - g && ty < y1 + g; } // every 16th point, margin 15 spacings
       if (!any) continue;
       // the interpolated head is behind the newest points: attach to the newest one it is ahead of
       const ca = Math.cos(ha[s]), sa = Math.sin(ha[s]);
