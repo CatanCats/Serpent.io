@@ -201,18 +201,23 @@ const WASM_BASE64 = "AGFzbQEAAAABTg5gAAF8YAF/AX1gAABgAAF/YAh9fX9/fX19fQBgAn9/AGA
      resize(vw, vh), placeMini(cx, cy, rPx), labelSlot(canvas, x, y), draw(frameNo, playing, timing)
    ========================================================================== */
 /* Floor layout, shared by both renderers (this file is inlined before render-gpu.js). */
-const FLOOR_GX = 48, FLOOR_GY = 28;            // shading grid cells across / down the screen
-const FLOOR_RING_SEG = 256;                    // segments of the world-edge ring
+const FLOOR_BASE = [.063, .079, .125];         // the floor colour: the screen is simply cleared to it
+const FLOOR_GLOW = [.9 * .035, .3 * .035, .4 * .035]; // centre glow added to it (flat inside 30% of the world radius)
+const FLOOR_RING_SEG = 256;                    // segments of the centre disc / world-edge band
 const FLOOR_HX = (46 * Math.sqrt(3)).toFixed(4), FLOOR_HY = "46.";  // hex lattice period (world units)
 const FLOOR_LINE = "0.9";                      // hex line half width (world units)
 /* What the floor needs this frame, from the Frame block [camX camY halfW halfH | px ...| .. WR]. */
 function floorPlan(fb, p) {
   const cx = fb[0], cy = fb[1], hw = fb[2], hh = fb[3], px = fb[4], WR = fb[10], HX = 46 * Math.sqrt(3), HY = 46;
-  const s = Math.max((2 * hw) / FLOOR_GX, (2 * hh) / FLOOR_GY); // one grid cell, in world units
-  p.rw = 14 + px;                                               // edge glow width
-  p.rIn = WR - 6 * p.rw - s - 4; p.rOut = WR + 6 * p.rw + s + 4; // the ring covers where the grid can't be exact
   const d = Math.hypot(cx, cy), reach = Math.hypot(hw, hh);
-  p.ring = d + reach > p.rIn && d - reach < p.rOut;
+  p.rw = 14 + px;                                               // edge glow width
+  p.core = WR * .37 + 2;                                        // centre glow: a disc of this radius
+  p.rIn = WR - 6 * p.rw - 4; p.rOut = d + reach + 8;            // edge glow and outside the world: a band
+  p.bands = (d - reach < p.core ? 1 : 0) | (d + reach > p.rIn ? 2 : 0); // which of the two are on screen
+  const inCore = d + reach < WR * .3;                           // screen wholly inside the glow's flat middle:
+  if (inCore) p.bands &= 2;                                     // clear straight to the glowing colour instead
+  const c = p.clear || (p.clear = [0, 0, 0, 1]);
+  for (let i = 0; i < 3; i++) c[i] = FLOOR_BASE[i] + (inCore ? FLOOR_GLOW[i] : 0);
   p.fade = 1 - Math.min(1, Math.max(0, (px - 3) / 2));          // zoomed far out: lines fade, then are skipped
   p.i0 = Math.floor((cx - hw) / HX) - 1; p.j0 = Math.floor((cy - hh) / HY) - 1;
   p.nx = Math.ceil((2 * hw) / HX) + 3;
@@ -234,57 +239,41 @@ function createGL(canvas, E) {
   // highp members: fragment shaders below default to mediump (half precision on mobile GPUs)
   const FRAME = `layout(std140) uniform Frame { highp vec4 uCamHalf; highp vec4 uPxTime; highp vec4 uResWR; };`;
 
-  /* Floor: most pixels need no work of their own.
-     1. A coarse grid (FLOOR_GX x FLOOR_GY cells) covers the screen; its ~1,400 corners
-        compute the large, slow shading (base colour, screen-edge darkening, centre
-        glow, outside-the-world tint) and the GPU blends between them: per pixel
-        there is no texture and no maths, just the interpolated colour.
-     2. Near the world's edge the glow is too sharp for the grid, so a thin ring
-        around the edge redoes those pixels exactly, and only when it is on screen.
+  /* Floor: most pixels need no work at all.
+     1. The screen is cleared to the floor colour (FLOOR_BASE). A clear is nearly free
+        (GPUs mark whole blocks as "clear colour" instead of writing every pixel), so
+        most of the floor costs nothing.
+     2. Only where the colour differs is anything drawn: the centre glow (a disc) and
+        the world-edge glow plus outside-the-world tint (a band). Each is drawn only when
+        it is on screen.
      3. Hex outlines are thin line quads (a few % of the pixels) that darken what
         is under them. */
   const FLOOR_SHADE = `
-  const vec3 FLOOR_BASE=vec3(.063,.079,.125);
-  vec3 floorShade(vec2 w, vec2 v, float rw){ // w: world position, v: screen position * .72
-    vec3 col=FLOOR_BASE; float WRr=uResWR.z, r=length(w);
+  vec3 floorShade(vec2 w, float rw){ // w: world position
+    vec3 col=vec3(${FLOOR_BASE.join(",")}); float WRr=uResWR.z, r=length(w);
     if(r>WRr-2.) col=mix(col,col*vec3(.55,.22,.28)+vec3(.05,0,.01),smoothstep(WRr-2.,WRr+2.,r));
     if(abs(r-WRr)<rw*6.) col+=vec3(1.,.25,.35)*exp(-abs(r-WRr)/rw)*(.7+.3*sin(uPxTime.y*3.))*.55;
-    if(r<WRr*.37) col+=vec3(.9,.3,.4)*.035*(1.-smoothstep(WRr*.3,WRr*.37,r));
-    return col*(1.-.35*dot(v,v));
-  }`;
-  const FLAT_FS = `#version 300 es
-  precision mediump float;
-  in vec3 vCol; out vec4 o;
-  void main(){ o=vec4(vCol,1); }`;
-  const GRID_VS = `#version 300 es
-  ${FRAME}
-  ${FLOOR_SHADE}
-  out vec3 vCol;
-  void main(){
-    int c=gl_VertexID/6, k=gl_VertexID-c*6;                     // two triangles per cell
-    int dx=(k==1||k==4||k==5)?1:0, dy=(k==2||k==3||k==5)?1:0;
-    vec2 p=vec2(float(c%${FLOOR_GX}+dx),float(c/${FLOOR_GX}+dy))/vec2(${FLOOR_GX}.,${FLOOR_GY}.)*2.-1.;
-    gl_Position=vec4(p,0,1);
-    vCol=floorShade(uCamHalf.xy+vec2(p.x,-p.y)*uCamHalf.zw, p*.72, 14.+uPxTime.x);
+    if(r<WRr*.37) col+=vec3(${FLOOR_GLOW.join(",")})*(1.-smoothstep(WRr*.3,WRr*.37,r));
+    return col;
   }`;
   const RING_VS = `#version 300 es
   ${FRAME}
   uniform vec3 uRing;                                           // inner radius, outer radius, glow width
-  out vec2 vW, vV;
+  out vec2 vW;
   void main(){
     int q=gl_VertexID/6, k=gl_VertexID-q*6;
     int da=(k==1||k==4||k==5)?1:0, dr=(k==2||k==3||k==5)?1:0;
     float a=float(q+da)*${(2 * Math.PI / FLOOR_RING_SEG).toFixed(8)}, r=dr==1?uRing.y:uRing.x;
     vec2 w=vec2(cos(a),sin(a))*r, c=(w-uCamHalf.xy)/uCamHalf.zw;
-    gl_Position=vec4(c.x,-c.y,0,1); vW=w; vV=c*.72;
+    gl_Position=vec4(c.x,-c.y,0,1); vW=w;
   }`;
   const RING_FS = `#version 300 es
   precision highp float;
   ${FRAME}
   ${FLOOR_SHADE}
   uniform vec3 uRing;
-  in vec2 vW, vV; out vec4 o;
-  void main(){ o=vec4(floorShade(vW, vec2(vV.x,-vV.y), uRing.z),1); }`;
+  in vec2 vW; out vec4 o;
+  void main(){ o=vec4(floorShade(vW, uRing.z),1); }`;
   const HEX_VS = `#version 300 es
   ${FRAME}
   uniform ivec3 uHex;                                           // first column, first row, columns
@@ -514,7 +503,7 @@ function createGL(canvas, E) {
     if (pi !== gl.INVALID_INDEX) gl.uniformBlockBinding(p, pi, 1);
     return p;
   }
-  const gridP = prog(GRID_VS, FLAT_FS), ringP = prog(RING_VS, RING_FS), hexP = prog(HEX_VS, HEX_FS), foodP = prog(VS, FS), ribP = prog(RVS, RFS), lblP = prog(LVS, LFS), miniP = prog(MVS, MFS, false);
+  const ringP = prog(RING_VS, RING_FS), hexP = prog(HEX_VS, HEX_FS), foodP = prog(VS, FS), ribP = prog(RVS, RFS), lblP = prog(LVS, LFS), miniP = prog(MVS, MFS, false);
 
   // Textures live on fixed units for the whole run (no per-frame rebinding):
   // unit 0 trail, unit 2 label atlas.
@@ -601,11 +590,15 @@ function createGL(canvas, E) {
       gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR]);
       gl.viewport(0, 0, vw, vh);
 
-      mark(); // floor: grid (+ edge ring when on screen) opaque, then hex lines multiplied in
+      mark(); // floor: clear to the floor colour, glow disc/band only when on screen, hex lines multiplied in
       floorPlan(E.frameBlk, plan);
+      gl.clearColor(plan.clear[0], plan.clear[1], plan.clear[2], 1); gl.clear(gl.COLOR_BUFFER_BIT);
       gl.disable(gl.BLEND); gl.bindVertexArray(emptyVao);
-      gl.useProgram(gridP); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_GX * FLOOR_GY * 6);
-      if (plan.ring) { gl.useProgram(ringP); gl.uniform3f(ringU, plan.rIn, plan.rOut, plan.rw); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6); }
+      if (plan.bands) {
+        gl.useProgram(ringP);
+        if (plan.bands & 1) { gl.uniform3f(ringU, 0, plan.core, plan.rw); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6); }
+        if (plan.bands & 2) { gl.uniform3f(ringU, plan.rIn, plan.rOut, plan.rw); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6); }
+      }
       gl.enable(gl.BLEND);
       if (plan.hexes) {
         gl.blendFunc(gl.ZERO, gl.SRC_COLOR);
@@ -665,7 +658,7 @@ struct Mini { c: vec4f };
 @group(0) @binding(6) var<uniform> M: Mini;
 // skin palette (12 main, then 12 stripe colours): read once per vertex, passed to pixels flat
 @group(0) @binding(7) var<uniform> PAL: array<vec4f, 24>;
-struct Floor { ring: vec4f, hex: vec4i };  // ring: inner r, outer r, glow width, line fade | hex: first column, first row, columns
+struct Floor { band: vec4f, hex: vec4i, fade: vec4f };  // band: centre disc r, edge band inner r, outer r, glow width | hex: first column, first row, columns | line fade
 @group(0) @binding(8) var<uniform> FL: Floor;
 const RM: i32 = ${RING - 1};
 const CR: f32 = 2.38095238;   // 1 / 0.42: circle radius in segment units
@@ -673,32 +666,25 @@ const SP: f32 = 0.42;
 
 fn quad(vi: u32) -> vec2f { return vec2f(f32(vi & 1u), f32(vi >> 1u)); }
 
-// ---------- floor (see render-gl.js for the idea: grid + edge ring + hex lines) ----------
-fn floorShade(w: vec2f, v: vec2f, rw: f32) -> vec3f { // w: world position, v: screen position * .72
-  var col = vec3f(.063, .079, .125); let WR = F.resWR.z; let r = length(w);
+// ---------- floor (see render-gl.js for the idea: clear + glow disc/band + hex lines) ----------
+fn floorShade(w: vec2f, rw: f32) -> vec3f { // w: world position
+  var col = vec3f(${FLOOR_BASE.join(", ")}); let WR = F.resWR.z; let r = length(w);
   if (r > WR - 2.) { col = mix(col, col * vec3f(.55, .22, .28) + vec3f(.05, 0., .01), smoothstep(WR - 2., WR + 2., r)); }
   if (abs(r - WR) < rw * 6.) { col += vec3f(1., .25, .35) * exp(-abs(r - WR) / rw) * (.7 + .3 * sin(F.pxTime.y * 3.)) * .55; }
-  if (r < WR * .37) { col += vec3f(.9, .3, .4) * .035 * (1. - smoothstep(WR * .3, WR * .37, r)); }
-  return col * (1. - .35 * dot(v, v));
+  if (r < WR * .37) { col += vec3f(${FLOOR_GLOW.join(", ")}) * (1. - smoothstep(WR * .3, WR * .37, r)); }
+  return col;
 }
 fn corner(k: u32) -> vec2f { return vec2f(select(0., 1., k == 1u || k == 4u || k == 5u), select(0., 1., k == 2u || k == 3u || k == 5u)); } // 2 triangles
-struct ColO { @builtin(position) pos: vec4f, @location(0) col: vec3f };
-@vertex fn vsGrid(@builtin(vertex_index) vi: u32) -> ColO {
-  let c = vi / 6u; let d = corner(vi % 6u);
-  let p = (vec2f(f32(c % ${FLOOR_GX}u), f32(c / ${FLOOR_GX}u)) + d) / vec2f(${FLOOR_GX}., ${FLOOR_GY}.) * 2. - 1.;
-  var o: ColO; o.pos = vec4f(p, 0., 1.);
-  o.col = floorShade(F.camHalf.xy + vec2f(p.x, -p.y) * F.camHalf.zw, p * .72, 14. + F.pxTime.x);
-  return o;
-}
-@fragment fn fsFlat(i: ColO) -> @location(0) vec4f { return vec4f(i.col, 1.); } // no texture, no maths
-struct RingO { @builtin(position) pos: vec4f, @location(0) w: vec2f, @location(1) v: vec2f };
-@vertex fn vsRing(@builtin(vertex_index) vi: u32) -> RingO {
+struct RingO { @builtin(position) pos: vec4f, @location(0) w: vec2f };
+// instance 0: the centre disc (0 .. band.x); instance 1: the edge band (band.y .. band.z)
+@vertex fn vsRing(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> RingO {
   let q = vi / 6u; let d = corner(vi % 6u);
-  let a = (f32(q) + d.x) * ${(2 * Math.PI / FLOOR_RING_SEG).toFixed(8)}; let r = select(FL.ring.x, FL.ring.y, d.y > .5);
+  let a = (f32(q) + d.x) * ${(2 * Math.PI / FLOOR_RING_SEG).toFixed(8)};
+  let r = select(select(0., FL.band.y, ii == 1u), select(FL.band.x, FL.band.z, ii == 1u), d.y > .5);
   let w = vec2f(cos(a), sin(a)) * r; let c = (w - F.camHalf.xy) / F.camHalf.zw;
-  var o: RingO; o.pos = vec4f(c.x, -c.y, 0., 1.); o.w = w; o.v = c * .72; return o;
+  var o: RingO; o.pos = vec4f(c.x, -c.y, 0., 1.); o.w = w; return o;
 }
-@fragment fn fsRing(i: RingO) -> @location(0) vec4f { return vec4f(floorShade(i.w, i.v, FL.ring.z), 1.); }
+@fragment fn fsRing(i: RingO) -> @location(0) vec4f { return vec4f(floorShade(i.w, FL.band.w), 1.); }
 struct HexO { @builtin(position) pos: vec4f, @location(0) d: f32, @location(1) @interpolate(flat) a: f32 };
 @vertex fn vsHex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> HexO {
   // each hex owns 3 of its 6 edges (the rest belong to neighbours); unit hex: inradius .5
@@ -710,7 +696,7 @@ struct HexO { @builtin(position) pos: vec4f, @location(0) d: f32, @location(1) @
   let A = ctr + ea[e] * 46.; let B = ctr + eb[e] * 46.; let dd = normalize(B - A); let n = vec2f(-dd.y, dd.x);
   let px = F.pxTime.x; let side = select(-1., 1., k.y > .5) * (${FLOOR_LINE} + px); // the line + a pixel of antialiasing
   let c = (select(A, B, k.x > .5) + n * side - F.camHalf.xy) / F.camHalf.zw;
-  var o: HexO; o.pos = vec4f(c.x, -c.y, 0., 1.); o.d = side; o.a = min(1., ${FLOOR_LINE} * 2. / px) * FL.ring.w; return o;
+  var o: HexO; o.pos = vec4f(c.x, -c.y, 0., 1.); o.d = side; o.a = min(1., ${FLOOR_LINE} * 2. / px) * FL.fade.x; return o;
 }
 @fragment fn fsHex(i: HexO) -> @location(0) vec4f { // multiplied into the floor (blend: dst * src)
   let a = clamp((${FLOOR_LINE} - abs(i.d)) / F.pxTime.x + .5, 0., 1.) * i.a;
@@ -893,8 +879,8 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   q.writeBuffer(palBuf, 0, E.palette);
   const trailBuf = buf(NS * RING * 4, U.STORAGE | U.COPY_DST);
   // trail copy on the GPU: rows of on-screen snakes are kept in sync by WASM's upload list
-  // floor: this frame's edge ring and hex range (32 bytes: 4 floats, 4 ints), see floorPlan
-  const floorBuf = buf(32, U.UNIFORM | U.COPY_DST), floorData = new ArrayBuffer(32);
+  // floor: this frame's glow disc/band and hex range (48 bytes), see floorPlan
+  const floorBuf = buf(48, U.UNIFORM | U.COPY_DST), floorData = new ArrayBuffer(48);
   const floorF = new Float32Array(floorData), floorI = new Int32Array(floorData), plan = {};
   const atlasTex = device.createTexture({ size: [E.AW, E.AH], format: "rgba8unorm", // drawn ~1:1 with the screen: no mips
     usage: TU.TEXTURE_BINDING | TU.RENDER_ATTACHMENT | TU.COPY_DST });
@@ -930,7 +916,6 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   const lblL = inst(48, [[0, 0, "float32x4"], [2, 32, "uint32x4"]]);
   const miniL = inst(16, [[0, 0, "float32x3"], [1, 12, "uint32"]]);
   const P = {
-    grid: pipe("vsGrid", "fsFlat", [], undefined, format, false),
     ring: pipe("vsRing", "fsRing", [], undefined, format, false),
     hex: pipe("vsHex", "fsHex", [], { color: { srcFactor: "zero", dstFactor: "src" }, alpha: { srcFactor: "zero", dstFactor: "one" } }, format, false), // dst *= src
     food: pipe("vsFood", "fsFood", foodL, PREMUL),
@@ -943,13 +928,13 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   const DRAWS = [[null, -1], [P.food, A.food], [P.rib, A.hdr], [P.lbl, A.hdr], [P.mini, A.mini]]; // 0: the floor (3 draws, below)
   // reused every frame: no per-frame allocations
   const counts = new Uint32Array([3, 1, 4, 0, 0, 0, 4, 0, 4, 0]); // (vertices, instances): floor, food, snakes, labels, minimap
-  const mainAtt = { view: null, loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 1] };
+  const mainAtt = { view: null, loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 1] }; // clearValue: the floor colour (plan.clear)
   const mainDesc = { colorAttachments: [mainAtt] };
   const setCounts = (food, maxK, nVis, nMini) => { counts[3] = food; counts[4] = 2 * (maxK + 3); counts[5] = nVis; counts[7] = nVis; counts[9] = nMini; };
   const encodeDirect = (pass, i) => {
-    if (i === 0) { // floor: shading grid, edge ring when on screen, hex lines multiplied in
-      pass.setPipeline(P.grid); pass.draw(FLOOR_GX * FLOOR_GY * 6);
-      if (plan.ring) { pass.setPipeline(P.ring); pass.draw(FLOOR_RING_SEG * 6); }
+    if (i === 0) { // floor: the pass cleared to its colour; glow disc/band when on screen, hex lines multiplied in
+      const b = plan.bands;
+      if (b) { pass.setPipeline(P.ring); pass.draw(FLOOR_RING_SEG * 6, b === 3 ? 2 : 1, 0, b === 2 ? 1 : 0); }
       if (plan.hexes) { pass.setPipeline(P.hex); pass.draw(18, plan.hexes); }
       return;
     }
@@ -991,18 +976,18 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
       const view = ctx.getCurrentTexture().createView();
       setCounts(nFood, maxK, nVis, nMini);
       floorPlan(E.frameBlk, plan);
-      floorF[0] = plan.rIn; floorF[1] = plan.rOut; floorF[2] = plan.rw; floorF[3] = plan.fade;
+      floorF[0] = plan.core; floorF[1] = plan.rIn; floorF[2] = plan.rOut; floorF[3] = plan.rw; floorF[8] = plan.fade;
       floorI[4] = plan.i0; floorI[5] = plan.j0; floorI[6] = plan.nx;
       q.writeBuffer(floorBuf, 0, floorData);
       if (!(timing && canTime && !reading)) {
-        mainAtt.view = view;
+        mainAtt.view = view; mainAtt.clearValue = plan.clear;
         const pass = enc.beginRenderPass(mainDesc);
         pass.setBindGroup(0, bind);
         for (let i = 0; i < 5; i++) encodeDirect(pass, i);
         pass.end();
       } else { // measuring: the clear, then one pass per draw, each timestamped
         for (let i = 0; i < 6; i++) {
-          const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: i ? "load" : "clear", storeOp: "store", clearValue: [0, 0, 0, 1] }],
+          const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: i ? "load" : "clear", storeOp: "store", clearValue: plan.clear }],
             timestampWrites: { querySet: qset, beginningOfPassWriteIndex: i * 2, endOfPassWriteIndex: i * 2 + 1 } });
           if (i) { pass.setBindGroup(0, bind); encodeDirect(pass, i - 1); }
           pass.end();

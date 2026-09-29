@@ -5,18 +5,23 @@
      resize(vw, vh), placeMini(cx, cy, rPx), labelSlot(canvas, x, y), draw(frameNo, playing, timing)
    ========================================================================== */
 /* Floor layout, shared by both renderers (this file is inlined before render-gpu.js). */
-const FLOOR_GX = 48, FLOOR_GY = 28;            // shading grid cells across / down the screen
-const FLOOR_RING_SEG = 256;                    // segments of the world-edge ring
+const FLOOR_BASE = [.063, .079, .125];         // the floor colour: the screen is simply cleared to it
+const FLOOR_GLOW = [.9 * .035, .3 * .035, .4 * .035]; // centre glow added to it (flat inside 30% of the world radius)
+const FLOOR_RING_SEG = 256;                    // segments of the centre disc / world-edge band
 const FLOOR_HX = (46 * Math.sqrt(3)).toFixed(4), FLOOR_HY = "46.";  // hex lattice period (world units)
 const FLOOR_LINE = "0.9";                      // hex line half width (world units)
 /* What the floor needs this frame, from the Frame block [camX camY halfW halfH | px ...| .. WR]. */
 function floorPlan(fb, p) {
   const cx = fb[0], cy = fb[1], hw = fb[2], hh = fb[3], px = fb[4], WR = fb[10], HX = 46 * Math.sqrt(3), HY = 46;
-  const s = Math.max((2 * hw) / FLOOR_GX, (2 * hh) / FLOOR_GY); // one grid cell, in world units
-  p.rw = 14 + px;                                               // edge glow width
-  p.rIn = WR - 6 * p.rw - s - 4; p.rOut = WR + 6 * p.rw + s + 4; // the ring covers where the grid can't be exact
   const d = Math.hypot(cx, cy), reach = Math.hypot(hw, hh);
-  p.ring = d + reach > p.rIn && d - reach < p.rOut;
+  p.rw = 14 + px;                                               // edge glow width
+  p.core = WR * .37 + 2;                                        // centre glow: a disc of this radius
+  p.rIn = WR - 6 * p.rw - 4; p.rOut = d + reach + 8;            // edge glow and outside the world: a band
+  p.bands = (d - reach < p.core ? 1 : 0) | (d + reach > p.rIn ? 2 : 0); // which of the two are on screen
+  const inCore = d + reach < WR * .3;                           // screen wholly inside the glow's flat middle:
+  if (inCore) p.bands &= 2;                                     // clear straight to the glowing colour instead
+  const c = p.clear || (p.clear = [0, 0, 0, 1]);
+  for (let i = 0; i < 3; i++) c[i] = FLOOR_BASE[i] + (inCore ? FLOOR_GLOW[i] : 0);
   p.fade = 1 - Math.min(1, Math.max(0, (px - 3) / 2));          // zoomed far out: lines fade, then are skipped
   p.i0 = Math.floor((cx - hw) / HX) - 1; p.j0 = Math.floor((cy - hh) / HY) - 1;
   p.nx = Math.ceil((2 * hw) / HX) + 3;
@@ -38,57 +43,41 @@ function createGL(canvas, E) {
   // highp members: fragment shaders below default to mediump (half precision on mobile GPUs)
   const FRAME = `layout(std140) uniform Frame { highp vec4 uCamHalf; highp vec4 uPxTime; highp vec4 uResWR; };`;
 
-  /* Floor: most pixels need no work of their own.
-     1. A coarse grid (FLOOR_GX x FLOOR_GY cells) covers the screen; its ~1,400 corners
-        compute the large, slow shading (base colour, screen-edge darkening, centre
-        glow, outside-the-world tint) and the GPU blends between them: per pixel
-        there is no texture and no maths, just the interpolated colour.
-     2. Near the world's edge the glow is too sharp for the grid, so a thin ring
-        around the edge redoes those pixels exactly, and only when it is on screen.
+  /* Floor: most pixels need no work at all.
+     1. The screen is cleared to the floor colour (FLOOR_BASE). A clear is nearly free
+        (GPUs mark whole blocks as "clear colour" instead of writing every pixel), so
+        most of the floor costs nothing.
+     2. Only where the colour differs is anything drawn: the centre glow (a disc) and
+        the world-edge glow plus outside-the-world tint (a band). Each is drawn only when
+        it is on screen.
      3. Hex outlines are thin line quads (a few % of the pixels) that darken what
         is under them. */
   const FLOOR_SHADE = `
-  const vec3 FLOOR_BASE=vec3(.063,.079,.125);
-  vec3 floorShade(vec2 w, vec2 v, float rw){ // w: world position, v: screen position * .72
-    vec3 col=FLOOR_BASE; float WRr=uResWR.z, r=length(w);
+  vec3 floorShade(vec2 w, float rw){ // w: world position
+    vec3 col=vec3(${FLOOR_BASE.join(",")}); float WRr=uResWR.z, r=length(w);
     if(r>WRr-2.) col=mix(col,col*vec3(.55,.22,.28)+vec3(.05,0,.01),smoothstep(WRr-2.,WRr+2.,r));
     if(abs(r-WRr)<rw*6.) col+=vec3(1.,.25,.35)*exp(-abs(r-WRr)/rw)*(.7+.3*sin(uPxTime.y*3.))*.55;
-    if(r<WRr*.37) col+=vec3(.9,.3,.4)*.035*(1.-smoothstep(WRr*.3,WRr*.37,r));
-    return col*(1.-.35*dot(v,v));
-  }`;
-  const FLAT_FS = `#version 300 es
-  precision mediump float;
-  in vec3 vCol; out vec4 o;
-  void main(){ o=vec4(vCol,1); }`;
-  const GRID_VS = `#version 300 es
-  ${FRAME}
-  ${FLOOR_SHADE}
-  out vec3 vCol;
-  void main(){
-    int c=gl_VertexID/6, k=gl_VertexID-c*6;                     // two triangles per cell
-    int dx=(k==1||k==4||k==5)?1:0, dy=(k==2||k==3||k==5)?1:0;
-    vec2 p=vec2(float(c%${FLOOR_GX}+dx),float(c/${FLOOR_GX}+dy))/vec2(${FLOOR_GX}.,${FLOOR_GY}.)*2.-1.;
-    gl_Position=vec4(p,0,1);
-    vCol=floorShade(uCamHalf.xy+vec2(p.x,-p.y)*uCamHalf.zw, p*.72, 14.+uPxTime.x);
+    if(r<WRr*.37) col+=vec3(${FLOOR_GLOW.join(",")})*(1.-smoothstep(WRr*.3,WRr*.37,r));
+    return col;
   }`;
   const RING_VS = `#version 300 es
   ${FRAME}
   uniform vec3 uRing;                                           // inner radius, outer radius, glow width
-  out vec2 vW, vV;
+  out vec2 vW;
   void main(){
     int q=gl_VertexID/6, k=gl_VertexID-q*6;
     int da=(k==1||k==4||k==5)?1:0, dr=(k==2||k==3||k==5)?1:0;
     float a=float(q+da)*${(2 * Math.PI / FLOOR_RING_SEG).toFixed(8)}, r=dr==1?uRing.y:uRing.x;
     vec2 w=vec2(cos(a),sin(a))*r, c=(w-uCamHalf.xy)/uCamHalf.zw;
-    gl_Position=vec4(c.x,-c.y,0,1); vW=w; vV=c*.72;
+    gl_Position=vec4(c.x,-c.y,0,1); vW=w;
   }`;
   const RING_FS = `#version 300 es
   precision highp float;
   ${FRAME}
   ${FLOOR_SHADE}
   uniform vec3 uRing;
-  in vec2 vW, vV; out vec4 o;
-  void main(){ o=vec4(floorShade(vW, vec2(vV.x,-vV.y), uRing.z),1); }`;
+  in vec2 vW; out vec4 o;
+  void main(){ o=vec4(floorShade(vW, uRing.z),1); }`;
   const HEX_VS = `#version 300 es
   ${FRAME}
   uniform ivec3 uHex;                                           // first column, first row, columns
@@ -318,7 +307,7 @@ function createGL(canvas, E) {
     if (pi !== gl.INVALID_INDEX) gl.uniformBlockBinding(p, pi, 1);
     return p;
   }
-  const gridP = prog(GRID_VS, FLAT_FS), ringP = prog(RING_VS, RING_FS), hexP = prog(HEX_VS, HEX_FS), foodP = prog(VS, FS), ribP = prog(RVS, RFS), lblP = prog(LVS, LFS), miniP = prog(MVS, MFS, false);
+  const ringP = prog(RING_VS, RING_FS), hexP = prog(HEX_VS, HEX_FS), foodP = prog(VS, FS), ribP = prog(RVS, RFS), lblP = prog(LVS, LFS), miniP = prog(MVS, MFS, false);
 
   // Textures live on fixed units for the whole run (no per-frame rebinding):
   // unit 0 trail, unit 2 label atlas.
@@ -405,11 +394,15 @@ function createGL(canvas, E) {
       gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR]);
       gl.viewport(0, 0, vw, vh);
 
-      mark(); // floor: grid (+ edge ring when on screen) opaque, then hex lines multiplied in
+      mark(); // floor: clear to the floor colour, glow disc/band only when on screen, hex lines multiplied in
       floorPlan(E.frameBlk, plan);
+      gl.clearColor(plan.clear[0], plan.clear[1], plan.clear[2], 1); gl.clear(gl.COLOR_BUFFER_BIT);
       gl.disable(gl.BLEND); gl.bindVertexArray(emptyVao);
-      gl.useProgram(gridP); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_GX * FLOOR_GY * 6);
-      if (plan.ring) { gl.useProgram(ringP); gl.uniform3f(ringU, plan.rIn, plan.rOut, plan.rw); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6); }
+      if (plan.bands) {
+        gl.useProgram(ringP);
+        if (plan.bands & 1) { gl.uniform3f(ringU, 0, plan.core, plan.rw); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6); }
+        if (plan.bands & 2) { gl.uniform3f(ringU, plan.rIn, plan.rOut, plan.rw); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6); }
+      }
       gl.enable(gl.BLEND);
       if (plan.hexes) {
         gl.blendFunc(gl.ZERO, gl.SRC_COLOR);
