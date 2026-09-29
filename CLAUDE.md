@@ -60,11 +60,12 @@ Server environment variables: `PORT` (8080), `BOTS` (60), `WEB_ROOT`, `MAX_PER_I
 - Building snapshots on several threads (rayon) was measured **slower** at this scale; it's deliberately single-threaded.
 
 ## Current numbers (for comparison)
-- Offline, owner's laptop (Edge, WebGPU f16, Intel iGPU): CPU per frame about 0.2 ms; GPU about 2.5 ms (floor 2.0, snakes 0.2, food 0.13); sim benchmark 35 µs per step. (Floor is now clear-based; ask the owner for a new P-panel reading.)
+- Offline, owner's laptop (Edge, WebGPU f16, Intel iGPU): CPU per frame about 0.2 ms; GPU about 1.0 ms (floor 0.52, food 0.2, snakes 0.13, map 0.13) mid-map; sim benchmark 35–40 µs per step.
 - Server, 4-core 2.1 GHz Xeon: 66 players ≈ 8% of one core, 10 MB RAM, about 12 KB/s per player.
 
 ## Floor design (clear + only what differs)
 - `floorPlan()` in `render-gl.js` is shared by both renderers. It picks the clear colour, which glow shapes are on screen, the hex range and the line fade.
 - The pass clears to the floor colour, or to base + centre glow when the whole screen is inside the glow's flat middle. A clear is nearly free (GPUs fast-clear whole blocks).
-- Then, only when on screen: the centre-glow disc and the world-edge band (drawn opaque with exact per-pixel shading). Last come the hex outlines as instanced quads, multiply-blended.
-- History: texture tile 1.97 ms → per-vertex grid 1.64 ms on the owner's Intel iGPU (the grid still wrote every pixel; writing pixels was the real cost). The screen-edge vignette was dropped for this, because it touched every pixel.
+- Inside and outside the world are each one flat colour. Whichever side holds the camera centre is the clear colour; the other side is drawn flat (no per-pixel maths), and only when it is on screen.
+- Then, only when on screen: the centre-glow disc and the thin world-edge glow band (both opaque, exact per-pixel shading). Last come the hex outlines as instanced quads, multiply-blended.
+- History: texture tile 1.97 ms → per-vertex grid 1.64 ms → clear-based 0.52 ms (mid-map; it was slower near the edge until the outside area became flat) on the owner's Intel iGPU (the grid still wrote every pixel; writing pixels was the real cost). The screen-edge vignette was dropped for this, because it touched every pixel.
