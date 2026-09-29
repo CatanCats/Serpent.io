@@ -123,7 +123,9 @@ function createGL(canvas, E) {
   // one instanced draw sized for the longest, so spare vertices must be nearly free:
   // they repeat the head cap (no texture reads) and form zero-area triangles.
   void main(){
-    int n=int(aH2.z), st=int(aH1.y), K=(n-1+st-1)/st;
+    // body samples sit on trail points whose ring index is a multiple of the stride, so
+    // the same points stay sampled as the snake moves (no wobble when zoomed out)
+    int n=int(aH2.z), st=int(aH1.y), i0=n-1-((n-1-int(aH2.y))&(st-1)), K=i0>=1?(i0-1)/st+1:0;
     int j=gl_VertexID>>1; bool side=(gl_VertexID&1)==0;
     float W=aH1.w, hr=aH0.w*W;
     vec2 p, tg; float t;
@@ -131,7 +133,7 @@ function createGL(canvas, E) {
       vec2 a=T(n-2), b=T(n-1), d=b-a; float l=length(d);
       d=l>1e-3?d/l:-fwd(); p=mix(a,b,aH0.z)+d*hr; tg=-d; t=float(n-1)+CR*W;
     } else if(j<=K){                // body sample: 3 texture reads
-      int i=max(n-1-(j-1)*st,1);
+      int i=max(i0-(j-1)*st,1);
       vec2 a=T(i-1), b=T(i), c=T(i+1), d=a-c; float l=length(d);
       p=mix(a,b,aH0.z); tg=l>1e-3?d/l:fwd(); t=float(i);
     } else if(j==K+1){ p=aH0.xy; tg=fwd(); t=0.; }                 // head
@@ -141,7 +143,7 @@ function createGL(canvas, E) {
     gl_Position=vec4(c.x,-c.y,0,1);
     vT=t; vV=side?W:-W; vDir=tg;
     uint sk=(aH2.w&255u)%12u; vCA=uPal[sk].rgb; vCB=uPal[12u+sk].rgb;
-    vFl=aH2.w>>8; vR=aH0.w; vNl=float(n-1);
+    vFl=(aH2.w>>8)|(aH2.y<<8); vR=aH0.w; vNl=float(n-1); // flags | newest ring index
   }`;
   const RFS = `#version 300 es
   precision highp float;
@@ -151,7 +153,9 @@ function createGL(canvas, E) {
   const float SP=.42, CR=1./.42;
   vec3 shade(float k, vec2 l, float nd, vec2 f){
     uint ki=uint(k);
-    vec3 base = ki==0u || ((ki>>2u)&1u)==0u ? vCA : vCB;
+    // stripes follow each scale's fixed trail index (newest - k), not its count from the
+    // head, so they stay put as the snake moves instead of sliding and flickering
+    vec3 base = ki==0u || ((((vFl>>8)-ki)>>2u)&1u)==0u ? vCA : vCB;
     vec3 c=base*(1.05-.55*nd*nd);
     vec2 sp=l-vec2(-.28,-.36);
     c+=vec3(.28)*exp(-dot(sp,sp)*7.);

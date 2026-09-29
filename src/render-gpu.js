@@ -131,7 +131,10 @@ fn fwd(h1: vec4f) -> vec2f { return vec2f(cos(h1.z), sin(h1.z)); }
 // one instanced draw sized for the longest, so spare vertices must be nearly free:
 // they repeat the head cap (no texture reads) and form zero-area triangles.
 @vertex fn vsRib(@builtin(vertex_index) vi: u32, @location(0) h0: vec4f, @location(1) h1: vec4f, @location(2) h2: vec4u) -> RibO {
-  let n = i32(h2.z); let st = i32(h1.y); let K = (n - 1 + st - 1) / st;
+  // body samples sit on trail points whose ring index is a multiple of the stride, so
+  // the same points stay sampled as the snake moves (no wobble when zoomed out)
+  let n = i32(h2.z); let st = i32(h1.y); let i0 = n - 1 - ((n - 1 - i32(h2.y)) & (st - 1));
+  let K = select(0, (i0 - 1) / st + 1, i0 >= 1);
   let j = i32(vi >> 1u); let side = (vi & 1u) == 0u;
   let W = h1.w; let hr = h0.w * W;
   var p: vec2f; var tg: vec2f; var t: f32;
@@ -140,7 +143,7 @@ fn fwd(h1: vec4f) -> vec2f { return vec2f(cos(h1.z), sin(h1.z)); }
     if (l > 1e-3) { d = d / l; } else { d = -fwd(h1); }
     p = mix(a, b, h0.z) + d * hr; tg = -d; t = f32(n - 1) + CR * W;
   } else if (j <= K) {                // body sample: 3 texture reads
-    let i = max(n - 1 - (j - 1) * st, 1);
+    let i = max(i0 - (j - 1) * st, 1);
     let a = T(h2, i - 1); let b = T(h2, i); let d = a - T(h2, i + 1); let l = length(d);
     p = mix(a, b, h0.z); if (l > 1e-3) { tg = d / l; } else { tg = fwd(h1); } t = f32(i);
   } else if (j == K + 1) { p = h0.xy; tg = fwd(h1); t = 0.; }       // head
@@ -150,12 +153,14 @@ fn fwd(h1: vec4f) -> vec2f { return vec2f(cos(h1.z), sin(h1.z)); }
   var o: RibO;
   o.pos = vec4f(c.x, -c.y, 0., 1.); o.t = t; o.v = select(-W, W, side); o.dir = tg;
   let sk = (h2.w & 255u) % 12u; o.ca = PAL[sk].rgb; o.cb = PAL[12u + sk].rgb;
-  o.fl = h2.w >> 8u; o.r = h0.w; o.nl = f32(n - 1);
+  o.fl = (h2.w >> 8u) | (h2.y << 8u); o.r = h0.w; o.nl = f32(n - 1); // flags | newest ring index
   return o;
 }
-fn shade(k: f32, l: vec2f, nd: f32, f: vec2f, ca: vec3f, cb: vec3f, r: f32) -> vec3f {
+fn shade(k: f32, l: vec2f, nd: f32, f: vec2f, ca: vec3f, cb: vec3f, r: f32, newest: u32) -> vec3f {
   let ki = u32(k);
-  var base = ca; if (ki != 0u && ((ki >> 2u) & 1u) == 1u) { base = cb; }
+  // stripes follow each scale's fixed trail index (newest - k), not its count from the
+  // head, so they stay put as the snake moves instead of sliding and flickering
+  var base = ca; if (ki != 0u && (((newest - ki) >> 2u) & 1u) == 1u) { base = cb; }
   var c = base * (1.05 - .55 * nd * nd);
   let sp = l - vec2f(-.28, -.36);
   c += vec3f(.28) * exp(-dot(sp, sp) * 7.);
@@ -186,8 +191,8 @@ fn shade(k: f32, l: vec2f, nd: f32, f: vec2f, ca: vec3f, cb: vec3f, r: f32) -> v
   else if ((i.fl & 4u) != 0u) { glow = exp(-pow(max(gd - .85, 0.) / .3, 2.)) * (.45 + .15 * sin(F.pxTime.y * 2.5 + i.t * .3)) * (1. - a); gc = vec3f(1., .78, .3); }
   if (a <= 0. && glow <= .003) { discard; }
   var c = vec3f(0.);
-  if (e0 > 0.) { c += shade(k0, l0, n0, f, i.ca, i.cb, i.r) * e0; }
-  if (e1 > 0.) { c += shade(k1, l1, n1, f, i.ca, i.cb, i.r) * e1; }
+  if (e0 > 0.) { c += shade(k0, l0, n0, f, i.ca, i.cb, i.r, i.fl >> 8u) * e0; }
+  if (e1 > 0.) { c += shade(k1, l1, n1, f, i.ca, i.cb, i.r, i.fl >> 8u) * e1; }
   if ((i.fl & 4u) != 0u) { c += vec3f(1., .85, .4) * .18 * a * (.5 + .5 * sin(i.t * .8 - F.pxTime.y * 3.)); } // shimmering scales
   return vec4f(c + gc * glow, a);
 }
