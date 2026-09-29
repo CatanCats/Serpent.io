@@ -248,13 +248,14 @@ function createGL(canvas, E) {
   const FRAME = `layout(std140) uniform Frame { highp vec4 uCamHalf; highp vec4 uPxTime; highp vec4 uResWR; };`;
 
   /* Floor: most pixels need no work at all.
-     1. The screen is cleared to the floor colour (FLOOR_BASE). A clear is nearly free
-        (GPUs mark whole blocks as "clear colour" instead of writing every pixel), so
-        most of the floor costs nothing.
-     2. Only where the colour differs is anything drawn: the centre glow (a disc) and
-        the world-edge glow plus outside-the-world tint (a band). Each is drawn only when
-        it is on screen.
-     3. Hex outlines are thin line quads (a few % of the pixels) that darken what
+     1. The screen is cleared to the main floor colour (see floorPlan). A clear is nearly
+        free (GPUs mark whole blocks as "clear colour" instead of writing every pixel),
+        so most of the floor costs nothing.
+     2. Inside and outside the world are each one flat colour: the side not used as the
+        clear colour is drawn flat (no maths per pixel), only when on screen.
+     3. Only the glows need maths per pixel: the centre glow (a disc) and the thin
+        world-edge glow (a band), each drawn only when on screen.
+     4. Hex outlines are thin line quads (a few % of the pixels) that darken what
         is under them. */
   const FLOOR_SHADE = `
   vec3 floorShade(vec2 w, float rw){ // w: world position
@@ -599,8 +600,6 @@ function createGL(canvas, E) {
         const row = E.tup[i * 3], x = E.tup[i * 3 + 1];
         gl.texSubImage2D(gl.TEXTURE_2D, 0, x, row, E.tup[i * 3 + 2], 1, gl.RG_INTEGER, gl.SHORT, E.trail, (row * RING + x) * 2);
       }
-      // last frame's pixels are never needed: lets tiled/integrated GPUs skip reloading them
-      gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR]);
       gl.viewport(0, 0, vw, vh);
 
       mark(); // floor: clear to the main colour, the other side flat, glows only when on screen, hex lines multiplied in
@@ -683,7 +682,7 @@ const SP: f32 = 0.42;
 
 fn quad(vi: u32) -> vec2f { return vec2f(f32(vi & 1u), f32(vi >> 1u)); }
 
-// ---------- floor (see render-gl.js for the idea: clear + glow disc/band + hex lines) ----------
+// ---------- floor (see render-gl.js for the idea: clear + flat side + glow disc/band + hex lines) ----------
 fn floorShade(w: vec2f, rw: f32) -> vec3f { // w: world position
   var col = vec3f(${FLOOR_BASE.join(", ")}); let WR = F.resWR.z; let r = length(w);
   if (r > WR - 2.) { col = mix(col, col * vec3f(${FLOOR_OUT_MUL.join(", ")}) + vec3f(${FLOOR_OUT_ADD.join(", ")}), smoothstep(WR - 2., WR + 2., r)); }
@@ -903,7 +902,7 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   const floorF = new Float32Array(floorData), floorI = new Int32Array(floorData), plan = {};
   const atlasTex = device.createTexture({ size: [E.AW, E.AH], format: "rgba8unorm", // drawn ~1:1 with the screen: no mips
     usage: TU.TEXTURE_BINDING | TU.RENDER_ATTACHMENT | TU.COPY_DST });
-  const linClamp = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear" });
+  const linClamp = device.createSampler({ magFilter: "linear", minFilter: "linear" }); // the atlas has no mips
 
   const V = GPUShaderStage.VERTEX, FR = GPUShaderStage.FRAGMENT;
   const bgl = device.createBindGroupLayout({ entries: [
@@ -945,9 +944,9 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   };
 
   // ---- the five draws: [pipeline, vertex-data offset in the arena] ----
-  const DRAWS = [[null, -1], [P.food, A.food], [P.rib, A.hdr], [P.lbl, A.hdr], [P.mini, A.mini]]; // 0: the floor (3 draws, below)
+  const DRAWS = [[null, -1], [P.food, A.food], [P.rib, A.hdr], [P.lbl, A.hdr], [P.mini, A.mini]]; // 0: the floor (its own draws, in encodeDirect)
   // reused every frame: no per-frame allocations
-  const counts = new Uint32Array([3, 1, 4, 0, 0, 0, 4, 0, 4, 0]); // (vertices, instances): floor, food, snakes, labels, minimap
+  const counts = new Uint32Array([0, 0, 4, 0, 0, 0, 4, 0, 4, 0]); // (vertices, instances): floor (unused), food, snakes, labels, minimap
   const mainAtt = { view: null, loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 1] }; // clearValue: the floor colour (plan.clear)
   const mainDesc = { colorAttachments: [mainAtt] };
   const setCounts = (food, maxK, nVis, nMini) => { counts[3] = food; counts[4] = 2 * (maxK + 3); counts[5] = nVis; counts[7] = nVis; counts[9] = nMini; };

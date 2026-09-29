@@ -809,7 +809,6 @@ void sim_food_events_clear(void) { nfev = 0; fevLost = 0; }
 Pub *sim_pub(void) { return pub; }
 short *sim_trail(void) { return &tr[0][0][0]; }
 Food *sim_food(void) { return F; }
-i32 sim_food_count(void) { return foodHigh; }
 i32 sim_max_food(void) { return MAXF; }
 i32 sim_ring(void) { return RING; }
 i32 sim_max_snakes(void) { return MAXS; }

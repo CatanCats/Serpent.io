@@ -47,6 +47,11 @@ Server environment variables: `PORT` (8080), `BOTS` (60), `WEB_ROOT`, `MAX_PER_I
   - Without those flags there is no WebGPU adapter, and the game shows its "WebGPU isn't working" screen. Open pages with `?renderer=webgl` in WebGL tests.
 - SwiftShader has **no shader-f16**, so the WebGPU f16 shader path never runs in these tests. Validate the WGSL with `naga` (`cargo install naga-cli`) for both the f16 and f32 variants.
 - Headless GPU times come from software rendering. They're useful to compare passes against each other, not as absolute numbers. Real numbers come from the owner's P panel.
+  - Software rendering has **no fast clear**, so floor savings from "clear instead of draw" never show headless (the floor reads 26–32 ms there whatever you do). Judge those by screenshots and the owner's numbers.
+  - The P panel is text on the page: after pressing `p`, read it with `document.body.innerText.match(/GPU[^\n]*/)`.
+- To screenshot a camera position you can't easily reach (e.g. centre of the screen outside the world), copy `offline.html` to `/tmp`, `sed` a threshold in `floorPlan` (such as `d > WR` → `d > WR - 1500`), and screenshot near the edge.
+- `window.floorPlan` can be wrapped in a test to log each frame's plan (read-only; the camera is already uploaded by then).
+- Shader test helper idea: evaluate `render-gl.js` + `render-gpu.js` in Node to extract the WGSL (the `FLOOR_*` constants live in `render-gl.js`), then run `naga` on both the f32 and f16 versions.
 - CPU profiling: `valgrind --tool=callgrind`.
   - For the WebAssembly simulation, compile `src/sim.c` natively with a small `main`.
   - For the server, build with `SERPENT_PORTABLE=1` (valgrind can't run the AVX-512 code from `-march=native`) and dump with `callgrind_control -d <pid>`.
@@ -58,9 +63,11 @@ Server environment variables: `PORT` (8080), `BOTS` (60), `WEB_ROOT`, `MAX_PER_I
 - Edge's "Enhance your security on the web" (default level: Balanced) can turn off the JS/WebAssembly optimizer **and WebGPU** for less-visited sites. The game detects this and tells the player how to add an exception. That was the cause of "WebGPU switches to WebGL" and of a 30× slower simulation.
 - WebSocket read buffers must stay small (`read_buffer_size(512)`): the library zero-fills its buffer on every read, and at 128 KB that was about 70% of the server's CPU.
 - Building snapshots on several threads (rayon) was measured **slower** at this scale; it's deliberately single-threaded.
+- On the owner's Intel iGPU, **writing pixels** is the GPU cost, not the maths per pixel. Removing texture reads and maths from a full-screen pass saved only ~17%; not writing most pixels (fast clear) saved ~70%. Any full-screen effect (vignette, gradients) costs about 1.5 ms there. Avoid adding one.
+- Graphics changes go in `src/render-*.js` only; `build.sh` puts them into both `offline.html` and `index.html`. Game-rule changes must be made in **both** `src/sim.c` and `online/server/sim-server.c`, and UI changes in both `src/app.js` and `online/client/client.js`.
 
 ## Current numbers (for comparison)
-- Offline, owner's laptop (Edge, WebGPU f16, Intel iGPU): CPU per frame about 0.2 ms; GPU about 1.0 ms (floor 0.52, food 0.2, snakes 0.13, map 0.13) mid-map; sim benchmark 35–40 µs per step.
+- Offline, owner's laptop (Edge, WebGPU f16, Intel iGPU): CPU per frame about 0.2 ms; GPU about 1.0 ms (floor 0.52, food 0.2, snakes 0.13, map 0.13) mid-map; sim benchmark 35–40 µs per step. The world-edge view hasn't been re-measured since the outside area became flat; ask the owner.
 - Server, 4-core 2.1 GHz Xeon: 66 players ≈ 8% of one core, 10 MB RAM, about 12 KB/s per player.
 
 ## Floor design (clear + only what differs)

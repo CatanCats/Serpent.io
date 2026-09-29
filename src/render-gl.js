@@ -52,13 +52,14 @@ function createGL(canvas, E) {
   const FRAME = `layout(std140) uniform Frame { highp vec4 uCamHalf; highp vec4 uPxTime; highp vec4 uResWR; };`;
 
   /* Floor: most pixels need no work at all.
-     1. The screen is cleared to the floor colour (FLOOR_BASE). A clear is nearly free
-        (GPUs mark whole blocks as "clear colour" instead of writing every pixel), so
-        most of the floor costs nothing.
-     2. Only where the colour differs is anything drawn: the centre glow (a disc) and
-        the world-edge glow plus outside-the-world tint (a band). Each is drawn only when
-        it is on screen.
-     3. Hex outlines are thin line quads (a few % of the pixels) that darken what
+     1. The screen is cleared to the main floor colour (see floorPlan). A clear is nearly
+        free (GPUs mark whole blocks as "clear colour" instead of writing every pixel),
+        so most of the floor costs nothing.
+     2. Inside and outside the world are each one flat colour: the side not used as the
+        clear colour is drawn flat (no maths per pixel), only when on screen.
+     3. Only the glows need maths per pixel: the centre glow (a disc) and the thin
+        world-edge glow (a band), each drawn only when on screen.
+     4. Hex outlines are thin line quads (a few % of the pixels) that darken what
         is under them. */
   const FLOOR_SHADE = `
   vec3 floorShade(vec2 w, float rw){ // w: world position
@@ -403,8 +404,6 @@ function createGL(canvas, E) {
         const row = E.tup[i * 3], x = E.tup[i * 3 + 1];
         gl.texSubImage2D(gl.TEXTURE_2D, 0, x, row, E.tup[i * 3 + 2], 1, gl.RG_INTEGER, gl.SHORT, E.trail, (row * RING + x) * 2);
       }
-      // last frame's pixels are never needed: lets tiled/integrated GPUs skip reloading them
-      gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR]);
       gl.viewport(0, 0, vw, vh);
 
       mark(); // floor: clear to the main colour, the other side flat, glows only when on screen, hex lines multiplied in

@@ -40,7 +40,7 @@ const SP: f32 = 0.42;
 
 fn quad(vi: u32) -> vec2f { return vec2f(f32(vi & 1u), f32(vi >> 1u)); }
 
-// ---------- floor (see render-gl.js for the idea: clear + glow disc/band + hex lines) ----------
+// ---------- floor (see render-gl.js for the idea: clear + flat side + glow disc/band + hex lines) ----------
 fn floorShade(w: vec2f, rw: f32) -> vec3f { // w: world position
   var col = vec3f(${FLOOR_BASE.join(", ")}); let WR = F.resWR.z; let r = length(w);
   if (r > WR - 2.) { col = mix(col, col * vec3f(${FLOOR_OUT_MUL.join(", ")}) + vec3f(${FLOOR_OUT_ADD.join(", ")}), smoothstep(WR - 2., WR + 2., r)); }
@@ -260,7 +260,7 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   const floorF = new Float32Array(floorData), floorI = new Int32Array(floorData), plan = {};
   const atlasTex = device.createTexture({ size: [E.AW, E.AH], format: "rgba8unorm", // drawn ~1:1 with the screen: no mips
     usage: TU.TEXTURE_BINDING | TU.RENDER_ATTACHMENT | TU.COPY_DST });
-  const linClamp = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear" });
+  const linClamp = device.createSampler({ magFilter: "linear", minFilter: "linear" }); // the atlas has no mips
 
   const V = GPUShaderStage.VERTEX, FR = GPUShaderStage.FRAGMENT;
   const bgl = device.createBindGroupLayout({ entries: [
@@ -302,9 +302,9 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   };
 
   // ---- the five draws: [pipeline, vertex-data offset in the arena] ----
-  const DRAWS = [[null, -1], [P.food, A.food], [P.rib, A.hdr], [P.lbl, A.hdr], [P.mini, A.mini]]; // 0: the floor (3 draws, below)
+  const DRAWS = [[null, -1], [P.food, A.food], [P.rib, A.hdr], [P.lbl, A.hdr], [P.mini, A.mini]]; // 0: the floor (its own draws, in encodeDirect)
   // reused every frame: no per-frame allocations
-  const counts = new Uint32Array([3, 1, 4, 0, 0, 0, 4, 0, 4, 0]); // (vertices, instances): floor, food, snakes, labels, minimap
+  const counts = new Uint32Array([0, 0, 4, 0, 0, 0, 4, 0, 4, 0]); // (vertices, instances): floor (unused), food, snakes, labels, minimap
   const mainAtt = { view: null, loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 1] }; // clearValue: the floor colour (plan.clear)
   const mainDesc = { colorAttachments: [mainAtt] };
   const setCounts = (food, maxK, nVis, nMini) => { counts[3] = food; counts[4] = 2 * (maxK + 3); counts[5] = nVis; counts[7] = nVis; counts[9] = nMini; };
