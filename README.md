@@ -42,7 +42,8 @@ Each frame, JavaScript makes one **WebAssembly call*, and then **one upload* of 
 - Snakes are built on the GPU, the vertex shader builds each ribbon straight from a GPU copy of the trail memory. Only the new trail points of snakes on screen are uploaded. The fragment shader works out which scale is on top at each pixel, so the scaled look costs about 1× overdraw. The CPU writes 48 bytes per visible snake.
 - Labels (the name and level) are put into a texture atlas when they change, then drawn as one instanced draw.
 - The minimap is drawn on the game canvas, with no Canvas2D.
-- The floor costs almost nothing: the screen is cleared to the floor colour (nearly free on GPUs), and only what differs is drawn: thin hex lines, and the centre and world-edge glows when they are on screen.
+- The floor costs almost nothing: the screen is cleared to the floor colour (nearly free on GPUs), and only what differs is drawn: hex lines in one flat colour (no blending), and the centre and world-edge glows when they are on screen. The GPU works out the floor's shapes itself, so nothing extra is uploaded.
+- Food pellets are octagons (fewer wasted pixels than squares); the minimap skips pixels that would add nothing.
 - Dynamic resolution removes pixels before dropping frames.
 
 ## Measuring
