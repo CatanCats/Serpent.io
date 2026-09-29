@@ -60,5 +60,9 @@ Server environment variables: `PORT` (8080), `BOTS` (60), `WEB_ROOT`, `MAX_PER_I
 - Building snapshots on several threads (rayon) was measured **slower** at this scale; it's deliberately single-threaded.
 
 ## Current numbers (for comparison)
-- Offline, owner's laptop (Edge, WebGPU f16, Intel iGPU): CPU per frame about 0.2 ms; GPU about 2.5 ms (floor 2.0, snakes 0.2, food 0.13); sim benchmark 35 µs per step.
+- Offline, owner's laptop (Edge, WebGPU f16, Intel iGPU): CPU per frame about 0.2 ms; GPU about 2.5 ms (floor 2.0, snakes 0.2, food 0.13); sim benchmark 35 µs per step. (Floor number is from before the texture-free floor; ask the owner for a new P-panel reading.)
 - Server, 4-core 2.1 GHz Xeon: 66 players ≈ 8% of one core, 10 MB RAM, about 12 KB/s per player.
+
+## Floor design (texture-free)
+- `floorPlan()` in `render-gl.js` is shared by both renderers. It computes the edge-ring band, whether it is on screen, the hex range and the line fade.
+- Draw order: a 48×28 grid with the shading computed per vertex (opaque); then the edge ring, drawn only when on screen; then hex outlines as instanced quads blended by multiply (dst × src).

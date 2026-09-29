@@ -26,62 +26,62 @@ alias hf = ${F16 ? "f16" : "f32"}; alias hv3 = vec3<hf>; alias hv4 = vec4<hf>;
 struct Frame { camHalf: vec4f, pxTime: vec4f, resWR: vec4f };
 struct Mini { c: vec4f };
 @group(0) @binding(0) var<uniform> F: Frame;
-@group(0) @binding(1) var linRep: sampler;
-@group(0) @binding(2) var tileTex: texture_2d<f32>;
 @group(0) @binding(3) var<storage, read> trail: array<u32>; // x | y<<16, a byte copy of WASM memory
 @group(0) @binding(4) var atlasTex: texture_2d<f32>;
 @group(0) @binding(5) var linClamp: sampler;
 @group(0) @binding(6) var<uniform> M: Mini;
 // skin palette (12 main, then 12 stripe colours): read once per vertex, passed to pixels flat
 @group(0) @binding(7) var<uniform> PAL: array<vec4f, 24>;
+struct Floor { ring: vec4f, hex: vec4i };  // ring: inner r, outer r, glow width, line fade | hex: first column, first row, columns
+@group(0) @binding(8) var<uniform> FL: Floor;
 const RM: i32 = ${RING - 1};
 const CR: f32 = 2.38095238;   // 1 / 0.42: circle radius in segment units
 const SP: f32 = 0.42;
 
 fn quad(vi: u32) -> vec2f { return vec2f(f32(vi & 1u), f32(vi >> 1u)); }
 
-// ---------- floor ----------
-@vertex fn vsFull(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
-  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
-  return vec4f(p * 2. - 1., 0., 1.);
+// ---------- floor (see render-gl.js for the idea: grid + edge ring + hex lines) ----------
+fn floorShade(w: vec2f, v: vec2f, rw: f32) -> vec3f { // w: world position, v: screen position * .72
+  var col = vec3f(.063, .079, .125); let WR = F.resWR.z; let r = length(w);
+  if (r > WR - 2.) { col = mix(col, col * vec3f(.55, .22, .28) + vec3f(.05, 0., .01), smoothstep(WR - 2., WR + 2., r)); }
+  if (abs(r - WR) < rw * 6.) { col += vec3f(1., .25, .35) * exp(-abs(r - WR) / rw) * (.7 + .3 * sin(F.pxTime.y * 3.)) * .55; }
+  if (r < WR * .37) { col += vec3f(.9, .3, .4) * .035 * (1. - smoothstep(WR * .3, WR * .37, r)); }
+  return col * (1. - .35 * dot(v, v));
 }
-struct BgO { @builtin(position) pos: vec4f, @location(0) w: vec2f, @location(1) v: vec2f, @location(2) uv: vec2f,
-  @location(3) @interpolate(flat) rw: f32 };
-// everything that is linear across the screen is computed here, per corner, and
-// interpolated: world position, tile coordinates, vignette position, rim width
-@vertex fn vsBg(@builtin(vertex_index) i: u32) -> BgO {
-  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u)) * 2. - 1.;
-  var o: BgO; o.pos = vec4f(p, 0., 1.); o.v = p * .72;
-  o.w = F.camHalf.xy + vec2f(p.x, -p.y) * F.camHalf.zw;             // y down, like world space
-  o.uv = o.w * vec2f(1. / (46. * 1.7320508), 1. / 46.);             // one hex period per tile
-  o.rw = 14. + F.camHalf.w * 2. / F.resWR.y;                        // rim glow width: 14 units + a pixel
+fn corner(k: u32) -> vec2f { return vec2f(select(0., 1., k == 1u || k == 4u || k == 5u), select(0., 1., k == 2u || k == 3u || k == 5u)); } // 2 triangles
+struct ColO { @builtin(position) pos: vec4f, @location(0) col: vec3f };
+@vertex fn vsGrid(@builtin(vertex_index) vi: u32) -> ColO {
+  let c = vi / 6u; let d = corner(vi % 6u);
+  let p = (vec2f(f32(c % ${FLOOR_GX}u), f32(c / ${FLOOR_GX}u)) + d) / vec2f(${FLOOR_GX}., ${FLOOR_GY}.) * 2. - 1.;
+  var o: ColO; o.pos = vec4f(p, 0., 1.);
+  o.col = floorShade(F.camHalf.xy + vec2f(p.x, -p.y) * F.camHalf.zw, p * .72, 14. + F.pxTime.x);
   return o;
 }
-@fragment fn fsBg(i: BgO) -> @location(0) vec4f {
-  let tf = textureSample(tileTex, linRep, i.uv).rg;
-  // colour maths in half precision where supported (Intel runs it at twice the rate);
-  // positions stay f32 (world coordinates are too large for f16)
-  var col = mix(mix(hv3(.052, .066, .108), hv3(.07, .088, .14), hf(tf.x)), hv3(.028, .035, .06), hf(tf.y * .85));
-  let WR = F.resWR.z; let r2 = dot(i.w, i.w); let lo = WR - 6. * i.rw; let cz = WR * .37;
-  if (r2 > lo * lo) { // near the world's edge (squared distances: no sqrt elsewhere)
-    let r = sqrt(r2); let rw = i.rw;
-    if (r > WR - 2.) { col = mix(col, col * hv3(.55, .22, .28) + hv3(.05, 0., .01), hf(smoothstep(WR - 2., WR + 2., r))); }
-    if (abs(r - WR) < rw * 6.) { col += hv3(1., .25, .35) * hf(exp(-abs(r - WR) / rw) * (.7 + .3 * sin(F.pxTime.y * 3.)) * .55); }
-  } else if (r2 < cz * cz) { // faint glow over the crowded centre zone
-    col += hv3(.9, .3, .4) * hf(.035 * (1. - smoothstep(WR * .3, cz, sqrt(r2))));
-  }
-  col *= hf(1. - .35 * dot(i.v, i.v));
-  return vec4f(vec3f(col), 1.);
+@fragment fn fsFlat(i: ColO) -> @location(0) vec4f { return vec4f(i.col, 1.); } // no texture, no maths
+struct RingO { @builtin(position) pos: vec4f, @location(0) w: vec2f, @location(1) v: vec2f };
+@vertex fn vsRing(@builtin(vertex_index) vi: u32) -> RingO {
+  let q = vi / 6u; let d = corner(vi % 6u);
+  let a = (f32(q) + d.x) * ${(2 * Math.PI / FLOOR_RING_SEG).toFixed(8)}; let r = select(FL.ring.x, FL.ring.y, d.y > .5);
+  let w = vec2f(cos(a), sin(a)) * r; let c = (w - F.camHalf.xy) / F.camHalf.zw;
+  var o: RingO; o.pos = vec4f(c.x, -c.y, 0., 1.); o.w = w; o.v = c * .72; return o;
 }
-fn hexD(p0: vec2f) -> f32 { let p = abs(p0); return max(dot(p, vec2f(.8660254, .5)), p.y); }
-@fragment fn fsTile(@builtin(position) fc: vec4f) -> @location(0) vec4f {
-  let R = vec2f(1.7320508, 1.); let H = R * .5;
-  let uv = fc.xy / vec2f(512., 296.) * R;
-  let a = uv - floor(uv / R) * R - H; let b0 = uv - H; let b = b0 - floor(b0 / R) * R - H;
-  var g = b; if (dot(a, a) < dot(b, b)) { g = a; }
-  let e = .5 - hexD(g);
-  // two blend factors only (rg8unorm: half the bytes of rgba8); colours are applied when drawing
-  return vec4f(smoothstep(0., .5, e), 1. - smoothstep(0., .03, e), 0., 1.);
+@fragment fn fsRing(i: RingO) -> @location(0) vec4f { return vec4f(floorShade(i.w, i.v, FL.ring.z), 1.); }
+struct HexO { @builtin(position) pos: vec4f, @location(0) d: f32, @location(1) @interpolate(flat) a: f32 };
+@vertex fn vsHex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> HexO {
+  // each hex owns 3 of its 6 edges (the rest belong to neighbours); unit hex: inradius .5
+  var ea = array<vec2f, 3>(vec2f(-.2887, -.5), vec2f(.2887, -.5), vec2f(.5774, 0.));
+  var eb = array<vec2f, 3>(vec2f(.2887, -.5), vec2f(.5774, 0.), vec2f(.2887, .5));
+  let cell = i32(ii >> 1u);
+  let ctr = (vec2f(f32(cell % FL.hex.z + FL.hex.x), f32(cell / FL.hex.z + FL.hex.y)) + f32(ii & 1u) * .5) * vec2f(${FLOOR_HX}, ${FLOOR_HY});
+  let e = vi / 6u; let k = corner(vi % 6u);
+  let A = ctr + ea[e] * 46.; let B = ctr + eb[e] * 46.; let dd = normalize(B - A); let n = vec2f(-dd.y, dd.x);
+  let px = F.pxTime.x; let side = select(-1., 1., k.y > .5) * (${FLOOR_LINE} + px); // the line + a pixel of antialiasing
+  let c = (select(A, B, k.x > .5) + n * side - F.camHalf.xy) / F.camHalf.zw;
+  var o: HexO; o.pos = vec4f(c.x, -c.y, 0., 1.); o.d = side; o.a = min(1., ${FLOOR_LINE} * 2. / px) * FL.ring.w; return o;
+}
+@fragment fn fsHex(i: HexO) -> @location(0) vec4f { // multiplied into the floor (blend: dst * src)
+  let a = clamp((${FLOOR_LINE} - abs(i.d)) / F.pxTime.x + .5, 0., 1.) * i.a;
+  return vec4f(vec3f(1. - .47 * a), 1.);
 }
 
 // ---------- food ----------
@@ -246,16 +246,6 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   return vec4f(c);
 }
 `;
-  const MIP_WGSL = /* wgsl */ `
-@group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var smp: sampler;
-@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
-  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u)); return vec4f(p * 2. - 1., 0., 1.);
-}
-@fragment fn fs(@builtin(position) fc: vec4f) -> @location(0) vec4f {
-  return textureSample(src, smp, fc.xy / (vec2f(textureDimensions(src)) * .5));
-}`;
-
   const mod = device.createShaderModule({ code: WGSL });
   const info = await mod.getCompilationInfo();
   const errs = info.messages.filter((m) => m.type === "error");
@@ -270,31 +260,29 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   q.writeBuffer(palBuf, 0, E.palette);
   const trailBuf = buf(NS * RING * 4, U.STORAGE | U.COPY_DST);
   // trail copy on the GPU: rows of on-screen snakes are kept in sync by WASM's upload list
-  const mips = (w, h) => 1 + Math.floor(Math.log2(Math.max(w, h)));
-  const tileTex = device.createTexture({ size: [512, 296], format: "rg8unorm", mipLevelCount: mips(512, 296),
-    usage: TU.TEXTURE_BINDING | TU.RENDER_ATTACHMENT });
+  // floor: this frame's edge ring and hex range (32 bytes: 4 floats, 4 ints), see floorPlan
+  const floorBuf = buf(32, U.UNIFORM | U.COPY_DST), floorData = new ArrayBuffer(32);
+  const floorF = new Float32Array(floorData), floorI = new Int32Array(floorData), plan = {};
   const atlasTex = device.createTexture({ size: [E.AW, E.AH], format: "rgba8unorm", // drawn ~1:1 with the screen: no mips
     usage: TU.TEXTURE_BINDING | TU.RENDER_ATTACHMENT | TU.COPY_DST });
-  const linRep = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "repeat", addressModeV: "repeat" }); // no anisotropy: the floor is seen straight on
   const linClamp = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear" });
 
   const V = GPUShaderStage.VERTEX, FR = GPUShaderStage.FRAGMENT;
   const bgl = device.createBindGroupLayout({ entries: [
     { binding: 0, visibility: V | FR, buffer: {} },
-    { binding: 1, visibility: FR, sampler: {} },
-    { binding: 2, visibility: FR, texture: {} },
     { binding: 3, visibility: V, buffer: { type: "read-only-storage" } },
     { binding: 4, visibility: FR, texture: {} },
     { binding: 5, visibility: FR, sampler: {} },
     { binding: 6, visibility: V | FR, buffer: {} },
     { binding: 7, visibility: V, buffer: {} },
+    { binding: 8, visibility: V | FR, buffer: {} },
   ] });
   const bind = device.createBindGroup({ layout: bgl, entries: [
-    { binding: 0, resource: { buffer: arenaBuf, offset: 0, size: 48 } }, { binding: 1, resource: linRep },
-    { binding: 2, resource: tileTex.createView() }, { binding: 3, resource: { buffer: trailBuf } },
+    { binding: 0, resource: { buffer: arenaBuf, offset: 0, size: 48 } }, { binding: 3, resource: { buffer: trailBuf } },
     { binding: 4, resource: atlasTex.createView() }, { binding: 5, resource: linClamp },
     { binding: 6, resource: { buffer: miniUBuf } },
     { binding: 7, resource: { buffer: palBuf } },
+    { binding: 8, resource: { buffer: floorBuf } },
   ] });
   const layout = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
   const PREMUL = { color: { srcFactor: "one", dstFactor: "one-minus-src-alpha" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" } };
@@ -309,46 +297,29 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   const lblL = inst(48, [[0, 0, "float32x4"], [2, 32, "uint32x4"]]);
   const miniL = inst(16, [[0, 0, "float32x3"], [1, 12, "uint32"]]);
   const P = {
-    bg: pipe("vsBg", "fsBg", [], undefined, format, false),
+    grid: pipe("vsGrid", "fsFlat", [], undefined, format, false),
+    ring: pipe("vsRing", "fsRing", [], undefined, format, false),
+    hex: pipe("vsHex", "fsHex", [], { color: { srcFactor: "zero", dstFactor: "src" }, alpha: { srcFactor: "zero", dstFactor: "one" } }, format, false), // dst *= src
     food: pipe("vsFood", "fsFood", foodL, PREMUL),
     rib: pipe("vsRib", "fsRib", hdrL, PREMUL),
     lbl: pipe("vsLbl", "fsLbl", lblL, PREMUL),
     mini: pipe("vsMini", "fsMini", miniL, PREMUL),
   };
 
-  // ---- one-off: bake the floor tile and its mipmaps ----
-  const mipMod = device.createShaderModule({ code: MIP_WGSL });
-  const mipPipe = device.createRenderPipeline({ layout: "auto", vertex: { module: mipMod, entryPoint: "vs" },
-    fragment: { module: mipMod, entryPoint: "fs", targets: [{ format: "rg8unorm" }] }, primitive: { topology: "triangle-list" } });
-  function genMips(tex) {
-    const enc = device.createCommandEncoder();
-    for (let l = 1; l < tex.mipLevelCount; l++) {
-      const bg = device.createBindGroup({ layout: mipPipe.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: tex.createView({ baseMipLevel: l - 1, mipLevelCount: 1 }) }, { binding: 1, resource: linClamp }] });
-      const pass = enc.beginRenderPass({ colorAttachments: [{ view: tex.createView({ baseMipLevel: l, mipLevelCount: 1 }), loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 0] }] });
-      pass.setPipeline(mipPipe); pass.setBindGroup(0, bg); pass.draw(3); pass.end();
-    }
-    q.submit([enc.finish()]);
-  }
-  {
-    // own "auto" layout: the tile can't be bound as a texture while it is being rendered to
-    const tilePipe = device.createRenderPipeline({ layout: "auto", vertex: { module: mod, entryPoint: "vsFull" },
-      fragment: { module: mod, entryPoint: "fsTile", targets: [{ format: "rg8unorm" }] }, primitive: { topology: "triangle-list" } });
-    const enc = device.createCommandEncoder();
-    const pass = enc.beginRenderPass({ colorAttachments: [{ view: tileTex.createView({ baseMipLevel: 0, mipLevelCount: 1 }), loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 1] }] });
-    pass.setPipeline(tilePipe); pass.draw(3); pass.end();
-    q.submit([enc.finish()]);
-    genMips(tileTex);
-  }
-
   // ---- the five draws: [pipeline, vertex-data offset in the arena] ----
-  const DRAWS = [[P.bg, -1], [P.food, A.food], [P.rib, A.hdr], [P.lbl, A.hdr], [P.mini, A.mini]];
+  const DRAWS = [[null, -1], [P.food, A.food], [P.rib, A.hdr], [P.lbl, A.hdr], [P.mini, A.mini]]; // 0: the floor (3 draws, below)
   // reused every frame: no per-frame allocations
   const counts = new Uint32Array([3, 1, 4, 0, 0, 0, 4, 0, 4, 0]); // (vertices, instances): floor, food, snakes, labels, minimap
   const mainAtt = { view: null, loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 1] };
   const mainDesc = { colorAttachments: [mainAtt] };
   const setCounts = (food, maxK, nVis, nMini) => { counts[3] = food; counts[4] = 2 * (maxK + 3); counts[5] = nVis; counts[7] = nVis; counts[9] = nMini; };
   const encodeDirect = (pass, i) => {
+    if (i === 0) { // floor: shading grid, edge ring when on screen, hex lines multiplied in
+      pass.setPipeline(P.grid); pass.draw(FLOOR_GX * FLOOR_GY * 6);
+      if (plan.ring) { pass.setPipeline(P.ring); pass.draw(FLOOR_RING_SEG * 6); }
+      if (plan.hexes) { pass.setPipeline(P.hex); pass.draw(18, plan.hexes); }
+      return;
+    }
     const [p, off] = DRAWS[i], vc = counts[i * 2], ic = counts[i * 2 + 1];
     if (!ic) return;
     pass.setPipeline(p);
@@ -386,6 +357,10 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
       const enc = device.createCommandEncoder();
       const view = ctx.getCurrentTexture().createView();
       setCounts(nFood, maxK, nVis, nMini);
+      floorPlan(E.frameBlk, plan);
+      floorF[0] = plan.rIn; floorF[1] = plan.rOut; floorF[2] = plan.rw; floorF[3] = plan.fade;
+      floorI[4] = plan.i0; floorI[5] = plan.j0; floorI[6] = plan.nx;
+      q.writeBuffer(floorBuf, 0, floorData);
       if (!(timing && canTime && !reading)) {
         mainAtt.view = view;
         const pass = enc.beginRenderPass(mainDesc);

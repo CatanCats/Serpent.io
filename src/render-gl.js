@@ -4,6 +4,27 @@
      name, passNames, canTime, gpuMs, passMs,
      resize(vw, vh), placeMini(cx, cy, rPx), labelSlot(canvas, x, y), draw(frameNo, playing, timing)
    ========================================================================== */
+/* Floor layout, shared by both renderers (this file is inlined before render-gpu.js). */
+const FLOOR_GX = 48, FLOOR_GY = 28;            // shading grid cells across / down the screen
+const FLOOR_RING_SEG = 256;                    // segments of the world-edge ring
+const FLOOR_HX = (46 * Math.sqrt(3)).toFixed(4), FLOOR_HY = "46.";  // hex lattice period (world units)
+const FLOOR_LINE = "0.9";                      // hex line half width (world units)
+/* What the floor needs this frame, from the Frame block [camX camY halfW halfH | px ...| .. WR]. */
+function floorPlan(fb, p) {
+  const cx = fb[0], cy = fb[1], hw = fb[2], hh = fb[3], px = fb[4], WR = fb[10], HX = 46 * Math.sqrt(3), HY = 46;
+  const s = Math.max((2 * hw) / FLOOR_GX, (2 * hh) / FLOOR_GY); // one grid cell, in world units
+  p.rw = 14 + px;                                               // edge glow width
+  p.rIn = WR - 6 * p.rw - s - 4; p.rOut = WR + 6 * p.rw + s + 4; // the ring covers where the grid can't be exact
+  const d = Math.hypot(cx, cy), reach = Math.hypot(hw, hh);
+  p.ring = d + reach > p.rIn && d - reach < p.rOut;
+  p.fade = 1 - Math.min(1, Math.max(0, (px - 3) / 2));          // zoomed far out: lines fade, then are skipped
+  p.i0 = Math.floor((cx - hw) / HX) - 1; p.j0 = Math.floor((cy - hh) / HY) - 1;
+  p.nx = Math.ceil((2 * hw) / HX) + 3;
+  p.hexes = p.fade > 0 ? p.nx * (Math.ceil((2 * hh) / HY) + 3) * 2 : 0; // instances: 2 lattices
+  if (p.hexes > 30000) p.hexes = 0;                             // (only when zoomed out enormously, e.g. after death)
+  return p;
+}
+
 function createGL(canvas, E) {
   const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, depth: false, stencil: false,
     premultipliedAlpha: true, powerPreference: "high-performance" });
@@ -17,52 +38,84 @@ function createGL(canvas, E) {
   // highp members: fragment shaders below default to mediump (half precision on mobile GPUs)
   const FRAME = `layout(std140) uniform Frame { highp vec4 uCamHalf; highp vec4 uPxTime; highp vec4 uResWR; };`;
 
-  const BG_VS = `#version 300 es
-  void main(){ vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2)); gl_Position=vec4(p*2.-1.,0,1); }`;
-  // One hex period rendered once into a mipmapped texture: sampling it is
-  // cheaper than the math and mipmaps stop the thin lines shimmering at zoom-out.
-  const TILE_FS = `#version 300 es
-  precision highp float;
-  uniform vec2 uSize; out vec4 o;
-  float hexD(vec2 p){ p=abs(p); return max(dot(p,vec2(.8660254,.5)),p.y); }
-  void main(){
-    vec2 uv=gl_FragCoord.xy/uSize*vec2(1.7320508,1.);
-    const vec2 R=vec2(1.7320508,1.); vec2 H=R*.5;
-    vec2 a=mod(uv,R)-H, b=mod(uv-H,R)-H; vec2 g=dot(a,a)<dot(b,b)?a:b;
-    float e=.5-hexD(g);
-    // two blend factors only (RG8: half the bytes of RGBA8); colours are applied when drawing
-    o=vec4(smoothstep(.0,.5,e), 1.-smoothstep(.0,.03,e), 0, 1);
+  /* Floor: most pixels need no work of their own.
+     1. A coarse grid (FLOOR_GX x FLOOR_GY cells) covers the screen; its ~1,400 corners
+        compute the large, slow shading (base colour, screen-edge darkening, centre
+        glow, outside-the-world tint) and the GPU blends between them: per pixel
+        there is no texture and no maths, just the interpolated colour.
+     2. Near the world's edge the glow is too sharp for the grid, so a thin ring
+        around the edge redoes those pixels exactly, and only when it is on screen.
+     3. Hex outlines are thin line quads (a few % of the pixels) that darken what
+        is under them. */
+  const FLOOR_SHADE = `
+  const vec3 FLOOR_BASE=vec3(.063,.079,.125);
+  vec3 floorShade(vec2 w, vec2 v, float rw){ // w: world position, v: screen position * .72
+    vec3 col=FLOOR_BASE; float WRr=uResWR.z, r=length(w);
+    if(r>WRr-2.) col=mix(col,col*vec3(.55,.22,.28)+vec3(.05,0,.01),smoothstep(WRr-2.,WRr+2.,r));
+    if(abs(r-WRr)<rw*6.) col+=vec3(1.,.25,.35)*exp(-abs(r-WRr)/rw)*(.7+.3*sin(uPxTime.y*3.))*.55;
+    if(r<WRr*.37) col+=vec3(.9,.3,.4)*.035*(1.-smoothstep(WRr*.3,WRr*.37,r));
+    return col*(1.-.35*dot(v,v));
   }`;
-  const BGW_VS = `#version 300 es
+  const FLAT_FS = `#version 300 es
+  precision mediump float;
+  in vec3 vCol; out vec4 o;
+  void main(){ o=vec4(vCol,1); }`;
+  const GRID_VS = `#version 300 es
   ${FRAME}
-  out vec2 vW, vV, vUV; flat out float vRW;
-  // everything that is linear across the screen is computed here, per corner, and
-  // interpolated: world position, tile coordinates, vignette position, rim width
+  ${FLOOR_SHADE}
+  out vec3 vCol;
   void main(){
-    vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2))*2.-1.;
-    gl_Position=vec4(p,0,1); vV=p*.72; vW=uCamHalf.xy+vec2(p.x,-p.y)*uCamHalf.zw;
-    vUV=vW*vec2(1./(46.*1.7320508),1./46.);                  // one hex period per tile
-    vRW=14.+uCamHalf.w*2./uResWR.y;                           // rim glow width: 14 units + a pixel
+    int c=gl_VertexID/6, k=gl_VertexID-c*6;                     // two triangles per cell
+    int dx=(k==1||k==4||k==5)?1:0, dy=(k==2||k==3||k==5)?1:0;
+    vec2 p=vec2(float(c%${FLOOR_GX}+dx),float(c/${FLOOR_GX}+dy))/vec2(${FLOOR_GX}.,${FLOOR_GY}.)*2.-1.;
+    gl_Position=vec4(p,0,1);
+    vCol=floorShade(uCamHalf.xy+vec2(p.x,-p.y)*uCamHalf.zw, p*.72, 14.+uPxTime.x);
   }`;
-  const BG_FS = `#version 300 es
-  precision highp float;
-  in vec2 vW, vV, vUV; flat in float vRW;
+  const RING_VS = `#version 300 es
   ${FRAME}
-  uniform sampler2D uTile;
-  out vec4 o;
+  uniform vec3 uRing;                                           // inner radius, outer radius, glow width
+  out vec2 vW, vV;
   void main(){
-    vec2 tf=texture(uTile, vUV).rg;
-    mediump vec3 col=mix(mix(vec3(.052,.066,.108),vec3(.07,.088,.14),tf.x),vec3(.028,.035,.06),tf.y*.85);
-    float WRr=uResWR.z, r2=dot(vW,vW), lo=WRr-6.*vRW, cz=WRr*.37;
-    if(r2>lo*lo){ // near the world's edge (squared distances: no sqrt elsewhere)
-      float r=sqrt(r2), rw=vRW;
-      if(r>WRr-2.) col=mix(col,col*vec3(.55,.22,.28)+vec3(.05,0,.01),smoothstep(WRr-2.,WRr+2.,r));
-      if(abs(r-WRr)<rw*6.) col+=vec3(1.,.25,.35)*exp(-abs(r-WRr)/rw)*(.7+.3*sin(uPxTime.y*3.))*.55;
-    } else if(r2<cz*cz){ // faint glow over the crowded centre zone
-      col+=vec3(.9,.3,.4)*.035*(1.-smoothstep(WRr*.3,cz,sqrt(r2)));
-    }
-    col*=1.-.35*dot(vV,vV);
-    o=vec4(col,1);
+    int q=gl_VertexID/6, k=gl_VertexID-q*6;
+    int da=(k==1||k==4||k==5)?1:0, dr=(k==2||k==3||k==5)?1:0;
+    float a=float(q+da)*${(2 * Math.PI / FLOOR_RING_SEG).toFixed(8)}, r=dr==1?uRing.y:uRing.x;
+    vec2 w=vec2(cos(a),sin(a))*r, c=(w-uCamHalf.xy)/uCamHalf.zw;
+    gl_Position=vec4(c.x,-c.y,0,1); vW=w; vV=c*.72;
+  }`;
+  const RING_FS = `#version 300 es
+  precision highp float;
+  ${FRAME}
+  ${FLOOR_SHADE}
+  uniform vec3 uRing;
+  in vec2 vW, vV; out vec4 o;
+  void main(){ o=vec4(floorShade(vW, vec2(vV.x,-vV.y), uRing.z),1); }`;
+  const HEX_VS = `#version 300 es
+  ${FRAME}
+  uniform ivec3 uHex;                                           // first column, first row, columns
+  uniform float uFade;
+  out float vD; flat out float vA;
+  // each hex owns 3 of its 6 edges (the other 3 belong to neighbours); unit hex: inradius .5
+  const vec2 EA[3]=vec2[3](vec2(-.2887,-.5),vec2(.2887,-.5),vec2(.5774,0.));
+  const vec2 EB[3]=vec2[3](vec2(.2887,-.5),vec2(.5774,0.),vec2(.2887,.5));
+  void main(){
+    int lat=gl_InstanceID&1, cell=gl_InstanceID>>1;
+    vec2 ctr=(vec2(float(cell%uHex.z+uHex.x),float(cell/uHex.z+uHex.y))+float(lat)*.5)*vec2(${FLOOR_HX},${FLOOR_HY});
+    int e=gl_VertexID/6, k=gl_VertexID-e*6;
+    bool atB=(k==1||k==4||k==5), up=(k==2||k==3||k==5);
+    vec2 A=ctr+EA[e]*46., B=ctr+EB[e]*46., d=normalize(B-A), n=vec2(-d.y,d.x);
+    float px=uPxTime.x, hw=${FLOOR_LINE}+px;                    // half width: the line + a pixel of antialiasing
+    vec2 w=(atB?B:A)+n*(up?hw:-hw);
+    vec2 c=(w-uCamHalf.xy)/uCamHalf.zw;
+    gl_Position=vec4(c.x,-c.y,0,1);
+    vD=up?hw:-hw; vA=min(1.,${FLOOR_LINE}*2./px)*uFade;         // thinner than a pixel: fainter
+  }`;
+  const HEX_FS = `#version 300 es
+  precision mediump float;
+  ${FRAME}
+  in float vD; flat in float vA; out vec4 o;
+  void main(){
+    float a=clamp((${FLOOR_LINE}-abs(vD))/uPxTime.x+.5,0.,1.)*vA;
+    o=vec4(vec3(1.-.47*a),1);                                    // multiplied into the floor (blend: dst * src)
   }`;
 
   // Food: instanced glowing orbs.
@@ -265,25 +318,10 @@ function createGL(canvas, E) {
     if (pi !== gl.INVALID_INDEX) gl.uniformBlockBinding(p, pi, 1);
     return p;
   }
-  const bgP = prog(BGW_VS, BG_FS), foodP = prog(VS, FS), ribP = prog(RVS, RFS), lblP = prog(LVS, LFS), miniP = prog(MVS, MFS, false);
+  const gridP = prog(GRID_VS, FLAT_FS), ringP = prog(RING_VS, RING_FS), hexP = prog(HEX_VS, HEX_FS), foodP = prog(VS, FS), ribP = prog(RVS, RFS), lblP = prog(LVS, LFS), miniP = prog(MVS, MFS, false);
 
   // Textures live on fixed units for the whole run (no per-frame rebinding):
-  // unit 0 trail (two, alternating), unit 1 floor tile, unit 2 label atlas.
-  const tileTex = gl.createTexture();
-  {
-    const TW = 512, TH = 296, tp = prog(BG_VS, TILE_FS, false);
-    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tileTex);
-    gl.texStorage2D(gl.TEXTURE_2D, 1 + Math.floor(Math.log2(TW)), gl.RG8, TW, TH);
-    const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tileTex, 0);
-    gl.viewport(0, 0, TW, TH); gl.useProgram(tp); gl.uniform2f(gl.getUniformLocation(tp, "uSize"), TW, TH);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.deleteFramebuffer(fb);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
-    // no anisotropic filtering: the floor is always seen straight on, so it would cost time for nothing
-  }
+  // unit 0 trail, unit 2 label atlas.
   const atlas = gl.createTexture();
   gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, atlas);
   gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, E.AW, E.AH); // drawn ~1:1 with the screen: no mips needed
@@ -291,7 +329,8 @@ function createGL(canvas, E) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.activeTexture(gl.TEXTURE0);
 
-  gl.useProgram(bgP); gl.uniform1i(gl.getUniformLocation(bgP, "uTile"), 1);
+  const ringU = gl.getUniformLocation(ringP, "uRing"), hexU = gl.getUniformLocation(hexP, "uHex"), fadeU = gl.getUniformLocation(hexP, "uFade");
+  const plan = {};
   gl.useProgram(ribP); gl.uniform1i(gl.getUniformLocation(ribP, "uTrail"), 0);
   gl.useProgram(lblP);
   gl.uniform1i(gl.getUniformLocation(lblP, "uAtlas"), 2);
@@ -366,11 +405,18 @@ function createGL(canvas, E) {
       gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR]);
       gl.viewport(0, 0, vw, vh);
 
-      mark(); // floor: opaque, so no blending (saves reading the whole screen back)
-      gl.disable(gl.BLEND);
-      gl.useProgram(bgP); gl.bindVertexArray(emptyVao);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      mark(); // floor: grid (+ edge ring when on screen) opaque, then hex lines multiplied in
+      floorPlan(E.frameBlk, plan);
+      gl.disable(gl.BLEND); gl.bindVertexArray(emptyVao);
+      gl.useProgram(gridP); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_GX * FLOOR_GY * 6);
+      if (plan.ring) { gl.useProgram(ringP); gl.uniform3f(ringU, plan.rIn, plan.rOut, plan.rw); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6); }
       gl.enable(gl.BLEND);
+      if (plan.hexes) {
+        gl.blendFunc(gl.ZERO, gl.SRC_COLOR);
+        gl.useProgram(hexP); gl.uniform3i(hexU, plan.i0, plan.j0, plan.nx); gl.uniform1f(fadeU, plan.fade);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, 18, plan.hexes);
+        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      }
       mark(); // food
       if (nFood) { gl.useProgram(foodP); gl.bindVertexArray(foodVao[f]); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, nFood); }
       mark(); // snakes
