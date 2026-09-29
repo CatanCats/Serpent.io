@@ -39,42 +39,28 @@ const SP: f32 = 0.42;
 fn quad(vi: u32) -> vec2f { return vec2f(f32(vi & 1u), f32(vi >> 1u)); }
 
 // ---------- floor (see render-gl.js for the idea and the shape kinds) ----------
-const FB = vec3f(${FLOOR_BASE.join(", ")});
-fn floorShade(w: vec2f, rw: f32) -> vec3f { // w: world position
-  var col = FB; let WR = F.resWR.z; let r = length(w);
-  if (r > WR - 2.) { col = mix(col, col * vec3f(${FLOOR_OUT_MUL.join(", ")}) + vec3f(${FLOOR_OUT_ADD.join(", ")}), smoothstep(WR - 2., WR + 2., r)); }
-  if (abs(r - WR) < rw * 6.) { col += vec3f(1., .25, .35) * exp(-abs(r - WR) / rw) * (.7 + .3 * sin(F.pxTime.y * 3.)) * .55; }
-  if (r < WR * .37) { col += vec3f(${FLOOR_GLOW.join(", ")}) * (1. - smoothstep(WR * .3, WR * .37, r)); }
-  return col;
-}
+const FB = vec3f(${FLOOR_BASE.join(", ")}); const FD = vec3f(${FLOOR_DARK.join(", ")});
+fn rimW() -> f32 { return 1.5 + F.pxTime.x; }                   // edge line glow width (world units)
 fn lineFade() -> f32 { return 1. - clamp((F.pxTime.x - 3.) * .5, 0., 1.); } // zoomed far out: lines fade out
 fn corner(k: u32) -> vec2f { return vec2f(select(0., 1., k == 1u || k == 4u || k == 5u), select(0., 1., k == 2u || k == 3u || k == 5u)); } // 2 triangles
-struct RingO { @builtin(position) pos: vec4f, @location(0) w: vec2f, @location(1) @interpolate(flat) kind: u32, @location(2) @interpolate(flat) col: vec3f };
+struct RingO { @builtin(position) pos: vec4f, @location(0) w: vec2f, @location(1) @interpolate(flat) kind: u32 };
 // instance index = shape kind (the draw's first instance picks them)
 @vertex fn vsRing(@builtin(vertex_index) vi: u32, @builtin(instance_index) kind: u32) -> RingO {
   let q = vi / 6u; let dk = corner(vi % 6u);
-  let d = length(F.camHalf.xy); let reach = length(F.camHalf.zw); let WR = F.resWR.z; let rw = 14. + F.pxTime.x;
-  let core = WR * .37 + 2.; let rIn = WR - 6. * rw - 4.; let rOut = WR + 6. * rw + 4.;
+  let d = length(F.camHalf.xy); let reach = length(F.camHalf.zw); let WR = F.resWR.z;
+  let rIn = WR - 6. * rimW() - 2.; let rOut = WR + 32.;          // the band also hides hex lines poking past the edge
   var R = vec2f(rIn, rOut); var vis = d + reach > rIn && d - reach < rOut;
-  if (kind == 0u) { R = vec2f(rOut, d + reach + 8.); vis = d + reach > rOut; }
-  else if (kind == 1u) { R = vec2f(0., core); vis = d - reach < core && d + reach > WR * .3 - 1.; } // (else the clear colour has the glow)
-  else if (kind == 2u) { R = vec2f(core, rIn); vis = d - reach < rIn; }
+  if (kind == 0u) { R = vec2f(0., rIn); vis = d - reach < rIn; }
+  else if (kind == 2u) { R = vec2f(rOut, d + reach + 8.); vis = d + reach > rOut; }
   let a = (f32(q) + dk.x) * ${(2 * Math.PI / FLOOR_RING_SEG).toFixed(8)}; let r = select(R.x, R.y, dk.y > .5);
   let w = vec2f(cos(a), sin(a)) * r; let c = (w - F.camHalf.xy) / F.camHalf.zw;
-  var o: RingO; o.pos = select(vec4f(2., 2., 2., 1.), vec4f(c.x, -c.y, 0., 1.), vis); o.w = w; o.kind = kind;
-  o.col = select(FB, FB * vec3f(${FLOOR_OUT_MUL.join(", ")}) + vec3f(${FLOOR_OUT_ADD.join(", ")}), kind == 0u); return o;
+  var o: RingO; o.pos = select(vec4f(2., 2., 2., 1.), vec4f(c.x, -c.y, 0., 1.), vis); o.w = w; o.kind = kind; return o;
 }
-fn fmod2(x: vec2f, y: vec2f) -> vec2f { return x - y * floor(x / y); }
 @fragment fn fsRing(i: RingO) -> @location(0) vec4f {
-  if (i.kind == 0u || i.kind == 2u) { return vec4f(i.col, 1.); } // flat: no maths per pixel
-  var c = floorShade(i.w, 14. + F.pxTime.x);
-  if (i.kind == 3u) { // edge band: hex lines per pixel
-    let s = vec2f(${FLOOR_HX}, ${FLOOR_HY});
-    let a = abs(fmod2(i.w + .5 * s, s) - .5 * s); let b = abs(fmod2(i.w, s) - .5 * s);
-    let h = min(max(a.y, .866 * a.x + .5 * a.y), max(b.y, .866 * b.x + .5 * b.y));
-    let cov = clamp((${FLOOR_LINE} - (23. - h)) / F.pxTime.x + .5, 0., 1.) * lineFade();
-    c *= 1. + (${FLOOR_LINE_K} - 1.) * cov;
-  }
+  if (i.kind != 1u) { return vec4f(select(FD, FB, i.kind == 0u), 1.); } // flat: no maths per pixel
+  let WR = F.resWR.z; let r = length(i.w);
+  var c = mix(FB, FD, smoothstep(WR - F.pxTime.x, WR + F.pxTime.x, r));
+  c += vec3f(1., .25, .35) * exp(-abs(r - WR) / rimW()) * (.7 + .3 * sin(F.pxTime.y * 3.)) * .55;
   return vec4f(c, 1.);
 }
 struct HexO { @builtin(position) pos: vec4f, @location(0) @interpolate(flat) col: vec3f };
@@ -87,12 +73,13 @@ struct HexO { @builtin(position) pos: vec4f, @location(0) @interpolate(flat) col
   let f0 = vec2i(floor((F.camHalf.xy - F.camHalf.zw) / S)) - 1;
   let cell = i32(ii >> 1u);
   let ctr = (vec2f(f32(cell % nx + f0.x), f32(cell / nx + f0.y)) + f32(ii & 1u) * .5) * S;
+  var o: HexO;
+  if (length(ctr) > F.resWR.z) { o.pos = vec4f(2., 2., 2., 1.); return o; } // outside the world: no lines
   let e = vi / 6u; let k = corner(vi % 6u);
   let A = ctr + ea[e] * 46.; let B = ctr + eb[e] * 46.; let dd = normalize(B - A); let n = vec2f(-dd.y, dd.x);
-  let px = F.pxTime.x; let side = select(-1., 1., k.y > .5) * max(${FLOOR_LINE}, px * .5); // at least a pixel wide: no gaps, no antialiasing
+  let side = select(-.5, .5, k.y > .5) * F.pxTime.x;             // exactly one pixel wide: no gaps, fewest pixels
   let c = (select(A, B, k.x > .5) + n * side - F.camHalf.xy) / F.camHalf.zw;
-  var o: HexO; o.pos = vec4f(c.x, -c.y, 0., 1.);
-  o.col = floorShade(ctr, 0.) * (1. + (${FLOOR_LINE_K} - 1.) * lineFade() * min(1., ${FLOOR_LINE} * 2. / px)); // the floor here, a bit lighter
+  o.pos = vec4f(c.x, -c.y, 0., 1.); o.col = FB * (1. + (${FLOOR_LINE_K} - 1.) * lineFade());
   return o;
 }
 @fragment fn fsHex(i: HexO) -> @location(0) vec4f { return vec4f(i.col, 1.); } // one flat colour: no blending, no maths
@@ -108,8 +95,7 @@ struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
   let p = vec2f(pq) * .25; let r = min(3.5 + sqrt(f32(b.x) / 16.) * 2.6, 15.);
   let c0 = p - F.camHalf.xy;
   if (b.x == 0u || any(abs(c0) > F.camHalf.zw + r * ${FOOD_GLOW} + F.pxTime.x * 1.5)) { o.pos = vec4f(2., 2., 2., 1.); return o; }
-  var oct = array<vec2f, 8>(${OCT_STRIP.map(([x, y]) => `vec2f(${x}, ${y})`).join(", ")});
-  let q = oct[vi];                                          // octagon corner (strip order)
+  let q = quad(vi) * 2. - 1.;                               // 4 corners: fewest vertices
   let tiny = r / F.pxTime.x < 1.6;                         // under ~1.6 px: no halo
   let l = q * select(r * ${FOOD_GLOW}, r * .7 + F.pxTime.x * 1.5, tiny);
   let c = (c0 + l) / F.camHalf.zw;
@@ -123,7 +109,7 @@ struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
   let pulse = .75 + .25 * sin(F.pxTime.y * 4. + f32(i.info.z) * .0245);
   let born = smoothstep(0., 10., f32(i.info.w));
   let rr = r * (.4 + .6 * born);
-  if (d >= max(rr * ${FOOD_GLOW}, rr * .7 + aa)) { discard; } // corner of the octagon, outside the glow: nothing to blend
+  if (d >= max(rr * ${FOOD_GLOW}, rr * .7 + aa)) { discard; } // corner of the quad, outside the glow: nothing to blend
   let core = hf((1. - smoothstep(rr * .7 - aa, rr * .7 + aa, d)) * born);
   var glow = hf(0.);
   if (r / F.pxTime.x >= 1.6) { let t = min(d / (rr * ${FOOD_GLOW}), 1.); let g = 1. - t * t; glow = hf(g * g * pulse * born); } // fuller halo, same quad
@@ -323,15 +309,16 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   // ---- the five draws: [pipeline, vertex-data offset in the arena] ----
   const DRAWS = [[null, -1], [P.food, A.food], [P.rib, A.hdr], [P.lbl, A.hdr], [P.mini, A.mini]]; // 0: the floor (its own draws, in encodeDirect)
   // reused every frame: no per-frame allocations
-  const counts = new Uint32Array([0, 0, 8, 0, 0, 0, 4, 0, 4, 0]); // (vertices, instances): floor (unused), food (octagon), snakes, labels, minimap
+  const counts = new Uint32Array([0, 0, 4, 0, 0, 0, 4, 0, 4, 0]); // (vertices, instances): floor (unused), food, snakes, labels, minimap
   const mainAtt = { view: null, loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 1] }; // clearValue: the floor colour (plan.clear)
   const mainDesc = { colorAttachments: [mainAtt] };
   const setCounts = (food, maxK, nVis, nMini) => { counts[3] = food; counts[4] = 2 * (maxK + 3); counts[5] = nVis; counts[7] = nVis; counts[9] = nMini; };
   const encodeDirect = (pass, i) => {
-    if (i === 0) { // floor: the pass cleared to the main colour; flat side + centre glow, hex lines, edge-glow band
-      pass.setPipeline(P.ring); pass.draw(FLOOR_RING_SEG * 6, 2, 0, plan.out ? 1 : 0); // kinds 0,1 or 1,2
-      if (plan.hexes) { pass.setPipeline(P.hex); pass.draw(18, plan.hexes); }
-      pass.setPipeline(P.ring); pass.draw(FLOOR_RING_SEG * 6, 1, 0, 3);
+    if (i === 0) { // floor: the pass cleared (nearly free); flat inside area when outside; hex lines; edge band + darkness
+      pass.setPipeline(P.ring);
+      if (plan.out) pass.draw(FLOOR_RING_SEG * 6, 1, 0, 0);
+      if (plan.hexes) { pass.setPipeline(P.hex); pass.draw(18, plan.hexes); pass.setPipeline(P.ring); }
+      pass.draw(FLOOR_RING_SEG * 6, plan.out ? 1 : 2, 0, 1);
       return;
     }
     const [p, off] = DRAWS[i], vc = counts[i * 2], ic = counts[i * 2 + 1];

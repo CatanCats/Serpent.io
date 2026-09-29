@@ -70,20 +70,23 @@ Server environment variables: `PORT` (8080), `BOTS` (60), `WEB_ROOT`, `MAX_PER_I
 - Offline, owner's laptop (Edge, WebGPU f16, Intel iGPU): CPU per frame about 0.2 ms; GPU about 1.0 ms (floor 0.52, food 0.2, snakes 0.13, map 0.13) mid-map, measured before the flat hex lines, octagon food and minimap discards; sim benchmark 35–40 µs per step. Ask the owner for new readings, mid-map and at the world edge.
 - Server, 4-core 2.1 GHz Xeon: 66 players ≈ 8% of one core, 10 MB RAM, about 12 KB/s per player.
 
-## Floor design (clear + only what differs)
-- Nothing floor-specific is uploaded per frame: the vertex shaders work out every shape (radii, on screen or not, the hex range) from the Frame block. `floorPlan()` in `render-gl.js` (shared by both renderers) only picks the clear colour, which side of the world edge is flat, and the hex instance count (with a row of margin, since the shader rounds its own column count).
-- The pass clears to the main colour: the floor, the floor plus the centre glow when the whole screen is inside it, or the outside tint when the camera centre is outside the world. A clear is nearly free (GPUs fast-clear whole blocks).
-- One ring program draws the shapes by kind (instance index; WebGPU picks them with the draw's first instance, WebGL with a `uFirst` uniform): 0 outside area (flat), 1 centre-glow disc (exact), 2 inside area (flat, camera outside), 3 world-edge glow band (exact). Off-screen shapes collapse in the vertex shader.
-- Draw order: flat side + centre glow → hex lines → edge band.
-  - Hex lines are opaque, one flat colour per hex (the floor under it × `FLOOR_LINE_K`, lighter), with no blending and no antialiasing, at least 1 px wide.
-  - The edge band is drawn over them and draws the lines itself per pixel (antialiased), so they carry on through the glow.
+## Floor design (one colour + clear; almost nothing drawn)
+- Inside the world the floor is ONE colour (no centre glow, no vignette), so the pass just clears to it (nearly free). When the camera centre is outside the world, it clears to darkness (`FLOOR_DARK`).
+- Nothing floor-specific is uploaded: the vertex shaders work out the shapes from the Frame block. `floorPlan()` in `render-gl.js` (shared) only picks the clear colour and the hex instance count (with a row of margin, since the shader rounds its own column count).
+- Hex lines: opaque quads exactly one device pixel wide, one flat colour (`FLOOR_BASE × FLOOR_LINE_K`). No blending, no antialiasing, no per-pixel maths. Hexes whose centre is outside the world are skipped.
+- Ring shapes by kind (instance index; WebGPU picks them with the draw's first instance, WebGL with a `uFirst` uniform):
+  - 0: inside area, flat (only when the camera is outside);
+  - 1: edge band (a thin glowing red line; the only per-pixel maths; it also hides hex lines poking past the edge);
+  - 2: darkness outside, flat.
+- Off-screen shapes collapse in the vertex shader.
+- Order: kind 0 → hex lines → kinds 1 (+2).
 - History on the owner's Intel iGPU:
-  - texture tile 1.97 ms → per-vertex grid 1.64 ms → clear-based 0.52 ms (mid-map);
-  - then lines went from darker-multiplied to lighter-opaque; not yet re-measured.
-  - The grid still wrote every pixel; writing pixels was the real cost. The screen-edge vignette was dropped because it touched every pixel.
+  - texture tile 1.97 ms → per-vertex grid 1.64 → clear-based 0.52 → flat lighter lines 0.26 (mid-map);
+  - the edge was 1.70 ms total GPU (red tint + wide glow band); now darkness + a thin line; not yet re-measured.
+  - Writing pixels is the real cost.
 
 ## Other GPU details
-- Food: each pellet is an 8-vertex octagon strip (`OCT_STRIP`), not a square, with the halo radius `FOOD_GLOW` = 1.7 pellet radii (was 1.9). Together that means about 34% fewer halo pixels.
+- Food: one 4-vertex quad per pellet, halo radius `FOOD_GLOW` = 1.7 pellet radii (was 1.9). An octagon version (fewer pixels, 8 vertices) measured slower on the owner's iGPU (food 0.20 → 0.33 ms) and was reverted.
 - Minimap: pixels that would add nothing are discarded (no blend), and the flat inside areas skip the edge maths.
 - GPU timing (P panel) runs on 1 frame in 8, because splitting a frame into timed passes costs CPU and GPU; the CPU figures now show normal frames.
 - Headless CPU "draw" times swing ±40% between runs (software GPU), so small CPU savings can't be measured there. `T` in `app.js` (`T.gl / T.n`) is the average draw time; a test copy can expose it on `window.__serpent`.

@@ -5,31 +5,21 @@
      resize(vw, vh), placeMini(cx, cy, rPx), labelSlot(canvas, x, y), draw(frameNo, playing, timing)
    ========================================================================== */
 /* Floor layout, shared by both renderers (this file is inlined before render-gpu.js). */
-const FLOOR_BASE = [.052, .065, .104];         // the floor colour: the screen is simply cleared to it
-const FLOOR_LINE_K = "1.45";                   // hex lines: the floor colour under them, this much lighter
-const FLOOR_GLOW = [.9 * .035, .3 * .035, .4 * .035]; // centre glow added to it (flat inside 30% of the world radius)
-const FLOOR_OUT_MUL = [.55, .22, .28], FLOOR_OUT_ADD = [.05, 0, .01]; // outside the world: base * MUL + ADD
+const FLOOR_BASE = [.052, .065, .104];         // the floor colour: one colour everywhere inside the world
+const FLOOR_DARK = [.008, .009, .014];         // outside the world: darkness
+const FLOOR_LINE_K = "1.45";                   // hex lines: the floor colour, this much lighter
 const FOOD_GLOW = "1.7";                        // food halo radius, in pellet radii
-/* An octagon around a unit circle, as an 8-vertex triangle strip: ~17% fewer pixels than a square. */
-const OCT_STRIP = [0, 1, 7, 2, 6, 3, 5, 4].map((k) => { const a = (k + .5) * Math.PI / 4, r = 1 / Math.cos(Math.PI / 8);
-  return [(Math.cos(a) * r).toFixed(5), (Math.sin(a) * r).toFixed(5)]; });
-const FLOOR_RING_SEG = 256;                    // segments of the discs / bands
+const FLOOR_RING_SEG = 256;                    // segments of the rings
 const FLOOR_HX = (46 * Math.sqrt(3)).toFixed(4), FLOOR_HY = "46.";  // hex lattice period (world units)
-const FLOOR_LINE = "0.9";                      // hex line half width (world units)
-/* The floor's shapes (their radii, whether they are on screen, the hex range) are worked
-   out by the vertex shaders from the Frame block, so there is nothing extra to upload.
-   The CPU only picks the clear colour, which side of the world edge is flat, and how
-   many hex instances to draw (from the Frame block [camX camY halfW halfH | px ...| .. WR]). */
+/* The floor is one colour, so the screen is simply cleared to it (nearly free). The rest
+   is worked out by the vertex shaders from the Frame block (nothing extra is uploaded);
+   the CPU only picks the clear colour and the hex instance count
+   (from the Frame block [camX camY halfW halfH | px ...| .. WR]). */
 function floorPlan(fb, p) {
   const cx = fb[0], cy = fb[1], hw = fb[2], hh = fb[3], px = fb[4], WR = fb[10];
-  const d = Math.hypot(cx, cy), reach = Math.hypot(hw, hh);
-  const inCore = d + reach < WR * .3;                           // screen wholly inside the centre glow's flat middle
-  p.out = d > WR;                                               // camera centre outside the world
-  const c = p.clear || (p.clear = [0, 0, 0, 1]);
-  for (let i = 0; i < 3; i++) {
-    const b = FLOOR_BASE[i];
-    c[i] = p.out ? b * FLOOR_OUT_MUL[i] + FLOOR_OUT_ADD[i] : b + (inCore ? FLOOR_GLOW[i] : 0);
-  }
+  p.out = Math.hypot(cx, cy) > WR;                              // camera centre outside the world: clear to darkness
+  const c = p.clear || (p.clear = [0, 0, 0, 1]), src = p.out ? FLOOR_DARK : FLOOR_BASE;
+  for (let i = 0; i < 3; i++) c[i] = src[i];
   const fade = 1 - Math.min(1, Math.max(0, (px - 3) / 2));      // zoomed far out: lines fade, then are skipped
   // columns and rows with a margin; the shader derives its own column count, which may
   // differ by one through rounding: the margin keeps the screen covered either way
@@ -51,45 +41,36 @@ function createGL(canvas, E) {
   // highp members: fragment shaders below default to mediump (half precision on mobile GPUs)
   const FRAME = `layout(std140) uniform Frame { highp vec4 uCamHalf; highp vec4 uPxTime; highp vec4 uResWR; };`;
 
-  /* Floor: most pixels need no work at all.
-     1. The screen is cleared to the main floor colour (see floorPlan). A clear is nearly
-        free (GPUs mark whole blocks as "clear colour" instead of writing every pixel),
-        so most of the floor costs nothing.
-     2. Inside and outside the world are each one flat colour: the side not used as the
-        clear colour is drawn flat (no maths per pixel), only when on screen.
-     3. Only the glows need maths per pixel: the centre glow (a disc) and the thin
-        world-edge glow (a band), each drawn only when on screen.
-     4. Hex outlines are thin quads in one flat colour each (a little lighter than the
-        floor under them): no blending, no maths per pixel. Inside the edge-glow band,
-        which is drawn over them, the band works the lines out per pixel instead.
-     Shapes (instance = kind): 0 outside-the-world area (flat), 1 centre-glow disc,
-     2 inside-the-world area (flat, when the camera is outside), 3 edge-glow band.
-     A shape that is off screen collapses to nothing in the vertex shader. */
-  const FLOOR_SHADE = `
-  vec3 floorShade(vec2 w, float rw){ // w: world position
-    vec3 col=vec3(${FLOOR_BASE.join(",")}); float WRr=uResWR.z, r=length(w);
-    if(r>WRr-2.) col=mix(col,col*vec3(${FLOOR_OUT_MUL.join(",")})+vec3(${FLOOR_OUT_ADD.join(",")}),smoothstep(WRr-2.,WRr+2.,r));
-    if(abs(r-WRr)<rw*6.) col+=vec3(1.,.25,.35)*exp(-abs(r-WRr)/rw)*(.7+.3*sin(uPxTime.y*3.))*.55;
-    if(r<WRr*.37) col+=vec3(${FLOOR_GLOW.join(",")})*(1.-smoothstep(WRr*.3,WRr*.37,r));
-    return col;
-  }
+  /* Floor: almost no pixels need any work.
+     1. The screen is cleared to the floor colour (or to darkness when the camera is
+        outside the world). A clear is nearly free: GPUs mark whole blocks as "clear
+        colour" instead of writing every pixel.
+     2. Hex outlines: thin quads exactly one pixel wide in one flat colour. No blending,
+        no maths per pixel.
+     3. Only near the world edge: the area on the other side of the edge (darkness, or
+        the floor when the camera is outside) in one flat colour, and a thin band with
+        the glowing edge line, the only pixels with maths of their own.
+     Ring shapes (instance = kind): 0 inside the world (flat; camera outside),
+     1 edge band (exact), 2 outside the world (darkness, flat; camera inside). A shape
+     that is off screen collapses to nothing in the vertex shader. */
+  const FLOOR_RIM = `
+  float rimW(){ return 1.5+uPxTime.x; }                          // edge line glow width (world units)
   float lineFade(){ return 1.-clamp((uPxTime.x-3.)*.5,0.,1.); }  // zoomed far out: lines fade out`;
   const RING_VS = `#version 300 es
   ${FRAME}
+  ${FLOOR_RIM}
   uniform int uFirst;                                           // kind of instance 0 (no base instance in WebGL)
-  out vec2 vW; flat out int vKind; flat out vec3 vCol;
+  out vec2 vW; flat out int vKind;
   void main(){
     int q=gl_VertexID/6, k=gl_VertexID-q*6, kind=gl_InstanceID+uFirst;
     int da=(k==1||k==4||k==5)?1:0, dr=(k==2||k==3||k==5)?1:0;
-    float d=length(uCamHalf.xy), reach=length(uCamHalf.zw), WRr=uResWR.z, rw=14.+uPxTime.x;
-    float core=WRr*.37+2., rIn=WRr-6.*rw-4., rOut=WRr+6.*rw+4.;
+    float d=length(uCamHalf.xy), reach=length(uCamHalf.zw), WRr=uResWR.z;
+    float rIn=WRr-6.*rimW()-2., rOut=WRr+32.;                   // the band also hides hex lines poking past the edge
     vec2 R; bool vis;
-    if(kind==0){ R=vec2(rOut,d+reach+8.); vis=d+reach>rOut; }
-    else if(kind==1){ R=vec2(0.,core); vis=d-reach<core && d+reach>WRr*.3-1.; } // (else the clear colour has the glow)
-    else if(kind==2){ R=vec2(core,rIn); vis=d-reach<rIn; }
-    else { R=vec2(rIn,rOut); vis=d+reach>rIn && d-reach<rOut; }
-    vec3 B=vec3(${FLOOR_BASE.join(",")});
-    vKind=kind; vCol=kind==0?B*vec3(${FLOOR_OUT_MUL.join(",")})+vec3(${FLOOR_OUT_ADD.join(",")}):B;
+    if(kind==0){ R=vec2(0.,rIn); vis=d-reach<rIn; }
+    else if(kind==1){ R=vec2(rIn,rOut); vis=d+reach>rIn && d-reach<rOut; }
+    else { R=vec2(rOut,d+reach+8.); vis=d+reach>rOut; }
+    vKind=kind;
     float a=float(q+da)*${(2 * Math.PI / FLOOR_RING_SEG).toFixed(8)}, r=dr==1?R.y:R.x;
     vec2 w=vec2(cos(a),sin(a))*r, c=(w-uCamHalf.xy)/uCamHalf.zw;
     gl_Position=vis?vec4(c.x,-c.y,0,1):vec4(2,2,2,1); vW=w;
@@ -97,23 +78,19 @@ function createGL(canvas, E) {
   const RING_FS = `#version 300 es
   precision highp float;
   ${FRAME}
-  ${FLOOR_SHADE}
-  in vec2 vW; flat in int vKind; flat in vec3 vCol; out vec4 o;
+  ${FLOOR_RIM}
+  in vec2 vW; flat in int vKind; out vec4 o;
   void main(){
-    if(vKind==0||vKind==2){ o=vec4(vCol,1); return; }          // flat: no maths per pixel
-    float rw=14.+uPxTime.x; vec3 c=floorShade(vW,rw);
-    if(vKind==3){                                               // edge band: hex lines per pixel
-      vec2 s=vec2(${FLOOR_HX},${FLOOR_HY}), a=mod(vW+.5*s,s)-.5*s, b=mod(vW,s)-.5*s;
-      a=abs(a); b=abs(b);
-      float h=min(max(a.y,.866*a.x+.5*a.y),max(b.y,.866*b.x+.5*b.y));
-      float cov=clamp((${FLOOR_LINE}-(23.-h))/uPxTime.x+.5,0.,1.)*lineFade();
-      c*=1.+(${FLOOR_LINE_K}-1.)*cov;
-    }
+    const vec3 B=vec3(${FLOOR_BASE.join(",")}), D=vec3(${FLOOR_DARK.join(",")});
+    if(vKind!=1){ o=vec4(vKind==0?B:D,1); return; }             // flat: no maths per pixel
+    float WRr=uResWR.z, r=length(vW), rw=rimW();
+    vec3 c=mix(B,D,smoothstep(WRr-uPxTime.x,WRr+uPxTime.x,r));
+    c+=vec3(1.,.25,.35)*exp(-abs(r-WRr)/rw)*(.7+.3*sin(uPxTime.y*3.))*.55;
     o=vec4(c,1);
   }`;
   const HEX_VS = `#version 300 es
   ${FRAME}
-  ${FLOOR_SHADE}
+  ${FLOOR_RIM}
   flat out vec3 vCol;
   // each hex owns 3 of its 6 edges (the other 3 belong to neighbours); unit hex: inradius .5
   const vec2 EA[3]=vec2[3](vec2(-.2887,-.5),vec2(.2887,-.5),vec2(.5774,0.));
@@ -124,15 +101,15 @@ function createGL(canvas, E) {
     ivec2 f0=ivec2(floor((uCamHalf.xy-uCamHalf.zw)/S))-1;
     int lat=gl_InstanceID&1, cell=gl_InstanceID>>1;
     vec2 ctr=(vec2(float(cell%nx+f0.x),float(cell/nx+f0.y))+float(lat)*.5)*S;
+    if(length(ctr)>uResWR.z){ gl_Position=vec4(2,2,2,1); return; } // outside the world: no lines
     int e=gl_VertexID/6, k=gl_VertexID-e*6;
     bool atB=(k==1||k==4||k==5), up=(k==2||k==3||k==5);
     vec2 A=ctr+EA[e]*46., B=ctr+EB[e]*46., d=normalize(B-A), n=vec2(-d.y,d.x);
-    float hw=max(${FLOOR_LINE},uPxTime.x*.5);                    // at least a pixel wide: no gaps, no antialiasing needed
+    float hw=uPxTime.x*.5;                                       // exactly one pixel wide: no gaps, fewest pixels
     vec2 w=(atB?B:A)+n*(up?hw:-hw);
     vec2 c=(w-uCamHalf.xy)/uCamHalf.zw;
     gl_Position=vec4(c.x,-c.y,0,1);
-    vec3 fl=floorShade(ctr,0.);                                  // the floor here (glow width 0: no edge glow), a bit lighter
-    vCol=fl*(1.+(${FLOOR_LINE_K}-1.)*lineFade()*min(1.,${FLOOR_LINE}*2./uPxTime.x));
+    vCol=vec3(${FLOOR_BASE.join(",")})*(1.+(${FLOOR_LINE_K}-1.)*lineFade());
   }`;
   const HEX_FS = `#version 300 es
   precision mediump float;
@@ -145,13 +122,12 @@ function createGL(canvas, E) {
   ${PAL}
   layout(location=0) in ivec2 aP; layout(location=1) in uvec4 aB; // x, y (Q2) | value, skin, born lo, born hi
   out vec2 vL; out float vR; flat out uvec4 vI; flat out vec3 vC;
-  const vec2 OCT[8]=vec2[8](${OCT_STRIP.map(([x, y]) => `vec2(${x},${y})`).join(",")});
   // One instance per pellet, straight from memory. The list holds the pellets of the
   // cells in view; the rest of the margin is culled here.
   void main(){
     vec2 p=vec2(aP)*.25, c0=p-uCamHalf.xy; float r=min(3.5+sqrt(float(aB.x)/16.)*2.6,15.);
     if(aB.x==0u || any(greaterThan(abs(c0),uCamHalf.zw+r*${FOOD_GLOW}+uPxTime.x*1.5))){ gl_Position=vec4(2,2,2,1); return; }
-    vec2 q = OCT[gl_VertexID];                              // octagon corner (strip order)
+    vec2 q = vec2(float(gl_VertexID&1), float(gl_VertexID>>1))*2.-1.; // 4 corners: fewest vertices
     bool tiny = r/uPxTime.x < 1.6;                          // pellet under ~1.6 px: no halo
     vec2 l = q*(tiny ? r*.7+uPxTime.x*1.5 : r*${FOOD_GLOW});
     vec2 c = (c0+l)/uCamHalf.zw;
@@ -171,10 +147,10 @@ function createGL(canvas, E) {
     float pulse=.75+.25*sin(ph);
     float born=smoothstep(0.,10.,float(vI.w));   // fade in over ~0.6 s: no popping
     float rr=r*(.4+.6*born);
-    if(d>=max(rr*${FOOD_GLOW},rr*.7+aa)) discard; // corner of the octagon, outside the glow: nothing to blend
+    if(d>=max(rr*${FOOD_GLOW},rr*.7+aa)) discard; // corner of the quad, outside the glow: nothing to blend
     float core=(1.-smoothstep(rr*.7-aa,rr*.7+aa,d))*born;
     float t=min(d/(rr*${FOOD_GLOW}),1.), g=1.-t*t;
-    float glow = r/uPxTime.x < 1.6 ? 0. : g*g*pulse*born; // fuller halo, still 0 at the octagon's edge
+    float glow = r/uPxTime.x < 1.6 ? 0. : g*g*pulse*born; // fuller halo, still 0 at the quad edge
     o=vec4(c*glow + mix(c,vec3(1),.55*(1.-d/(rr*.7)))*core, core);
   }`;
 
@@ -431,17 +407,17 @@ function createGL(canvas, E) {
       }
       gl.viewport(0, 0, vw, vh);
 
-      mark(); // floor: clear to the main colour; flat side + centre glow; hex lines; edge-glow band (see FLOOR_SHADE)
+      mark(); // floor: clear (nearly free); flat inside area when outside; hex lines; edge band + darkness (see FLOOR_RIM)
       floorPlan(E.frameBlk, plan);
       gl.clearColor(plan.clear[0], plan.clear[1], plan.clear[2], 1); gl.clear(gl.COLOR_BUFFER_BIT);
       gl.disable(gl.BLEND); gl.bindVertexArray(emptyVao);
-      gl.useProgram(ringP); gl.uniform1i(firstU, plan.out ? 1 : 0);  // kinds 0,1 (inside) or 1,2 (outside)
-      gl.drawArraysInstanced(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6, 2);
-      if (plan.hexes) { gl.useProgram(hexP); gl.drawArraysInstanced(gl.TRIANGLES, 0, 18, plan.hexes); }
-      gl.useProgram(ringP); gl.uniform1i(firstU, 3); gl.drawArraysInstanced(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6, 1);
+      gl.useProgram(ringP);
+      if (plan.out) { gl.uniform1i(firstU, 0); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6); }
+      if (plan.hexes) { gl.useProgram(hexP); gl.drawArraysInstanced(gl.TRIANGLES, 0, 18, plan.hexes); gl.useProgram(ringP); }
+      gl.uniform1i(firstU, 1); gl.drawArraysInstanced(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6, plan.out ? 1 : 2); // band (+ darkness)
       gl.enable(gl.BLEND);
       mark(); // food
-      if (nFood) { gl.useProgram(foodP); gl.bindVertexArray(foodVao[f]); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 8, nFood); }
+      if (nFood) { gl.useProgram(foodP); gl.bindVertexArray(foodVao[f]); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, nFood); }
       mark(); // snakes
       if (nVis) { gl.useProgram(ribP); gl.bindVertexArray(hdrVao[f]); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 2 * (maxK + 3), nVis); }
       mark(); // labels (same headers)
