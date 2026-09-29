@@ -19,8 +19,12 @@ online/
   there is full detail (collisions, eating, bot AI); bots far from everyone use the
   offline game's cheap statistical model, so cost grows with players, not map size.
 - **Every 2 steps (30 Hz)** each client gets a binary snapshot of only what is near it:
-  nearby snakes with just the trail points it doesn't have yet (22-byte header each),
-  and the food changes in its view.
+  for each nearby snake only its **head and size**, 4-6 bytes (a head move in bytes, the size
+  when it changed), and the food changes in its view. The browser lays the body points
+  along the head's path itself, exactly as the simulation does; a snake's whole body is
+  sent once, when it comes into view (a byte per coordinate from point to point).
+- **Food** changes are 8 bytes (added) or 2 bytes (gone); the minimap is 4 bytes per
+  snake, twice a second.
 - **Food is event-driven, not compared.** The simulation logs every pellet that spawns,
   is eaten or moves. The server files pellets into 200-unit sectors (slither.io uses 300);
   a client subscribed to the sectors its view covers gets a sector's food once when it
@@ -40,6 +44,11 @@ Measured on a 4-core 2.1 GHz Xeon, 60 bots (each step has a 16.7 ms budget):
 | 50 | 0.11 ms/step | 0.10 ms/step | 8% of one core | 9 MB | ~12 KB/s |
 | 66 | 0.12 ms/step | 0.16 ms/step | 8% of one core | 10 MB | ~12 KB/s |
 
+Download per player after the "head and size only" protocol (load test, bots steering
+randomly, 5% boosting): **4.2 KB/s** with 40 players crowded together (was 10.3 KB/s),
+**3.3 KB/s** with 5 (was 8.1). Snake data went from 3.6 to 0.9 KB/s; most of what is left
+is food appearing (1.8 KB/s) and the minimap.
+
 Notable wins, each measured: food as events instead of comparisons (networking
 1.2-1.4 -> 0.27 ms/step), per-sector subscriber lists, shared snake headers with
 trail points copied as raw bytes, grid-based food counting, and small WebSocket
@@ -57,6 +66,14 @@ Settings (environment): `PORT` (8080), `BOTS` (60), `WEB_ROOT` (folder with inde
 `MAX_PER_IP` (8 connections per address), `LOG_SECS` (30). `GET /status` returns players online.
 
 ## Deploy
+`online/deploy/deploy.sh` does all of this on a Debian box that already runs Caddy:
+builds a portable binary here, copies it to `/srv/apps/serpent/`, installs the systemd unit
+(bound to 127.0.0.1, memory- and CPU-capped), adds a Caddy site block (validated, with the
+old file restored if it fails) and checks `/status`. The host and key come from the
+environment (`SERPENT_HOST`, `SERPENT_KEY`, optional `SERPENT_DOMAIN`, `SERPENT_PORT`),
+never from the repository.
+
+By hand:
 1. On the server: install Rust and a C compiler, clone the repo to `/opt/serpent`,
    run the two build commands above, create a `serpent` user.
 2. `online/deploy/serpent.service` → `/etc/systemd/system/`, then `systemctl enable --now serpent`.

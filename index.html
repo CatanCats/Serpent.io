@@ -1036,8 +1036,10 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
    The renderers read one memory block laid out exactly like the offline
    WebAssembly memory (frame uniforms | snake headers | minimap | food | trails).
    Here that block is a plain ArrayBuffer that this file fills from the network:
-   snapshots bring only new trail points and changed food, and heads are
-   interpolated ~70 ms in the past so motion is smooth at any refresh rate. */
+   snapshots bring only each snake's head and size (a body once, when it comes
+   into view) and changed food; this page lays the body points along the head's
+   path itself, like the simulation. Heads are interpolated ~70 ms in the past so
+   motion is smooth at any refresh rate. */
 
 const SKINS = [
   ["#34d399", "#059669"], ["#38bdf8", "#0369a1"], ["#a78bfa", "#6d28d9"], ["#f472b6", "#be185d"],
@@ -1170,6 +1172,23 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const botName = (s) => BOT_NAMES[(s * 7 + 3) % BOT_NAMES.length] + (s >= BOT_NAMES.length ? " II" : "");
   const nameOf = (s) => (human[s] || pnames[s] ? pnames[s] || "Player" : botName(s));
   const radius = (m) => Math.min(10 + Math.sqrt(m) * 0.45, 40);
+  const segsFor = (m) => Math.min(14 + Math.floor(3.6 * Math.sqrt(m)), RING - 1);
+  const angOf = new Float32Array(NS);
+  const fixq = (v) => { v *= 4; return Math.max(-32767, Math.min(32767, Math.trunc(v + (v >= 0 ? 0.5 : -0.5)))); }; // as sim.c fix()
+  function uploadRun(s, a0, cnt) { const first = Math.min(cnt, RING - a0); upload(s, a0, first); if (first < cnt) upload(s, 0, cnt - first); }
+  // Lay body points toward the new head, one every `spacing`, exactly the way the
+  // simulation builds its trail: the server sends only the head, never the points.
+  function layTrail(s, x, y) {
+    const sp = radius(mass[s]) * 0.42; let pc = pcOf[s], cnt = 0;
+    for (; cnt < 8; cnt++) {
+      const j = (s * RING + ((pc - 1) & RMASK)) * 2, lx = trail[j] * 0.25, ly = trail[j + 1] * 0.25, dx = x - lx, dy = y - ly, d2 = dx * dx + dy * dy;
+      if (d2 < sp * sp) break;
+      const f = sp / Math.sqrt(d2), k = (s * RING + (pc & RMASK)) * 2;
+      trail[k] = fixq(lx + dx * f); trail[k + 1] = fixq(ly + dy * f); pc++;
+    }
+    if (cnt) uploadRun(s, (pcOf[s] & RMASK), cnt);
+    pcOf[s] = pc;
+  }
   // food: server slot -> local slot (local slots stay dense so the GPU draws few)
   const toLocal = new Int32Array(32768).fill(-1), freeL = []; let foodHigh = 0;
   const miniList = []; // from the 4 Hz MINI message: [slot, skin, x, y, mass]
@@ -1190,35 +1209,48 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     const tick = d.getUint32(o, true); o += 4;
     me = d.getUint8(o) === 255 ? -1 : d.getUint8(o); spectate = d.getUint8(o + 1);
     if (d.getUint8(o + 2) & 1) clearWorld(); // server resync
-    o += 3;
-    const n = d.getUint16(o, true); o += 2;
+    if (me >= 0) kills[me] = d.getUint16(o + 3, true);
+    o += 5;
+    const n = d.getUint8(o); o += 1;
     const seen = new Uint8Array(NS);
     for (let k = 0; k < n; k++) {
-      const s = d.getUint8(o), fl = d.getUint8(o + 1);
-      skin[s] = d.getUint8(o + 2) % 12; tier[s] = d.getUint8(o + 3); boost[s] = fl & 1; human[s] = fl & 2 ? 1 : 0;
-      const x = d.getInt16(o + 4, true) * 0.25, y = d.getInt16(o + 6, true) * 0.25, a = (d.getUint16(o + 8, true) / 65535) * 2 * Math.PI - Math.PI;
-      mass[s] = d.getFloat32(o + 10, true); segN[s] = d.getUint16(o + 14, true);
-      const pc = d.getUint16(o + 16, true); kills[s] = d.getUint16(o + 18, true); // pc: low 16 bits (only used modulo the ring)
-      const cnt = d.getUint16(o + 20, true); o += 22;
-      if ((fl & 4) || !alive[s]) hist[s].length = 0; // new/returning snake: no stale positions
-      for (let p = pc - cnt, i = 0; i < cnt; i++, p++) {
-        const j = (s * RING + ((p >>> 0) & RMASK)) * 2;
-        trail[j] = d.getInt16(o, true); trail[j + 1] = d.getInt16(o + 2, true); o += 4;
+      const s = d.getUint8(o), fl = d.getUint8(o + 1); o += 2;
+      boost[s] = fl & 1; human[s] = fl & 2 ? 1 : 0;
+      let x, y;
+      if (fl & 4) { // the whole body: when it comes into view (or after a resync)
+        skin[s] = d.getUint8(o) % 12; tier[s] = d.getUint8(o + 1);
+        x = d.getInt16(o + 2, true) * 0.25; y = d.getInt16(o + 4, true) * 0.25; mass[s] = d.getUint16(o + 6, true) / 4;
+        const cnt = d.getUint16(o + 8, true); o += 10;
+        const base = (pcOf[s] + RING) >>> 0; // a fresh stretch of the ring
+        let px = d.getInt16(o, true), py = d.getInt16(o + 2, true); o += 4;
+        for (let i = 0; i < cnt; i++) {
+          if (i) { px += d.getInt8(o); py += d.getInt8(o + 1); o += 2; }
+          const j = (s * RING + ((base + i) & RMASK)) * 2; trail[j] = px; trail[j + 1] = py;
+        }
+        pcOf[s] = (base + cnt) >>> 0; upload(s, 0, RING);
+        hist[s].length = 0;
+        const j = (s * RING + ((pcOf[s] - 1) & RMASK)) * 2;
+        if (x !== trail[j] * 0.25 || y !== trail[j + 1] * 0.25) angOf[s] = Math.atan2(y - trail[j + 1] * 0.25, x - trail[j] * 0.25);
+      } else { // only the head (and the size when it changed)
+        const h = hist[s], last = h[h.length - 1];
+        if (fl & 8) { x = d.getInt16(o, true) * 0.25; y = d.getInt16(o + 2, true) * 0.25; o += 4; }
+        else { x = (last ? last.x : 0) + d.getInt8(o) * 0.25; y = (last ? last.y : 0) + d.getInt8(o + 1) * 0.25; o += 2; }
+        if (fl & 16) { mass[s] = d.getUint16(o, true) / 4; o += 2; }
+        if (last && (x !== last.x || y !== last.y)) angOf[s] = Math.atan2(y - last.y, x - last.x);
+        layTrail(s, x, y);
       }
-      if (fl & 4) upload(s, 0, RING);
-      else if (cnt) {
-        const a0 = ((pc - cnt) >>> 0) & RMASK, first = Math.min(cnt, RING - a0);
-        upload(s, a0, first); if (first < cnt) upload(s, 0, cnt - first);
-      }
-      pcOf[s] = pc; alive[s] = 1; seen[s] = 1;
-      const h = hist[s]; h.push({ t: tick, x, y, a }); if (h.length > 8) h.shift();
+      segN[s] = segsFor(mass[s]); alive[s] = 1; seen[s] = 1;
+      const h = hist[s]; h.push({ t: tick, x, y, a: angOf[s] }); if (h.length > 8) h.shift();
     }
     for (let s = 0; s < NS; s++) if (!seen[s] && alive[s]) { alive[s] = 0; hist[s].length = 0; }
     const m = d.getUint16(o, true); o += 2;
-    for (let k = 0; k < m; k++, o += 10) {
-      const srv = d.getUint16(o, true), lo = d.getUint32(o + 2, true), hi = d.getUint32(o + 6, true);
+    const bornNow = (tick >> 2) & 0xffff, bornOld = ((tick >> 2) - 255) & 0xffff;
+    for (let k = 0; k < m; k++) {
+      const v = d.getUint16(o, true), srv = v & 0x7fff; o += 2;
       let j = toLocal[srv];
-      if (!(hi & 255)) { if (j >= 0) { food32[j * 2] = food32[j * 2 + 1] = 0; freeL.push(j); toLocal[srv] = -1; } continue; }
+      if (!(v & 0x8000)) { if (j >= 0) { food32[j * 2] = food32[j * 2 + 1] = 0; freeL.push(j); toLocal[srv] = -1; } continue; } // gone
+      const lo = d.getUint32(o, true), sk = d.getUint8(o + 5);
+      const hi = (d.getUint8(o + 4) | ((sk & 127) << 8) | ((sk & 128 ? bornNow : bornOld) << 16)) >>> 0; o += 6; // value, skin, born
       if (j < 0) { j = freeL.length ? freeL.pop() : foodHigh < MAXF ? foodHigh++ : -1; if (j < 0) continue; toLocal[srv] = j; }
       food32[j * 2] = lo; food32[j * 2 + 1] = hi;
     }
@@ -1283,8 +1315,10 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       case 5: onDeath(d.getUint8(1), d.getUint16(2, true), d.getFloat32(4, true)); break;
       case 6: {
         miniList.length = 0;
-        for (let i = 0, k = d.getUint16(1, true), o = 3; i < k; i++, o += 8)
-          miniList.push([d.getUint8(o), d.getUint8(o + 1) % 12, (d.getInt16(o + 2, true) / 32767) * WR, (d.getInt16(o + 4, true) / 32767) * WR, d.getUint16(o + 6, true)]);
+        for (let i = 0, k = d.getUint16(1, true), o = 3; i < k; i++, o += 4) { // slot, x, y (a byte each), skin | size<<4
+          const b = d.getUint8(o + 3), sz = (b >> 4) * 4;
+          miniList.push([d.getUint8(o), (b & 15) % 12, (d.getUint8(o + 1) / 255 * 2 - 1) * WR, (d.getUint8(o + 2) / 255 * 2 - 1) * WR, sz * sz]);
+        }
         break;
       }
       case 7: setStatus("The server is full right now — try again soon, or play offline", "bad"); state = "menu"; showMenu(); break;

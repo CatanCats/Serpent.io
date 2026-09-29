@@ -29,7 +29,8 @@ WEB_ROOT=../.. ./target/release/serpent-server   # http://localhost:8080 serves 
 Server environment variables: `PORT` (8080), `BOTS` (60), `WEB_ROOT`, `MAX_PER_IP` (8), `LOG_SECS` (30). At startup it prints the CPU model, core count and RAM.
 
 ## Next job: put the server online
-1. Get server access from the owner through session secrets or environment variables (not the chat, not the repo). Check the network policy allows SSH to the host.
+Status: the owner has a server (1 CPU, 1 GB RAM, Debian 12, Caddy + systemd already running other sites; apps live in `/srv/apps/<app>`, loopback ports 8002–8005 taken, 8001 reserved). `online/deploy/deploy.sh` is ready. The last session could not reach it, because the environment's network policy blocked SSH (port 22) and the container had no `ssh` client. The owner must allow the host in the environment's network settings.
+1. Get server access from the owner through session secrets or environment variables (not the repo). The key and the host address must **never** be committed. Check the network policy allows SSH to the host; install an ssh client if missing. Then run `SERPENT_HOST=... SERPENT_KEY=... online/deploy/deploy.sh`, which covers steps 2–3 below.
 2. On the server:
    - install Rust and a C compiler;
    - clone the repo to `/opt/serpent`;
@@ -63,12 +64,16 @@ Server environment variables: `PORT` (8080), `BOTS` (60), `WEB_ROOT`, `MAX_PER_I
 - Edge's "Enhance your security on the web" (default level: Balanced) can turn off the JS/WebAssembly optimizer **and WebGPU** for less-visited sites. The game detects this and tells the player how to add an exception. That was the cause of "WebGPU switches to WebGL" and of a 30× slower simulation.
 - WebSocket read buffers must stay small (`read_buffer_size(512)`): the library zero-fills its buffer on every read, and at 128 KB that was about 70% of the server's CPU.
 - Building snapshots on several threads (rayon) was measured **slower** at this scale; it's deliberately single-threaded.
+- Protocol: snapshots carry only each snake's head (a byte per coordinate as a Q2 delta from the last head sent to that client) and size (mass×4, only when it changed). The client (`layTrail` in `client.js`) lays body points like `moveSnake` in the simulation. A whole body goes only when a snake comes into view, respawns (its point count jumps), or a snapshot was dropped (`reset`). Keep `client.js` and the protocol comment in `main.rs` in step.
+- `pkill -f <pattern>` / `pgrep -f` kill or match the shell running the command, because the pattern is in its own command line. Find processes with `ps -eo pid,comm` instead.
 - On the owner's Intel iGPU, **writing pixels** is the GPU cost, not the maths per pixel. Removing texture reads and maths from a full-screen pass saved only ~17%; not writing most pixels (fast clear) saved ~70%. Any full-screen effect (vignette, gradients) costs about 1.5 ms there. Avoid adding one.
 - Graphics changes go in `src/render-*.js` only; `build.sh` puts them into both `offline.html` and `index.html`. Game-rule changes must be made in **both** `src/sim.c` and `online/server/sim-server.c`, and UI changes in both `src/app.js` and `online/client/client.js`.
 
 ## Current numbers (for comparison)
 - Offline, owner's laptop (Edge, WebGPU f16, Intel iGPU): CPU per frame about 0.2 ms; GPU about 1.0 ms (floor 0.52, food 0.2, snakes 0.13, map 0.13) mid-map, measured before the flat hex lines, octagon food and minimap discards; sim benchmark 35–40 µs per step. Ask the owner for new readings, mid-map and at the world edge.
-- Server, 4-core 2.1 GHz Xeon: 66 players ≈ 8% of one core, 10 MB RAM, about 12 KB/s per player.
+- Server, 4-core 2.1 GHz Xeon: 66 players ≈ 8% of one core, 10 MB RAM.
+- Download per player (head-and-size protocol): 4.2 KB/s in a 40-player crowd, 3.3 KB/s with 5 (was 10.3 and 8.1). The load-test script must divide by seconds *and* clients (an old one printed 5× too much).
+- Wall-clock server timings on the shared test container swing 2–3× between runs; compare with callgrind instruction counts instead.
 
 ## Floor design (one colour + clear; almost nothing drawn)
 - Inside the world the floor is ONE colour (no centre glow, no vignette), so the pass just clears to it (nearly free). When the camera centre is outside the world, it clears to darkness (`FLOOR_DARK`).
