@@ -1286,7 +1286,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const params = new URLSearchParams(location.search);
   const DEFAULT_SERVER = "__SERVER_URL__";
   const serverURL = params.get("server") ||
-    (/^https?:$/.test(location.protocol) && !location.hostname.endsWith("github.io") ? (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws"
+    (/^https?:$/.test(location.protocol) && !location.hostname.endsWith("github.io") ? (location.protocol === "https:" ? "wss://" : "ws://") + location.host + location.pathname.replace(/[^/]*$/, "") + "ws"
       : DEFAULT_SERVER.startsWith("__") ? "" : DEFAULT_SERVER);
   let ws = null, connected = false, retry = 0;
   const statusEl = $("net");
