@@ -13,7 +13,7 @@ Read this first. It sums up the project and where it stands so you don't have to
   - `sim.c` → WebAssembly (the whole simulation),
   - `app.js` (UI and main loop),
   - `render-gpu.js` (WebGPU) and `render-gl.js` (WebGL 2).
-- `index.html`: the **online** front page, built from `online/client/` (`client.js`, `online.html`) plus the same two renderers. It connects to the game server. With no server configured it shows no message and PLAY stays disabled; the "Play offline instead" link goes to `offline.html`.
+- `index.html`: the **online** front page (on GitHub Pages it redirects to br8t.com/slither.io/), built from `online/client/` (`client.js`, `online.html`) plus the same two renderers. It connects to the game server. With no server configured it shows no message and PLAY stays disabled; the "Play offline instead" link goes to `offline.html`.
 - `online/server/`: the game server, in Rust (tokio + axum WebSockets). `sim-server.c` is a copy of `src/sim.c` with the same rules, extended for many human players, and compiled natively by `build.rs`.
   - Protocol: documented at the top of `src/main.rs`, and mirrored in `online/client/client.js`.
 - `online/deploy/`: a systemd unit (`serpent.service`) and a Caddy config (HTTPS).
@@ -29,21 +29,17 @@ WEB_ROOT=../.. ./target/release/serpent-server   # http://localhost:8080 serves 
 Server environment variables: `PORT` (8080), `BOTS` (60), `WEB_ROOT`, `MAX_PER_IP` (8), `LOG_SECS` (30). At startup it prints the CPU model, core count and RAM.
 
 ## The server is live
-The owner reports the online game is live at **https://br8t.com/slither.io/** (the owner deployed it; this container could not reach the host). Rule and protocol changes need the server rebuilt and redeployed together with the pages.
-
-## Earlier deploy notes (kept for reference)
-Status: the owner has a server (1 CPU, 1 GB RAM, Debian 12, Caddy + systemd already running other sites; apps live in `/srv/apps/<app>`, loopback ports 8002–8005 taken, 8001 reserved). `online/deploy/deploy.sh` is ready. The last session could not reach it, because the environment's network policy blocked SSH (port 22) and the container had no `ssh` client. The owner must allow the host in the environment's network settings.
-1. Get server access from the owner through session secrets or environment variables (not the repo). The key and the host address must **never** be committed. Check the network policy allows SSH to the host; install an ssh client if missing. Then run `SERPENT_HOST=... SERPENT_KEY=... online/deploy/deploy.sh`, which covers steps 2–3 below.
-2. On the server:
-   - install Rust and a C compiler;
-   - clone the repo to `/opt/serpent`;
-   - run `./build.sh`;
-   - run `cargo build --release` in `online/server`;
-   - create a `serpent` user;
-   - install `online/deploy/serpent.service`.
-3. HTTPS is required, because GitHub Pages is https and the page may only use `wss://`. Use Caddy with `online/deploy/Caddyfile` and a domain, or `<ip-with-dashes>.sslip.io` if there's no domain. Open ports 80 and 443.
-4. Rebuild the pages with `SERVER_URL=wss://<domain>/ws ./build.sh`, then commit and push. The live site is https://catancats.github.io/Snake-Game/ (the repo may show as CatanCats/Serpent.io).
-5. Tell the owner the server's CPU and RAM (the server prints them at startup) and the load numbers it logs.
+The online game is live at **https://br8t.com/slither.io/** (deployed 30 Sep 2026). The server's address and SSH key are not in the repo; the owner supplies them.
+- Pages: https://br8t.com/slither.io/ (online) and https://br8t.com/slither.io/offline.html. The GitHub Pages copy is now at https://catancats.github.io/Serpent.io/ (the old `/Snake-Game/` address is gone since the repo was renamed). Its online page (`index.html`) redirects to br8t.com/slither.io/ with a script in the head that only runs on `github.io`; `offline.html` must **never** redirect.
+- Search info: titles, descriptions, canonical links (the br8t.com copies) and JSON-LD are in the heads of `online/client/online.html` and `src/index.html`. br8t.com has a `robots.txt` and `sitemap.xml` (in the br8t.com home site, not this repo) listing both game pages.
+- The page connects to `ws` next to itself (`wss://br8t.com/slither.io/ws`); at a site root that is still `/ws`.
+- On the server (Debian 12, 1 CPU AMD EPYC Milan, 845 MB RAM, shared with other sites):
+  - `serpent.service` runs `/srv/apps/serpent/serpent-server` on `127.0.0.1:8010` as user `serpent` (limits: 150 MB RAM, 60% CPU), with `index.html` and `offline.html` beside it. `serpent-server.prev` is the previous binary for rollback.
+  - Caddy: inside the `br8t.com` block, `redir /slither.io /slither.io/ 308` and `handle_path /slither.io/* { reverse_proxy 127.0.0.1:8010 }`.
+  - Built **on the server**, with `CC=clang` for the C simulation: source in `~deploy/serpent-src`, `cargo build --release -j1` (about 25 s after the first build). gcc, clang 14 and Rust (rustup, minimal profile) are installed for the `deploy` user; there is no wasm linker there, so the pages are built elsewhere and committed.
+  - Redeploy: copy the source over, rebuild, `install` the binary and pages into `/srv/apps/serpent/`, `systemctl restart serpent`. Pages alone need no restart (read from disk per request). Check `curl https://br8t.com/slither.io/status`.
+  - Measured: 60 bots with no players ≈ 13 µs per step; one viewer ≈ 100 µs per step (under 1% of the core); about 5–6 MB RAM.
+- `online/deploy/deploy.sh` assumes its own domain and building locally; the live setup above differs (sub-path, built on the server).
 
 ## Testing (the tools are not in the repo; recreate as needed)
 - Browser tests: Playwright from `/opt/node22/lib/node_modules/playwright`, with Chromium at `/opt/pw-browsers`.
