@@ -1305,17 +1305,38 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
      JS gathers input, makes ONE WebAssembly call and hands its output to the GPU. */
   const perfEl = $("perf");
   const T = { sim: 0, prep: 0, gl: 0, hud: 0, n: 0 };
-  let resDrops = 1, frameNo = 0, last = performance.now(), fpsAcc = 0, perfT = 0, hudT = 0, avgDt = 1 / 60, resT = 0;
+  let frameNo = 0, last = performance.now(), fpsAcc = 0, perfT = 0, hudT = 0;
+  /* Dynamic resolution: drop pixels only when frames are SUSTAINED slow and fewer pixels
+     actually help. One-off hiccups (tab switch, a busy moment: frames over 0.1 s) are
+     ignored. A browser frame-rate cap (battery saver / efficiency mode: 30 fps) looks like
+     slow frames too, but a lower resolution doesn't speed it up, so such a drop is undone
+     at once. Back up to full resolution after a calm spell. */
+  let resT = 0, resN = 0, resSlow = 0, resBusy = 0, resSum = 0, resCalm = 0, resCalmNeed = 6, resTried = null, resBlockUntil = 0, resBlockMs = 60000;
+  function resTick(dt, now) {
+    if (dt < 0.1) { resN++; resSum += dt; if (dt > 1 / 45) resSlow++; if (dt > 1 / 55) resBusy++; }
+    if ((resT += dt) < 2) return;
+    const share = resN > 30 ? resSlow / resN : 0, busy = resN > 30 ? resBusy / resN : 1, mean = resN ? resSum / resN : 0;
+    resT = resN = resSlow = resBusy = resSum = 0;
+    if (resTried) { // did the last drop help? (frames at least 4% faster on average)
+      const helped = mean < resTried.mean * 0.96;
+      if (!helped) { resScale = resTried.from; resize(); resBlockUntil = now + resBlockMs; resBlockMs *= 4; } // capped elsewhere: keep full sharpness, retry ever more rarely
+      resTried = null; return;
+    }
+    if (share > 0.25 && resScale > 0.55 && now > resBlockUntil) {
+      resTried = { from: resScale, mean }; resScale = Math.max(0.5, Math.round((resScale - 0.1) * 10) / 10); resize();
+      resCalmNeed = Math.min(60, resCalmNeed * 2); resCalm = 0; // oscillating near the limit: wait longer before trying higher again
+    } else if (busy < 0.05 && resScale < 1) { // nearly every frame on time: room for more pixels
+      if ((resCalm += 2) >= resCalmNeed) { resScale = Math.min(1, Math.round((resScale + 0.1) * 10) / 10); resCalm = 0; resize(); }
+    } else resCalm = 0;
+  }
   function frame(now) {
     requestAnimationFrame(frame);
     const playing = state === "play";
     if (!playing && now - last < 30) return; // menu / game-over: ~30 fps is plenty
     const dt = Math.min((now - last) / 1000, 0.25); last = now;
-    // dynamic resolution: drop pixels before dropping frames, recover after a long calm spell
+    // dynamic resolution: fewer pixels only when drawing really is too slow
+    if (playing) resTick(dt, now);
     if (playing) {
-      avgDt += (Math.min(dt, 0.1) - avgDt) * 0.05; resT += dt;
-      if (resT > 1 && avgDt > 1 / 48 && resScale > 0.55) { resScale = Math.max(0.5, resScale - 0.1); resT = 0; resDrops++; resize(); }
-      else if (resT > 8 * resDrops && avgDt < 1 / 57 && resScale < 1) { resScale = Math.min(1, resScale + 0.1); resT = 0; resize(); }
       if (usingKeys) aim += keyTurn * dt * 4.2;
       else aim = Math.atan2(my - innerHeight / 2, mx - innerWidth / 2);
     }
