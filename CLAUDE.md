@@ -69,6 +69,11 @@ Status: the owner has a server (1 CPU, 1 GB RAM, Debian 12, Caddy + systemd alre
 - A delay proxy for latency tests: a small Node TCP proxy that `setTimeout`s each chunk; open `/?server=ws://localhost:<proxy>/ws`.
 - `pkill -f <pattern>` / `pgrep -f` kill or match the shell running the command, because the pattern is in its own command line. Find processes with `ps -eo pid,comm` instead.
 - On the owner's Intel iGPU, **writing pixels** is the GPU cost, not the maths per pixel. Removing texture reads and maths from a full-screen pass saved only ~17%; not writing most pixels (fast clear) saved ~70%. Any full-screen effect (vignette, gradients) costs about 1.5 ms there. Avoid adding one.
+- Game rules (both `sim.c` copies):
+  - Nothing spawns in the middle (the centre zone, 35% of the world radius). Bots spawn in the ring 0.4–0.88 WR, players on the rim. `spawnRoom()` takes the first of 40 tries at least `SPAWN_GAP` (600) from every other snake's head and body, else the roomiest.
+  - Only snakes of mass ≥ `MID_MASS` (200 = length 2000 on screen) are drawn to the middle. Smaller ones pick their next roam spot a little way along the ring (`homePoint(mass, hx, hy, …)`), because a far target across the map made their straight path cross the middle.
+  - Measured with a native harness over 5 simulated minutes: spawns in the middle 45 → 0; spawns under 300 units from a snake 8 → 0; small snakes in the middle 37% → 0% of the time.
+- Native test builds of `sim.c` need `-Dmemset=simMemset -Dmemcpy=simMemcpy`: its own `memset` calls `__builtin_memset`, which natively becomes a call to itself and hangs. Also provide `double nowMs(void)`, and drive it with `frame()` rather than `step()`.
 - Graphics changes go in `src/render-*.js` only; `build.sh` puts them into both `offline.html` and `index.html`. Game-rule changes must be made in **both** `src/sim.c` and `online/server/sim-server.c`, and UI changes in both `src/app.js` and `online/client/client.js`.
 
 ## Current numbers (for comparison)
@@ -77,20 +82,18 @@ Status: the owner has a server (1 CPU, 1 GB RAM, Debian 12, Caddy + systemd alre
 - Download per player (head-and-size protocol): 4.2 KB/s in a 40-player crowd, 3.3 KB/s with 5 (was 10.3 and 8.1). The load-test script must divide by seconds *and* clients (an old one printed 5× too much).
 - Wall-clock server timings on the shared test container swing 2–3× between runs; compare with callgrind instruction counts instead.
 
-## Floor design (one colour + clear; almost nothing drawn)
-- Inside the world the floor is ONE colour (no centre glow, no vignette), so the pass just clears to it (nearly free). When the camera centre is outside the world, it clears to darkness (`FLOOR_DARK`).
+## Floor design (every part one flat colour; almost nothing drawn)
+- The pass clears to the floor colour (or `FLOOR_DARK` when the camera centre is outside the world). A clear is nearly free (GPUs fast-clear whole blocks). No centre glow, no vignette.
 - Nothing floor-specific is uploaded: the vertex shaders work out the shapes from the Frame block. `floorPlan()` in `render-gl.js` (shared) only picks the clear colour and the hex instance count (with a row of margin, since the shader rounds its own column count).
-- Hex lines: opaque quads exactly one device pixel wide, one flat colour (`FLOOR_BASE × FLOOR_LINE_K`). No blending, no antialiasing, no per-pixel maths. Hexes whose centre is outside the world are skipped.
-- Ring shapes by kind (instance index; WebGPU picks them with the draw's first instance, WebGL with a `uFirst` uniform):
-  - 0: inside area, flat (only when the camera is outside);
-  - 1: edge band (a thin glowing red line; the only per-pixel maths; it also hides hex lines poking past the edge);
-  - 2: darkness outside, flat.
-- Off-screen shapes collapse in the vertex shader.
-- Order: kind 0 → hex lines → kinds 1 (+2).
-- History on the owner's Intel iGPU:
-  - texture tile 1.97 ms → per-vertex grid 1.64 → clear-based 0.52 → flat lighter lines 0.26 (mid-map);
-  - the edge was 1.70 ms total GPU (red tint + wide glow band); now darkness + a thin line; not yet re-measured.
-  - Writing pixels is the real cost.
+- **No floor pixel does maths or blending.** Every shape gets one flat colour from its vertex shader.
+- Hex lines: opaque quads exactly one device pixel wide (`FLOOR_BASE × FLOOR_LINE_K`). Hexes centred outside the world are skipped.
+- Ring shapes by kind (instance index; WebGPU picks them with the draw's first instance, WebGL with a `uFirst` uniform), 512 segments:
+  - 0: inside area (camera outside);
+  - 1: thin dark ring `WR+hw..WR+32` (camera outside);
+  - 2: the red edge line `WR±hw`, `FLOOR_RIM_COL`;
+  - 3: darkness outside (camera inside).
+- Order: 0 → hex lines → 1+2 or 2+3. The dark rings hide hex lines poking past the edge.
+- History on the owner's Intel iGPU: texture tile 1.97 ms → per-vertex grid 1.64 → clear-based 0.52 → flat lighter lines 0.26 (mid-map). The edge was 1.70 ms total GPU with the old glow; now all flat, not yet re-measured. Writing pixels is the real cost.
 
 ## Other GPU details
 - Food: one 4-vertex quad per pellet, halo radius `FOOD_GLOW` = 1.7 pellet radii (was 1.9). An octagon version (fewer pixels, 8 vertices) measured slower on the owner's iGPU (food 0.20 → 0.33 ms) and was reverted.

@@ -38,31 +38,26 @@ const SP: f32 = 0.42;
 
 fn quad(vi: u32) -> vec2f { return vec2f(f32(vi & 1u), f32(vi >> 1u)); }
 
-// ---------- floor (see render-gl.js for the idea and the shape kinds) ----------
+// ---------- floor (see render-gl.js: every part one flat colour; the shape kinds) ----------
 const FB = vec3f(${FLOOR_BASE.join(", ")}); const FD = vec3f(${FLOOR_DARK.join(", ")});
-fn rimW() -> f32 { return 1.5 + F.pxTime.x; }                   // edge line glow width (world units)
+fn rimHW() -> f32 { return max(2., F.pxTime.x * 1.5); }            // half width of the edge line (world units)
 fn lineFade() -> f32 { return 1. - clamp((F.pxTime.x - 3.) * .5, 0., 1.); } // zoomed far out: lines fade out
 fn corner(k: u32) -> vec2f { return vec2f(select(0., 1., k == 1u || k == 4u || k == 5u), select(0., 1., k == 2u || k == 3u || k == 5u)); } // 2 triangles
-struct RingO { @builtin(position) pos: vec4f, @location(0) w: vec2f, @location(1) @interpolate(flat) kind: u32 };
+struct RingO { @builtin(position) pos: vec4f, @location(0) @interpolate(flat) col: vec3f };
 // instance index = shape kind (the draw's first instance picks them)
 @vertex fn vsRing(@builtin(vertex_index) vi: u32, @builtin(instance_index) kind: u32) -> RingO {
   let q = vi / 6u; let dk = corner(vi % 6u);
-  let d = length(F.camHalf.xy); let reach = length(F.camHalf.zw); let WR = F.resWR.z;
-  let rIn = WR - 6. * rimW() - 2.; let rOut = WR + 32.;          // the band also hides hex lines poking past the edge
-  var R = vec2f(rIn, rOut); var vis = d + reach > rIn && d - reach < rOut;
-  if (kind == 0u) { R = vec2f(0., rIn); vis = d - reach < rIn; }
-  else if (kind == 2u) { R = vec2f(rOut, d + reach + 8.); vis = d + reach > rOut; }
+  let d = length(F.camHalf.xy); let reach = length(F.camHalf.zw); let WR = F.resWR.z; let hw = rimHW();
+  let rIn = WR - hw; let rOut = WR + hw; let rHide = WR + 32.;
+  var R = vec2f(rOut, d + reach + 8.); var vis = d + reach > rOut; var col = FD;           // 3: darkness outside
+  if (kind == 0u) { R = vec2f(0., rIn); vis = d - reach < rIn; col = FB; }               // 0: inside (camera outside)
+  else if (kind == 1u) { R = vec2f(rOut, rHide); vis = d + reach > rOut && d - reach < rHide; } // 1: thin dark ring
+  else if (kind == 2u) { R = vec2f(rIn, rOut); vis = d + reach > rIn && d - reach < rOut; col = vec3f(${FLOOR_RIM_COL.join(", ")}); } // 2: edge line
   let a = (f32(q) + dk.x) * ${(2 * Math.PI / FLOOR_RING_SEG).toFixed(8)}; let r = select(R.x, R.y, dk.y > .5);
   let w = vec2f(cos(a), sin(a)) * r; let c = (w - F.camHalf.xy) / F.camHalf.zw;
-  var o: RingO; o.pos = select(vec4f(2., 2., 2., 1.), vec4f(c.x, -c.y, 0., 1.), vis); o.w = w; o.kind = kind; return o;
+  var o: RingO; o.pos = select(vec4f(2., 2., 2., 1.), vec4f(c.x, -c.y, 0., 1.), vis); o.col = col; return o;
 }
-@fragment fn fsRing(i: RingO) -> @location(0) vec4f {
-  if (i.kind != 1u) { return vec4f(select(FD, FB, i.kind == 0u), 1.); } // flat: no maths per pixel
-  let WR = F.resWR.z; let r = length(i.w);
-  var c = mix(FB, FD, smoothstep(WR - F.pxTime.x, WR + F.pxTime.x, r));
-  c += vec3f(1., .25, .35) * exp(-abs(r - WR) / rimW()) * (.7 + .3 * sin(F.pxTime.y * 3.)) * .55;
-  return vec4f(c, 1.);
-}
+@fragment fn fsRing(i: RingO) -> @location(0) vec4f { return vec4f(i.col, 1.); } // one flat colour: no maths per pixel
 struct HexO { @builtin(position) pos: vec4f, @location(0) @interpolate(flat) col: vec3f };
 @vertex fn vsHex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> HexO {
   // each hex owns 3 of its 6 edges (the rest belong to neighbours); unit hex: inradius .5
@@ -318,7 +313,7 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
       pass.setPipeline(P.ring);
       if (plan.out) pass.draw(FLOOR_RING_SEG * 6, 1, 0, 0);
       if (plan.hexes) { pass.setPipeline(P.hex); pass.draw(18, plan.hexes); pass.setPipeline(P.ring); }
-      pass.draw(FLOOR_RING_SEG * 6, plan.out ? 1 : 2, 0, 1);
+      pass.draw(FLOOR_RING_SEG * 6, 2, 0, plan.out ? 1 : 2); // kinds 1+2 or 2+3
       return;
     }
     const [p, off] = DRAWS[i], vc = counts[i * 2], ic = counts[i * 2 + 1];

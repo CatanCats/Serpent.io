@@ -345,21 +345,49 @@ static void randomRing(float r0, float r1, float *x, float *y) {
   float a = frand() * TAU, d = sqrtf_(r0 * r0 + (r1 * r1 - r0 * r0) * frand());
   *x = cosf_(a) * d; *y = sinf_(a) * d;
 }
-/* big snakes live in the middle, small ones roam the rest */
-static void homePoint(float mass, float *x, float *y) {
-  if (mass > 250.f) randomDisk(WR * 0.35f, x, y); else randomRing(WR * 0.3f, WR * 0.88f, x, y);
+/* The middle (the centre zone on the minimap, 35% of the world radius) belongs to big
+   snakes: only from MID_MASS (length 2000 on screen: length = mass x 10) are snakes drawn
+   to it; smaller ones roam the ring outside it. Nothing spawns in it. */
+#define MID_MASS 200.f
+static void homePoint(float mass, float hx, float hy, float *x, float *y) {
+  if (mass >= MID_MASS) { randomDisk(WR * 0.35f, x, y); return; }
+  /* small: a spot in the ring a little way along from where it is, so the straight
+     path there never cuts across the middle (a far target across the map would) */
+  float a = atan2f_(hy, hx) + (frand() - 0.5f) * 1.2f, d = WR * (0.45f + frand() * 0.4f);
+  *x = cosf_(a) * d; *y = sinf_(a) * d;
 }
+/* How far (x, y) is from the nearest other living snake: its head and every 8th body
+   point (points are ~5-17 units apart). Exact over the whole world, unlike dangerAt,
+   which only sees the collision window. Only used when a snake spawns. */
+static float spawnRoom(i32 self, float x, float y) {
+  float best = 1e18f;
+  for (i32 o = 0; o < MAXS; o++) {
+    if (o == self || !S[o].alive) continue;
+    float dx = S[o].hx - x, dy = S[o].hy - y, d2 = dx * dx + dy * dy, reach = (float)S[o].n * S[o].spacing;
+    if (d2 < best) best = d2;
+    if (d2 > (reach + 1000.f) * (reach + 1000.f)) continue; /* its whole body is far away */
+    for (i32 j = 8; j < S[o].n; j += 8) {
+      float bx = TX(o, j) - x, by = TY(o, j) - y, b2 = bx * bx + by * by;
+      if (b2 < best) best = b2;
+    }
+  }
+  return sqrtf_(best);
+}
+#define SPAWN_GAP 600.f /* no other snake (head or body) closer than this to a new one, when possible */
 
 static void spawnSnake(i32 s, float mass, i32 skin) {
   i32 bot = !human[s];
   Snake *k = &S[s];
-  float x = 0, y = 0;
-  for (i32 t = 0; t < 40; t++) {
-    if (!bot) randomRing(WR * 0.72f, WR * 0.86f, &x, &y); /* player: outer rim */
-    else homePoint(mass, &x, &y);
+  float x = 0, y = 0, bx = 0, by = 0, bc = -1.f;
+  for (i32 t = 0; t < 40; t++) { /* the first spot at least SPAWN_GAP from everyone, else the roomiest tried */
+    if (!bot) randomRing(WR * 0.72f, WR * 0.86f, &x, &y); /* players: outer rim */
+    else randomRing(WR * 0.4f, WR * 0.88f, &x, &y);     /* bots: anywhere but the middle */
     if (bot && t < 30 && nearFocus(x, y, 300.f)) continue; /* never pop in on anyone's screen */
-    if (!dangerAt(s, x, y, 300.f)) break;
+    float c = spawnRoom(s, x, y);
+    if (c > bc) { bc = c; bx = x; by = y; }
+    if (c >= SPAWN_GAP) break;
   }
+  x = bx; y = by;
   k->ang = k->tang = frand() * TAU - PI; k->dcx = cosf_(k->ang); k->dcy = sinf_(k->ang);
   k->mass = mass; k->r = radiusFor(mass); k->spacing = k->r * 0.42f; k->n = segsFor(mass);
   k->skin = skin; k->kills = 0; k->boost = k->wantBoost = 0;
@@ -565,8 +593,8 @@ static void botThink(i32 s, float dt) {
         k->orbit = ((o->hx - hx) * o->dcy - (o->hy - hy) * o->dcx) > 0 ? 1 : -1;
       }
     }
-    if (k->target < 0 && k->rushT <= 0 && k->mass > 250.f && hx * hx + hy * hy > WR * WR * 0.2f && frand() < 0.5f) {
-      homePoint(k->mass, &k->tx, &k->ty); /* big snakes drift back to the middle */
+    if (k->target < 0 && k->rushT <= 0 && k->mass >= MID_MASS && hx * hx + hy * hy > WR * WR * 0.2f && frand() < 0.5f) {
+      homePoint(k->mass, k->hx, k->hy, &k->tx, &k->ty); /* big snakes drift back to the middle */
       k->aiT = 1.5f;
     } else if (k->target < 0 && k->rushT <= 0) {
       /* best food by value / distance, favouring what is in front */
@@ -578,7 +606,7 @@ static void botThink(i32 s, float dt) {
           float score = FV(i) / (d + 60.f) * (1.6f + (dx * ca + dy * sa) / d);
           if (score > bestScore) { bestScore = score; k->tx = px; k->ty = py; }
         }
-      if (bestScore == 0) homePoint(k->mass, &k->tx, &k->ty);
+      if (bestScore == 0) homePoint(k->mass, k->hx, k->hy, &k->tx, &k->ty);
     }
   }
 
@@ -644,7 +672,7 @@ static void farThink(i32 s, float dt) {
   k->wantBoost = 0; k->huntT = 0;
   float dx = k->tx - k->hx, dy = k->ty - k->hy;
   if ((k->aiT -= dt) <= 0 || dx * dx + dy * dy < 150.f * 150.f || k->hx * k->hx + k->hy * k->hy > WR * WR * 0.8f) {
-    homePoint(k->mass, &k->tx, &k->ty);
+    homePoint(k->mass, k->hx, k->hy, &k->tx, &k->ty);
     k->aiT = 3.f + frand() * 5.f;
   }
   k->tang = atan2f_(k->ty - k->hy, k->tx - k->hx);

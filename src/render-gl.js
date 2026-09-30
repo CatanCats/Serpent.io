@@ -7,9 +7,10 @@
 /* Floor layout, shared by both renderers (this file is inlined before render-gpu.js). */
 const FLOOR_BASE = [.052, .065, .104];         // the floor colour: one colour everywhere inside the world
 const FLOOR_DARK = [.008, .009, .014];         // outside the world: darkness
+const FLOOR_RIM_COL = [.62, .17, .25];         // the world's edge: a thin red line
 const FLOOR_LINE_K = "1.45";                   // hex lines: the floor colour, this much lighter
 const FOOD_GLOW = "1.7";                        // food halo radius, in pellet radii
-const FLOOR_RING_SEG = 256;                    // segments of the rings
+const FLOOR_RING_SEG = 512;                    // segments of the rings (the edge stays round)
 const FLOOR_HX = (46 * Math.sqrt(3)).toFixed(4), FLOOR_HY = "46.";  // hex lattice period (world units)
 /* The floor is one colour, so the screen is simply cleared to it (nearly free). The rest
    is worked out by the vertex shaders from the Frame block (nothing extra is uploaded);
@@ -41,53 +42,45 @@ function createGL(canvas, E) {
   // highp members: fragment shaders below default to mediump (half precision on mobile GPUs)
   const FRAME = `layout(std140) uniform Frame { highp vec4 uCamHalf; highp vec4 uPxTime; highp vec4 uResWR; };`;
 
-  /* Floor: almost no pixels need any work.
+  /* Floor: every part is ONE flat colour, and almost no pixels are drawn at all.
      1. The screen is cleared to the floor colour (or to darkness when the camera is
         outside the world). A clear is nearly free: GPUs mark whole blocks as "clear
         colour" instead of writing every pixel.
-     2. Hex outlines: thin quads exactly one pixel wide in one flat colour. No blending,
-        no maths per pixel.
-     3. Only near the world edge: the area on the other side of the edge (darkness, or
-        the floor when the camera is outside) in one flat colour, and a thin band with
-        the glowing edge line, the only pixels with maths of their own.
-     Ring shapes (instance = kind): 0 inside the world (flat; camera outside),
-     1 edge band (exact), 2 outside the world (darkness, flat; camera inside). A shape
-     that is off screen collapses to nothing in the vertex shader. */
+     2. Hex outlines: thin quads exactly one pixel wide in one flat colour.
+     3. Only when the world's edge is on screen: a thin red line along it, and the other
+        side of it (darkness, or the floor when the camera is outside) in one flat colour.
+     No floor pixel does any maths or blending: each shape's colour comes from its
+     vertex shader. Ring shapes (instance = kind):
+       0 inside the world, floor colour (camera outside)   1 thin dark ring past the edge (camera outside)
+       2 the red edge line                                   3 darkness outside the world (camera inside)
+     The dark rings also hide hex lines poking past the edge. A shape that is off screen
+     collapses to nothing in the vertex shader. */
   const FLOOR_RIM = `
-  float rimW(){ return 1.5+uPxTime.x; }                          // edge line glow width (world units)
+  float rimHW(){ return max(2.,uPxTime.x*1.5); }                  // half width of the edge line (world units)
   float lineFade(){ return 1.-clamp((uPxTime.x-3.)*.5,0.,1.); }  // zoomed far out: lines fade out`;
   const RING_VS = `#version 300 es
   ${FRAME}
   ${FLOOR_RIM}
   uniform int uFirst;                                           // kind of instance 0 (no base instance in WebGL)
-  out vec2 vW; flat out int vKind;
+  flat out vec3 vCol;
   void main(){
     int q=gl_VertexID/6, k=gl_VertexID-q*6, kind=gl_InstanceID+uFirst;
     int da=(k==1||k==4||k==5)?1:0, dr=(k==2||k==3||k==5)?1:0;
-    float d=length(uCamHalf.xy), reach=length(uCamHalf.zw), WRr=uResWR.z;
-    float rIn=WRr-6.*rimW()-2., rOut=WRr+32.;                   // the band also hides hex lines poking past the edge
+    float d=length(uCamHalf.xy), reach=length(uCamHalf.zw), WRr=uResWR.z, hw=rimHW();
+    float rIn=WRr-hw, rOut=WRr+hw, rHide=WRr+32.;
     vec2 R; bool vis;
-    if(kind==0){ R=vec2(0.,rIn); vis=d-reach<rIn; }
-    else if(kind==1){ R=vec2(rIn,rOut); vis=d+reach>rIn && d-reach<rOut; }
-    else { R=vec2(rOut,d+reach+8.); vis=d+reach>rOut; }
-    vKind=kind;
+    if(kind==0){ R=vec2(0.,rIn); vis=d-reach<rIn; vCol=vec3(${FLOOR_BASE.join(",")}); }
+    else if(kind==1){ R=vec2(rOut,rHide); vis=d+reach>rOut && d-reach<rHide; vCol=vec3(${FLOOR_DARK.join(",")}); }
+    else if(kind==2){ R=vec2(rIn,rOut); vis=d+reach>rIn && d-reach<rOut; vCol=vec3(${FLOOR_RIM_COL.join(",")}); }
+    else { R=vec2(rOut,d+reach+8.); vis=d+reach>rOut; vCol=vec3(${FLOOR_DARK.join(",")}); }
     float a=float(q+da)*${(2 * Math.PI / FLOOR_RING_SEG).toFixed(8)}, r=dr==1?R.y:R.x;
     vec2 w=vec2(cos(a),sin(a))*r, c=(w-uCamHalf.xy)/uCamHalf.zw;
-    gl_Position=vis?vec4(c.x,-c.y,0,1):vec4(2,2,2,1); vW=w;
+    gl_Position=vis?vec4(c.x,-c.y,0,1):vec4(2,2,2,1);
   }`;
   const RING_FS = `#version 300 es
-  precision highp float;
-  ${FRAME}
-  ${FLOOR_RIM}
-  in vec2 vW; flat in int vKind; out vec4 o;
-  void main(){
-    const vec3 B=vec3(${FLOOR_BASE.join(",")}), D=vec3(${FLOOR_DARK.join(",")});
-    if(vKind!=1){ o=vec4(vKind==0?B:D,1); return; }             // flat: no maths per pixel
-    float WRr=uResWR.z, r=length(vW), rw=rimW();
-    vec3 c=mix(B,D,smoothstep(WRr-uPxTime.x,WRr+uPxTime.x,r));
-    c+=vec3(1.,.25,.35)*exp(-abs(r-WRr)/rw)*(.7+.3*sin(uPxTime.y*3.))*.55;
-    o=vec4(c,1);
-  }`;
+  precision mediump float;
+  flat in vec3 vCol; out vec4 o;
+  void main(){ o=vec4(vCol,1); }`;                            // one flat colour: no maths per pixel
   const HEX_VS = `#version 300 es
   ${FRAME}
   ${FLOOR_RIM}
@@ -412,9 +405,9 @@ function createGL(canvas, E) {
       gl.clearColor(plan.clear[0], plan.clear[1], plan.clear[2], 1); gl.clear(gl.COLOR_BUFFER_BIT);
       gl.disable(gl.BLEND); gl.bindVertexArray(emptyVao);
       gl.useProgram(ringP);
-      if (plan.out) { gl.uniform1i(firstU, 0); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6); }
+      if (plan.out) { gl.uniform1i(firstU, 0); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6); } // inside area
       if (plan.hexes) { gl.useProgram(hexP); gl.drawArraysInstanced(gl.TRIANGLES, 0, 18, plan.hexes); gl.useProgram(ringP); }
-      gl.uniform1i(firstU, 1); gl.drawArraysInstanced(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6, plan.out ? 1 : 2); // band (+ darkness)
+      gl.uniform1i(firstU, plan.out ? 1 : 2); gl.drawArraysInstanced(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6, 2); // kinds 1+2 or 2+3
       gl.enable(gl.BLEND);
       mark(); // food
       if (nFood) { gl.useProgram(foodP); gl.bindVertexArray(foodVao[f]); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, nFood); }
