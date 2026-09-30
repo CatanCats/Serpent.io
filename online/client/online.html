@@ -1,37 +1,41 @@
-<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#070a12">
-<title>Serpent.io – play online: free slither.io-style snake game</title>
-<meta name="description" content="Serpent.io is a free, fast slither.io-style snake game in your browser: play online with other people and 60 AI snakes in five difficulty tiers, or offline on your own device. No download, no sign-up.">
-<meta name="keywords" content="snake game, slither.io, slither io clone, io game, browser game, html5 game, free online game, offline game, snake io, webgpu game, webassembly game, single file game">
+<!-- the online game lives at br8t.com/slither.io: send visitors of the GitHub Pages copy there (offline.html stays) -->
+<script>if (location.hostname.endsWith("github.io")) location.replace("https://br8t.com/slither.io/" + location.search + location.hash);</script>
+<title>Serpent.io – play now: free open-source slither.io-style snake game</title>
+<meta name="description" content="Play Serpent.io now at br8t.com/slither.io: a free, open-source slither.io-style snake game in your browser. Play online with other people and 60 AI snakes in five difficulty tiers. Super efficient: WebAssembly and WebGPU, runs smoothly even on old laptops and phones. No download, no sign-up.">
+<meta name="keywords" content="snake game, slither.io, slither io, slither.io clone, slither io unblocked, open source slither.io, io game, multiplayer snake, browser game, html5 game, free online game, snake io, webgpu game, webassembly game, lightweight game">
 <meta name="author" content="CatanCats">
-<meta name="robots" content="index, follow">
-<link rel="canonical" href="https://catancats.github.io/Snake-Game/">
-<meta property="og:url" content="https://catancats.github.io/Snake-Game/">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<link rel="canonical" href="https://br8t.com/slither.io/">
 <meta name="application-name" content="Serpent.io">
 <meta name="apple-mobile-web-app-title" content="Serpent.io">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <!-- link previews (Discord, WhatsApp, X, Facebook...) -->
 <meta property="og:type" content="website">
-<meta property="og:title" content="Serpent.io – slither.io-style snake game">
-<meta property="og:description" content="Eat, grow and cut off 60 AI snakes, from Rookie to Legend. Free, instant, in your browser.">
+<meta property="og:url" content="https://br8t.com/slither.io/">
+<meta property="og:title" content="Serpent.io – open-source slither.io-style snake game, play now">
+<meta property="og:description" content="Eat, grow and cut off other players and 60 AI snakes, from Rookie to Legend. Free, open source, instant in your browser, and light enough for any device.">
 <meta property="og:site_name" content="Serpent.io">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Serpent.io – slither.io-style snake game">
-<meta name="twitter:description" content="Eat, grow and cut off 60 AI snakes, from Rookie to Legend. Free, instant, in your browser.">
+<meta name="twitter:title" content="Serpent.io – open-source slither.io-style snake game, play now">
+<meta name="twitter:description" content="Eat, grow and cut off other players and 60 AI snakes, from Rookie to Legend. Free, open source, instant in your browser, and light enough for any device.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23070a12'/%3E%3Cpath d='M14 44c0-10 12-10 18-16s4-14-6-14' stroke='%2334d399' stroke-width='9' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='26' cy='14' r='3' fill='%23070a12'/%3E%3C/svg%3E">
 <!-- structured data: lets search engines show it as a game -->
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"VideoGame","name":"Serpent.io",
- "description":"A free slither.io-style snake game that runs in any browser, with 60 AI snakes in five difficulty tiers.",
- "genre":["Arcade","IO game","Snake"],"gamePlatform":["Web browser","PC","Mobile"],"applicationCategory":"Game",
- "operatingSystem":"Any","playMode":"SinglePlayer","isAccessibleForFree":true,
+{"@context":"https://schema.org","@type":"VideoGame","name":"Serpent.io","alternateName":"Serpent.io slither.io-style snake game",
+ "url":"https://br8t.com/slither.io/",
+ "description":"A free, open-source slither.io-style snake game that runs in any browser. Play online with other people and 60 AI snakes in five difficulty tiers, or offline on your own device. A WebAssembly simulation and WebGPU rendering (WebGL 2 as backup) keep it fast and light on CPU, GPU and memory.",
+ "genre":["Arcade","IO game","Snake"],"gamePlatform":["Web browser","PC","Mobile"],"applicationCategory":"GameApplication",
+ "operatingSystem":"Any","playMode":["MultiPlayer","SinglePlayer"],"isAccessibleForFree":true,"inLanguage":"en",
  "offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},
- "author":{"@type":"Organization","name":"CatanCats"}}
+ "license":"https://github.com/CatanCats/Serpent.io/blob/main/LICENCE",
+ "sameAs":["https://github.com/CatanCats/Serpent.io","https://catancats.github.io/Snake-Game/"],
+ "author":{"@type":"Organization","name":"CatanCats","url":"https://github.com/CatanCats"}}
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
