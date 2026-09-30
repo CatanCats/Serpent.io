@@ -35,6 +35,10 @@ online/
   instead of queueing a backlog.
 - **The browser** draws ~70 ms in the past and interpolates between snapshots, so
   movement is smooth at any refresh rate, using the offline game's WebGPU/WebGL renderers.
+- **Your own snake is predicted** in the browser (same turning and speed rules as the
+  simulation), so it turns the moment you move the mouse instead of a round trip plus
+  ~70 ms later; the server stays in charge and the prediction is corrected smoothly
+  toward it. With a 240 ms round trip, turning starts after ~55 ms instead of ~460 ms.
 
 Measured on a 4-core 2.1 GHz Xeon, 60 bots (each step has a 16.7 ms budget):
 

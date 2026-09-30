@@ -159,6 +159,36 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (cnt) uploadRun(s, (pcOf[s] & RMASK), cnt);
     pcOf[s] = pc;
   }
+
+  /* Your own snake is predicted here. Waiting for the server (a round trip, plus the
+     ~70 ms other snakes are drawn in the past) makes turning feel slow, so your snake
+     moves on this device at once, with the simulation's own turning and speed rules and
+     the inputs exactly as sent. Each snapshot says which input the server last had and
+     how many steps ago; the prediction at that same moment is compared with the server's
+     head, and the difference is corrected gently (the server stays in charge). */
+  const PREDICT = new URLSearchParams(location.search).get("predict") !== "0"; // ?predict=0: off (for comparison)
+  const pred = { on: false, x: 0, y: 0, a: 0, hist: [] }; // hist: {t, x, y}, newest last
+  const wrapA = (a) => { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; };
+  function predStart(x, y, a) { pred.on = true; pred.x = x; pred.y = y; pred.a = a; pred.hist.length = 0; }
+  function predStep(now, dt) {
+    const turn = 5.2 / (1 + (radius(mass[me]) - 12) * 0.045) * dt; // as moveSnake in the simulation
+    const da = Math.max(-turn, Math.min(turn, wrapA(sentAim - pred.a)));
+    pred.a = wrapA(pred.a + da);
+    const v = (lastBoostSent > 0 && mass[me] > 14 ? 430 : 195) * dt;
+    pred.x += Math.cos(pred.a) * v; pred.y += Math.sin(pred.a) * v;
+    pred.hist.push({ t: now, x: pred.x, y: pred.y }); if (pred.hist.length > 240) pred.hist.shift();
+  }
+  function predCorrect(seq, steps, sx, sy) { // server head (sx, sy), `steps` steps after it received input `seq`
+    const h = pred.hist, t = sentAt[seq] + steps * (1000 / 60);
+    if (!pred.on || h.length < 2 || t < h[0].t || t > h[h.length - 1].t) return;
+    let i = h.length - 2; while (i > 0 && h[i].t > t) i--;
+    const f = (t - h[i].t) / Math.max(1e-6, h[i + 1].t - h[i].t);
+    const ex = sx - (h[i].x + (h[i + 1].x - h[i].x) * f), ey = sy - (h[i].y + (h[i + 1].y - h[i].y) * f);
+    if (ex * ex + ey * ey > 150 * 150) { predStart(sx, sy, pred.a); return; } // far off (lag spike): start again from the server
+    pred.err = Math.hypot(ex, ey);
+    const kx = ex * 0.3, ky = ey * 0.3; // a third per snapshot: smooth, settles in ~0.2 s
+    pred.x += kx; pred.y += ky; for (const e of h) { e.x += kx; e.y += ky; }
+  }
   // food: server slot -> local slot (local slots stay dense so the GPU draws few)
   const toLocal = new Int32Array(32768).fill(-1), freeL = []; let foodHigh = 0;
   const miniList = []; // from the 4 Hz MINI message: [slot, skin, x, y, mass]
@@ -180,7 +210,8 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     me = d.getUint8(o) === 255 ? -1 : d.getUint8(o); spectate = d.getUint8(o + 1);
     if (d.getUint8(o + 2) & 1) clearWorld(); // server resync
     if (me >= 0) kills[me] = d.getUint16(o + 3, true);
-    o += 5;
+    const ackSeq = d.getUint8(o + 5), ackSteps = d.getUint8(o + 6);
+    o += 7;
     const n = d.getUint8(o); o += 1;
     const seen = new Uint8Array(NS);
     for (let k = 0; k < n; k++) {
@@ -207,7 +238,8 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         else { x = (last ? last.x : 0) + d.getInt8(o) * 0.25; y = (last ? last.y : 0) + d.getInt8(o + 1) * 0.25; o += 2; }
         if (fl & 16) { mass[s] = d.getUint16(o, true) / 4; o += 2; }
         if (last && (x !== last.x || y !== last.y)) angOf[s] = Math.atan2(y - last.y, x - last.x);
-        layTrail(s, x, y);
+        if (s === me && pred.on) predCorrect(ackSeq, ackSteps, x, y); // your body follows the prediction instead
+        else layTrail(s, x, y);
       }
       segN[s] = segsFor(mass[s]); alive[s] = 1; seen[s] = 1;
       const h = hist[s]; h.push({ t: tick, x, y, a: angOf[s] }); if (h.length > 8) h.shift();
@@ -263,14 +295,18 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     b[0] = 1; b[1] = skinSel; dv.setUint16(2, Math.round((vw / Math.max(1, vh)) * 1000), true); b[4] = nm.length; b.set(nm, 5);
     sendRaw(b);
   }
-  let lastAimSent = 9, lastBoostSent = -1, lastInputAt = 0;
+  let lastAimSent = 9, lastBoostSent = -1, lastInputAt = 0, sentAim = 0, inSeq = 0;
+  const sentAt = new Float64Array(256); // when each input (by its 8-bit number) was sent
   function sendInput(now, aim, b) {
     if (Math.abs(aim - lastAimSent) < 0.004 && b === lastBoostSent && now - lastInputAt < 250) return;
     if (now - lastInputAt < 15 && b === lastBoostSent) return; // at most ~60/s
-    const u = new Uint8Array(4), dv = new DataView(u.buffer);
+    const u = new Uint8Array(5), dv = new DataView(u.buffer);
     let a = aim; while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI;
-    u[0] = 2; dv.setUint16(1, Math.round(((a + Math.PI) / (2 * Math.PI)) * 65535), true); u[3] = b;
+    const q = Math.round(((a + Math.PI) / (2 * Math.PI)) * 65535);
+    inSeq = (inSeq + 1) & 255; sentAt[inSeq] = now;
+    u[0] = 2; dv.setUint16(1, q, true); u[3] = b; u[4] = inSeq;
     sendRaw(u); lastAimSent = aim; lastBoostSent = b; lastInputAt = now;
+    sentAim = q / 65535 * 2 * Math.PI - Math.PI; // exactly what the server will steer toward
   }
   function onMessage(d) {
     switch (d.getUint8(0)) {
@@ -497,7 +533,11 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     const t0 = performance.now();
     if (estTick >= 0) estTick += dt * 60;
     const rt = estTick - INTERP;
+    const mine = PREDICT && playing && me >= 0 && alive[me] && hist[me].length;
+    if (!mine) pred.on = false;
+    else { if (!pred.on) { const l = hist[me][hist[me].length - 1]; predStart(l.x, l.y, l.a); } predStep(now, dt); }
     interp(rt);
+    if (pred.on) { hx[me] = pred.x; hy[me] = pred.y; ha[me] = pred.a; shown[me] = 1; layTrail(me, pred.x, pred.y); }
     // camera, exactly like offline
     let tx = camX, ty = camY, tH = camH;
     if (playing && me >= 0 && shown[me]) { tx = hx[me]; ty = hy[me]; tH = 560 + (radius(mass[me]) - 12) * 18; }
@@ -531,6 +571,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   }
   resize();
   connect();
-  window.__serpent = { renderer: () => R.name, state: () => ({ connected, me, state, foodHigh, alive: [...alive].reduce((a, b) => a + b, 0) }) };
+  window.__serpent = { renderer: () => R.name, state: () => ({ connected, me, state, foodHigh, alive: [...alive].reduce((a, b) => a + b, 0) }),
+                      head: () => (me >= 0 ? { x: hx[me], y: hy[me], a: ha[me], pred: pred.on, err: pred.err } : null) };
   requestAnimationFrame((t) => { last = t; frame(t); });
 })();

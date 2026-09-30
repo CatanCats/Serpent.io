@@ -85,11 +85,12 @@ impl Sim {
 
 /* ---------------- protocol (little-endian; mirrored in online/client/client.js) ----------------
  client -> server:  1 JOIN  u8 skin, u16 aspect*1000, u8 len, name   (also respawns)
-                    2 INPUT u16 aim (-pi..pi), u8 boost
+                    2 INPUT u16 aim (-pi..pi), u8 boost, u8 seq (counts up; echoed back for the client's prediction)
                     3 VIEW  u16 aspect*1000
                     4 LEAVE (back to the menu)
  server -> client:  1 WELCOME u8 maxSnakes, u16 ring, f32 worldRadius, u8 bots, u8 players
-                    2 SNAP  u32 tick, u8 you (255 none), u8 spectate, u8 flags (1 = reset), u16 your kills, u8 n, snakes, u16 m, food
+                    2 SNAP  u32 tick, u8 you (255 none), u8 spectate, u8 flags (1 = reset), u16 your kills,
+                          u8 last input seq received, u8 steps since it was received, u8 n, snakes, u16 m, food
                         snake: u8 slot, u8 flags (1 boost, 2 human, 4 full body, 8 absolute head, 16 size follows), then
                           full body:  u8 skin, u8 tier, i16 x, i16 y (head, Q2), u16 mass*4, u16 count,
                                       i16 x, i16 y (oldest point), count-1 x (i8 dx, i8 dy) (Q2 steps to the next point)
@@ -129,6 +130,7 @@ struct Client {
     rect: Rect,            // food sectors this client is subscribed to (its view)
     pend: Vec<u8>,         // food changes in those sectors since the last snapshot
     npend: u32,
+    in_seq: u8, in_tick: u32, // the last input it sent and the step count when it arrived
     reset: bool,           // a snapshot was dropped: resend everything
     cap: usize,            // size of its last snapshot: the next buffer is allocated once, right-sized
     msgs: u32,
@@ -168,7 +170,7 @@ impl Game {
             Ev::Open { id, tx } => {
                 let players = self.clients.values().filter(|c| c.slot >= 0).count().min(255) as u8;
                 let mut c = Client { tx, slot: -1, alive: false, aspect: 1.78, last: (0., 0., 900.), sent_pc: vec![0; self.sim.maxs], sent_from: vec![0; self.sim.maxs], sent_head: vec![(0, 0, 0); self.sim.maxs],
-                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, reset: false, cap: 1024, msgs: 0 };
+                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, in_seq: 0, in_tick: 0, reset: false, cap: 1024, msgs: 0 };
                 let mut o = Out(Vec::new());
                 o.u8(1); o.u8(self.sim.maxs as u8); o.u16(self.sim.ring as u16); o.f32(self.sim.wr); o.u8(self.sim.bots as u8); o.u8(players);
                 Self::send(&mut c, o.0);
@@ -215,6 +217,7 @@ impl Game {
                 2 if d.len() >= 4 && c.slot >= 0 => {
                     let aim = u16::from_le_bytes([d[1], d[2]]) as f32 / 65535. * std::f32::consts::TAU - std::f32::consts::PI;
                     unsafe { sim_set_input(c.slot, aim, d[3] as i32) };
+                    if d.len() >= 5 { c.in_seq = d[4]; c.in_tick = unsafe { sim_tick() }; } // applied by the next step
                 }
                 3 if d.len() >= 3 => {
                     c.aspect = (u16::from_le_bytes([d[1], d[2]]) as f32 / 1000.).clamp(0.3, 4.);
@@ -280,6 +283,7 @@ fn snapshot(sim: &Sim, food: &FoodIndex, snakes: &[SnakeOut], live: &[u8], spect
         let mut o = Out(Vec::with_capacity(c.cap));
         let kills = if me >= 0 { sim.p(me as usize).kills.min(65535) as u16 } else { 0 };
         o.u8(2); o.u32(tick); o.u8(if me >= 0 { me as u8 } else { 255 }); o.u8(spectate as u8); o.u8(reset as u8); o.u16(kills);
+        o.u8(c.in_seq); o.u8(tick.wrapping_sub(c.in_tick).min(255) as u8);
         let n_at = o.0.len(); o.u8(0);
         let mut n = 0u8;
         // living snakes only: one that died and respawns comes back with a jump in its
