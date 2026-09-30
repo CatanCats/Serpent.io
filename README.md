@@ -44,7 +44,6 @@ Each frame, JavaScript makes one **WebAssembly call*, and then **one upload* of 
 - The minimap is drawn on the game canvas, with no Canvas2D.
 - The floor costs almost nothing: it is one colour, so the screen is simply cleared to it (nearly free on GPUs); hex lines are one-pixel quads in one flat colour; near the world edge a thin glowing line and darkness beyond. The GPU works out the floor's shapes itself, so nothing extra is uploaded.
 - The minimap skips pixels that would add nothing.
-- Dynamic resolution removes pixels before dropping frames.
 
 ## Measuring
 Press **P* for:
