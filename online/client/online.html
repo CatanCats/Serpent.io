@@ -139,6 +139,7 @@
   .net.bad { color: #fde68a; }
   a.mode { display: inline-block; margin-top: 10px; font-size: 14px; color: var(--accent2); text-decoration: none; border-bottom: 1px solid rgba(56,189,248,.35); }
   a.mode:hover { color: #fff; }
+  a.mode.dl { display: block; width: fit-content; margin: 8px auto 0; font-size: 13px; }
   button.play:disabled { filter: grayscale(.8) brightness(.7); cursor: default; box-shadow: none; }
 
   @media (max-width: 640px) {
@@ -173,6 +174,7 @@
     <button class="play" id="play">PLAY ONLINE</button>
     <div class="net" id="net">Connecting…</div>
     <a class="mode" href="offline.html">Play offline instead (runs on this device) →</a>
+    <a class="mode dl" href="offline.html" download="serpent-offline.html" title="One file: open it in a browser to play without internet">⬇ Download the offline game</a>
     <div class="keys"><kbd>Mouse</kbd> steer · <kbd>Click</kbd>/<kbd>Space</kbd> boost<br><kbd>←</kbd><kbd>→</kbd> steer with keys · Touch: drag to steer, 2 fingers boost · <kbd>P</kbd> perf</div>
     <div class="rsw" id="qsw" role="group" aria-label="Quality">
       <span>Quality</span>

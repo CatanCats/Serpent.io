@@ -13,6 +13,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
 
 (async () => {
   const $ = (id) => document.getElementById(id);
+  if (location.protocol === "file:") $("dl")?.remove(); // already a downloaded copy
   const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } },
                   set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
 

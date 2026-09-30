@@ -133,6 +133,7 @@
   .new { color: var(--accent) !important; }
   a.mode { display: inline-block; margin-top: 12px; font-size: 14px; color: var(--accent2); text-decoration: none; border-bottom: 1px solid rgba(56,189,248,.35); }
   a.mode:hover { color: #fff; }
+  a.mode.dl { display: block; width: fit-content; margin: 8px auto 0; font-size: 13px; }
 
   @media (max-width: 640px) {
     #board { width: 164px; padding: 10px 12px; }
@@ -165,6 +166,7 @@
     <div class="skins" id="skins" role="group" aria-label="Skin"></div>
     <button class="play" id="play">PLAY</button>
     <a class="mode" href="./">← Play online with others</a>
+    <a class="mode dl" id="dl" href="offline.html" download="serpent-offline.html">⬇ Download to play without internet</a>
     <div class="keys"><kbd>Mouse</kbd> steer · <kbd>Click</kbd>/<kbd>Space</kbd> boost<br><kbd>←</kbd><kbd>→</kbd> steer with keys · Touch: drag to steer, 2 fingers boost · <kbd>P</kbd> perf</div>
     <div class="rsw" id="qsw" role="group" aria-label="Quality">
       <span>Quality</span>
