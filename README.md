@@ -1,13 +1,13 @@
-# serpent.io  a Open Source slither.io-style snake game for the browser
+# serpent.io: an open-source slither.io-style snake game for the browser
 
- Serpent.io is a fast, free io game in the style of slither.io. It runs in most browsers on desktop or mobile. The offline game is a single self-contained `offline.html`.
+**▶ Play online now: [br8t.com/slither.io](https://br8t.com/slither.io/)**. It's live, free, and you play with other people and bots, in the browser, on desktop or mobile.
 
--  **Different difficuly levels for the AI bots** Rookie, Casual, Hunter, Elite and Legend.
--  Has a minimap, allowing you to the positions of different snakes.
--  **Fast** a WebAssembly simulation and WebGPU rendering (with WebGL 2 as backup) means that The game runs fast even on older machines and doesn't hog resources.
-- Mouse, keyboard and touch controls.
+Serpent.io is a fast, free, open-source io game in the style of slither.io. You can also play it offline: [offline.html](https://catancats.github.io/Snake-Game/offline.html) runs entirely on your device, as a single self-contained file (download it to play without internet).
 
-**Play the game here: [catancats.github.io/Snake-Game](https://catancats.github.io/Snake-Game/)**. The front page plays **online** with other people once the server is up; **[offline.html](https://catancats.github.io/Snake-Game/offline.html)** is the original offline game, running entirely on your device (download it to play without internet). Each menu has a link to switch.
+- **AI bots at five levels:** Rookie, Casual, Hunter, Elite and Legend.
+- **A minimap** showing where the other snakes are.
+- **Fast:** a WebAssembly simulation and WebGPU rendering (with WebGL 2 as a backup), so it runs smoothly even on older machines and doesn't hog resources.
+- **Mouse, keyboard and touch controls.**
 
 ## Online
 The online version uses the same rules and bots. A server runs the world (the offline game's C simulation compiled to native code, plus Rust networking), and your browser only draws it. Details, measurements and how to run or deploy it: [online/README.md](online/README.md).

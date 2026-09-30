@@ -28,7 +28,10 @@ WEB_ROOT=../.. ./target/release/serpent-server   # http://localhost:8080 serves 
 ```
 Server environment variables: `PORT` (8080), `BOTS` (60), `WEB_ROOT`, `MAX_PER_IP` (8), `LOG_SECS` (30). At startup it prints the CPU model, core count and RAM.
 
-## Next job: put the server online
+## The server is live
+The owner reports the online game is live at **https://br8t.com/slither.io/** (the owner deployed it; this container could not reach the host). Rule and protocol changes need the server rebuilt and redeployed together with the pages.
+
+## Earlier deploy notes (kept for reference)
 Status: the owner has a server (1 CPU, 1 GB RAM, Debian 12, Caddy + systemd already running other sites; apps live in `/srv/apps/<app>`, loopback ports 8002–8005 taken, 8001 reserved). `online/deploy/deploy.sh` is ready. The last session could not reach it, because the environment's network policy blocked SSH (port 22) and the container had no `ssh` client. The owner must allow the host in the environment's network settings.
 1. Get server access from the owner through session secrets or environment variables (not the repo). The key and the host address must **never** be committed. Check the network policy allows SSH to the host; install an ssh client if missing. Then run `SERPENT_HOST=... SERPENT_KEY=... online/deploy/deploy.sh`, which covers steps 2–3 below.
 2. On the server:
