@@ -71,8 +71,8 @@ Status: the owner has a server (1 CPU, 1 GB RAM, Debian 12, Caddy + systemd alre
 - On the owner's Intel iGPU, **writing pixels** is the GPU cost, not the maths per pixel. Removing texture reads and maths from a full-screen pass saved only ~17%; not writing most pixels (fast clear) saved ~70%. Any full-screen effect (vignette, gradients) costs about 1.5 ms there. Avoid adding one.
 - Game rules (both `sim.c` copies):
   - Nothing spawns in the middle (the centre zone, 35% of the world radius). Bots spawn in the ring 0.4–0.88 WR, players on the rim. `spawnRoom()` takes the first of 40 tries at least `SPAWN_GAP` (600) from every other snake's head and body, else the roomiest.
-  - Only snakes of mass ≥ `MID_MASS` (200 = length 2000 on screen) are drawn to the middle. Smaller ones pick their next roam spot a little way along the ring (`homePoint(mass, hx, hy, …)`), because a far target across the map made their straight path cross the middle.
-  - Measured with a native harness over 5 simulated minutes: spawns in the middle 45 → 0; spawns under 300 units from a snake 8 → 0; small snakes in the middle 37% → 0% of the time.
+  - Only snakes of mass ≥ `MID_MASS` (500 = length 5000 on screen) are drawn to the middle. Smaller ones roam the ring 0.3–0.88 WR as before; the owner asked to remove the extra code that kept them out of the middle.
+  - Spawn check, measured with a native harness over 5 simulated minutes: spawns in the middle 45 → 0; spawns under 300 units from a snake 8 → 0.
 - Native test builds of `sim.c` need `-Dmemset=simMemset -Dmemcpy=simMemcpy`: its own `memset` calls `__builtin_memset`, which natively becomes a call to itself and hangs. Also provide `double nowMs(void)`, and drive it with `frame()` rather than `step()`.
 - Graphics changes go in `src/render-*.js` only; `build.sh` puts them into both `offline.html` and `index.html`. Game-rule changes must be made in **both** `src/sim.c` and `online/server/sim-server.c`, and UI changes in both `src/app.js` and `online/client/client.js`.
 
