@@ -43,6 +43,7 @@ extern "C" {
     fn sim_remove_human(s: i32);
     fn sim_spawn_human(s: i32, skin: i32);
     fn sim_set_input(s: i32, aim: f32, boost: i32);
+    fn sim_set_lag(s: i32, steps: f32);
     fn sim_set_aspect(s: i32, a: f32);
     fn sim_set_menu_focus(on: i32, x: f32, y: f32, r: f32);
     fn sim_step();
@@ -88,6 +89,8 @@ impl Sim {
                     2 INPUT u16 aim (-pi..pi), u8 boost, u8 seq (counts up; echoed back for the client's prediction)
                     3 VIEW  u16 aspect*1000
                     4 LEAVE (back to the menu)
+                    5 PING  u8 id   (answered at once with PONG, by the connection, not the game loop)
+                    6 DELAY u16 round trip in ms (the page's measurement; used to compensate collisions)
  server -> client:  1 WELCOME u8 maxSnakes, u16 ring, f32 worldRadius, u8 bots, u8 players
                     2 SNAP  u32 tick, u8 you (255 none), u8 spectate, u8 flags (1 = reset), u16 your kills,
                           u8 last input seq received, u8 steps since it was received, u8 n, snakes, u16 m, food
@@ -103,7 +106,13 @@ impl Sim {
                     4 NAME  u8 slot, u8 len, name
                     5 DEATH u8 killer (255 = world edge), u16 kills, f32 mass
                     6 MINI  u16 k, k x (u8 slot, u8 x, u8 y (0..255 across the world), u8 skin | size<<4)
-                    7 FULL  (server full) */
+                    7 FULL  (server full)
+                    8 PONG  u8 id */
+
+/// How many steps behind the server a player's screen shows the other snakes: its round
+/// trip (your own snake is predicted ahead by half of it, the others arrive half of it
+/// late), plus the page's smoothing delay (INTERP = 4 steps) and half a snapshot interval.
+fn lag_steps(rtt_ms: u16) -> f32 { if rtt_ms == 0 { 0. } else { rtt_ms as f32 * 0.06 + 5. } }
 
 /// World units to 16-bit fixed point (quarter units), the trail's own format.
 #[inline] fn q2(v: f32) -> i16 { (v * 4.).round().clamp(-32767., 32767.) as i16 }
@@ -130,6 +139,7 @@ struct Client {
     rect: Rect,            // food sectors this client is subscribed to (its view)
     pend: Vec<u8>,         // food changes in those sectors since the last snapshot
     npend: u32,
+    rtt_ms: u16,           // its measured network round trip
     in_seq: u8, in_tick: u32, // the last input it sent and the step count when it arrived
     reset: bool,           // a snapshot was dropped: resend everything
     cap: usize,            // size of its last snapshot: the next buffer is allocated once, right-sized
@@ -170,7 +180,7 @@ impl Game {
             Ev::Open { id, tx } => {
                 let players = self.clients.values().filter(|c| c.slot >= 0).count().min(255) as u8;
                 let mut c = Client { tx, slot: -1, alive: false, aspect: 1.78, last: (0., 0., 900.), sent_pc: vec![0; self.sim.maxs], sent_from: vec![0; self.sim.maxs], sent_head: vec![(0, 0, 0); self.sim.maxs],
-                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, in_seq: 0, in_tick: 0, reset: false, cap: 1024, msgs: 0 };
+                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, rtt_ms: 0, in_seq: 0, in_tick: 0, reset: false, cap: 1024, msgs: 0 };
                 let mut o = Out(Vec::new());
                 o.u8(1); o.u8(self.sim.maxs as u8); o.u16(self.sim.ring as u16); o.f32(self.sim.wr); o.u8(self.sim.bots as u8); o.u8(players);
                 Self::send(&mut c, o.0);
@@ -207,7 +217,7 @@ impl Game {
                     let s = c.slot as usize;
                     self.names[s] = clean_name(&d[5..5 + len]);
                     c.aspect = aspect;
-                    unsafe { sim_set_aspect(c.slot, aspect); sim_spawn_human(c.slot, d[1] as i32); }
+                    unsafe { sim_set_aspect(c.slot, aspect); sim_spawn_human(c.slot, d[1] as i32); sim_set_lag(c.slot, lag_steps(c.rtt_ms)); }
                     c.alive = true; c.sent_pc.iter_mut().for_each(|v| *v = 0);
                     let m = self.name_msg(s);
                     self.clients.insert(id, c);
@@ -224,6 +234,10 @@ impl Game {
                     if c.slot >= 0 { unsafe { sim_set_aspect(c.slot, c.aspect) }; }
                 }
                 4 => { self.leave(&mut c); }
+                6 if d.len() >= 3 => {
+                    c.rtt_ms = u16::from_le_bytes([d[1], d[2]]).min(1000);
+                    if c.slot >= 0 { unsafe { sim_set_lag(c.slot, lag_steps(c.rtt_ms)) }; }
+                }
                 _ => {}
             }
         }
@@ -577,6 +591,7 @@ async fn ws_route(ws: WebSocketUpgrade, ConnectInfo(addr): ConnectInfo<SocketAdd
 async fn connection(sock: WebSocket, app: Arc<App>, ip: IpAddr) {
     let id = app.next_id.fetch_add(1, Relaxed);
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(48);
+    let pong_tx = tx.clone(); // PING is answered here, at once: the game loop's step would add to the measurement
     let _ = app.ev.lock().unwrap().send(Ev::Open { id, tx });
     let (mut sink, mut stream) = sock.split();
     let writer = tokio::spawn(async move {
@@ -584,6 +599,7 @@ async fn connection(sock: WebSocket, app: Arc<App>, ip: IpAddr) {
     });
     while let Some(Ok(msg)) = stream.next().await {
         match msg {
+            Message::Binary(b) if b.len() == 2 && b[0] == 5 => { let _ = pong_tx.try_send(vec![8, b[1]]); }
             Message::Binary(b) => { let _ = app.ev.lock().unwrap().send(Ev::Msg { id, data: b.to_vec() }); }
             Message::Close(_) => break,
             _ => {}

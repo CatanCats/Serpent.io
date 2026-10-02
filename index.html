@@ -1306,22 +1306,40 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     setStatus("Connecting to server…");
     try { ws = new WebSocket(serverURL); } catch { setStatus("Can't reach the server", "bad"); return; }
     ws.binaryType = "arraybuffer";
-    ws.onopen = () => { connected = true; retry = 0; $("play").disabled = false; sendView(); if (state !== "menu") join(); };
-    ws.onmessage = (e) => { bytesIn += e.data.byteLength; onMessage(new DataView(e.data)); };
+    ws.onopen = () => { connected = true; retry = 0; $("play").disabled = false; sendView(); startPings(); if (state !== "menu") join(); };
+    ws.onmessage = (e) => { bytesIn += e.data.byteLength; msgAt = e.timeStamp || performance.now(); onMessage(new DataView(e.data)); };
     ws.onclose = () => {
-      connected = false; $("play").disabled = true; clearWorld(); me = -1;
+      connected = false; clearInterval(pingTimer); $("play").disabled = true; clearWorld(); me = -1;
       if (state === "play") { state = "dead"; showOver("Lost connection to the server"); }
       setStatus("Can't reach the server — retrying… (or play offline)", "bad");
       setTimeout(connect, Math.min(10000, 1500 * ++retry));
     };
   }
   const sendRaw = (bytes) => { if (connected && ws.readyState === 1) ws.send(bytes); };
+  /* Delay test: tiny PING messages, answered at once by the server. A burst of 5 when the
+     connection opens, then one every 4 s in the background. The median of the last 5
+     round trips goes to the server, which allows for it when judging your collisions. */
+  const pingAt = new Float64Array(256), rtts = []; let pingId = 0, rttMs = 0, rttSent = -1, pingTimer = 0;
+  let msgAt = 0; // when the browser received the last message (not when this page got to it)
+  function ping() { pingId = (pingId + 1) & 255; pingAt[pingId] = performance.now(); sendRaw(new Uint8Array([5, pingId])); }
+  function onPong(id) {
+    rtts.push(Math.max(0, msgAt - pingAt[id])); if (rtts.length > 5) rtts.shift();
+    rttMs = [...rtts].sort((a, b) => a - b)[rtts.length >> 1];
+    if (rtts.length >= 3 && Math.abs(rttMs - rttSent) > 8) sendDelay();
+  }
+  function sendDelay() { const b = new Uint8Array(3); b[0] = 6; new DataView(b.buffer).setUint16(1, Math.min(1000, Math.round(rttMs)), true); sendRaw(b); rttSent = rttMs; }
+  function startPings() {
+    rtts.length = 0; rttSent = -1; clearInterval(pingTimer);
+    for (let i = 0; i < 5; i++) setTimeout(ping, i * 150);
+    pingTimer = setInterval(ping, 4000);
+  }
   function sendView() { const b = new Uint8Array(3); b[0] = 3; new DataView(b.buffer).setUint16(1, Math.round((vw / Math.max(1, vh)) * 1000), true); sendRaw(b); }
   function join() {
     const nm = new TextEncoder().encode(playerName()).slice(0, 48);
     const b = new Uint8Array(5 + nm.length), dv = new DataView(b.buffer);
     b[0] = 1; b[1] = skinSel; dv.setUint16(2, Math.round((vw / Math.max(1, vh)) * 1000), true); b[4] = nm.length; b.set(nm, 5);
     sendRaw(b);
+    if (rtts.length >= 3) sendDelay(); // the server applies it to the new snake
   }
   let lastAimSent = 9, lastBoostSent = -1, lastInputAt = 0, sentAim = 0, inSeq = 0;
   const sentAt = new Float64Array(256); // when each input (by its 8-bit number) was sent
@@ -1355,6 +1373,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         }
         break;
       }
+      case 8: onPong(d.getUint8(1)); break;
       case 7: setStatus("The server is full right now — try again soon, or play offline", "bad"); state = "menu"; showMenu(); break;
     }
   }
@@ -1592,7 +1611,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         const gpu = R.gpuMs >= 0 ? `<b>${R.gpuMs.toFixed(2)} ms</b>` + (R.passMs ? " (" + R.passMs.map((v, i) => `${R.passNames[i]} ${v.toFixed(2)}`).join(" · ") + ")" : "") : R.canTime ? "…" : "n/a";
         const age = lastSnapAt ? Math.round(now - lastSnapAt) : -1;
         perfEl.innerHTML = `<b>${Math.round(fpsN / perfT)}</b> fps · <b>${R.name}</b> · online · CPU/frame: prep <b>${(prepMs / fpsN).toFixed(2)}</b> · draw <b>${(drawMs / fpsN).toFixed(2)}</b> ms` +
-          `<br>GPU ${gpu}<br>${foodHigh} food slots · ${frameOut[1]} snakes drawn · download <b>${(bytesIn / perfT / 1024).toFixed(1)} KB/s</b> · last update ${age} ms ago`;
+          `<br>GPU ${gpu}<br>${foodHigh} food slots · ${frameOut[1]} snakes drawn · ping <b>${Math.round(rttMs)} ms</b> · download <b>${(bytesIn / perfT / 1024).toFixed(1)} KB/s</b> · last update ${age} ms ago`;
       }
       perfT = 0; fpsN = 0; prepMs = drawMs = 0; bytesIn = 0;
     }
@@ -1600,6 +1619,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   resize();
   connect();
   window.__serpent = { renderer: () => R.name, state: () => ({ connected, me, state, foodHigh, alive: [...alive].reduce((a, b) => a + b, 0) }),
+                      dbg: () => ({ me, hx, hy, ha, shown, trail, pcOf, segN, mass, RING }), // drawn state, for tests
                       head: () => (me >= 0 ? { x: hx[me], y: hy[me], a: ha[me], pred: pred.on, err: pred.err } : null) };
   requestAnimationFrame((t) => { last = t; frame(t); });
 })();

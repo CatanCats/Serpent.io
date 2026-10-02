@@ -35,6 +35,9 @@ online/
   instead of queueing a backlog.
 - **The browser** draws ~70 ms in the past and interpolates between snapshots, so
   movement is smooth at any refresh rate, using the offline game's WebGPU/WebGL renderers.
+- **Delay compensation:** the page measures its round trip with tiny pings when it connects
+  and every 4 s, and tells the server. When judging whether *you* crashed, the server ignores the
+  part of other snakes that was laid too recently to be on your screen yet, given your delay.
 - **Your own snake is predicted** in the browser (same turning and speed rules as the
   simulation), so it turns the moment you move the mouse instead of a round trip plus
   ~70 ms later; the server stays in charge and the prediction is corrected smoothly

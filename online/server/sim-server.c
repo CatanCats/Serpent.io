@@ -108,6 +108,9 @@ static float focX[MAXS + 1], focY[MAXS + 1], focR[MAXS + 1]; static i32 focS[MAX
 static i32 foodNear[MAXS + 1];
 static float foodR(i32 f) { return focR[f] * 1.25f; } /* food exists inside this disk */
 static u8 human[MAXS];           /* slot belongs to a network player */
+/* How far behind a player's screen shows the other snakes, in steps: their measured
+   network round trip plus the page's smoothing delay (set by the server, see sim_set_lag). */
+static float lagSteps[MAXS];
 static i32 killedBy[MAXS];       /* who killed each human (-1: the world edge) */
 static float aspect[MAXS];       /* each player's screen width/height: sets its view */
 static i32 NB = 60;              /* bots live in slots 1..NB */
@@ -473,6 +476,15 @@ static i32 hitTest(i32 s) {
       i32 j = i & RMASK;
       float dx = UQ(tr[o][j][0]) - hx, dy = UQ(tr[o][j][1]) - hy, t = (k->r + S[o].r) * 0.66f;
       if (dx * dx + dy * dy >= t * t) continue;
+      /* Delay compensation: a player sees other snakes lagSteps late. Points the other
+         laid within that time (the very front of it) were not on the player's screen
+         yet, so the player cannot have steered around them: they don't count against
+         the player. (The other snake's own test is unaffected: if it rams the player's
+         body, it dies.) */
+      if (human[s] && lagSteps[s] > 0.f) {
+        float laid = lagSteps[s] * DT * (S[o].boost ? 430.f : 195.f) / S[o].spacing + 1.f;
+        if ((float)((S[o].pc - 1u - (u32)j) & RMASK) < laid) continue;
+      }
       /* Touching the other's head end (its newest points, about two radii): the heads
          are touching too, so both would "hit" and whichever is checked first would die.
          Decide fairly instead: the one driving INTO the other dies. A head ramming your
@@ -820,6 +832,7 @@ void sim_spawn_human(i32 s, i32 skin) {
   for (i32 f = 0; f < nfoc; f++) if (focS[f] == s) { countFood(f); maintainFood(f, 4000); }
   publish();
 }
+void sim_set_lag(i32 s, float steps) { if (s >= 0 && s < MAXS) lagSteps[s] = steps < 0.f ? 0.f : steps > 24.f ? 24.f : steps; }
 void sim_set_input(i32 s, float aim, i32 boost) {
   if (s < 0 || s >= MAXS || !human[s] || !S[s].alive) return;
   S[s].tang = wrapa(aim); S[s].wantBoost = boost != 0;
