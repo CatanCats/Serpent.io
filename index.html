@@ -331,8 +331,10 @@ function createGL(canvas, E) {
     vec2 l = q*(tiny ? r*.7+uPxTime.x*1.5 : r*${FOOD_GLOW});
     vec2 c = (c0+l)/uCamHalf.zw;
     gl_Position = vec4(c.x,-c.y,0,1);
-    uint age=(uint(uPxTime.w)-(aB.z|(aB.w<<8)))&0xffffu;
-    vL=l; vR=r; vI=uvec4(0u,aB.y,((aB.z|(aB.w<<8))*37u+uint(aP.x&255))&255u,min(age,255u)); vC=uPal[aB.y%12u].rgb; // pulse phase: from the pellet itself
+    // age in quarter-steps, smooth (the clock has fractions); a pellet "born in the future"
+    // (online: drawn slightly in the past) counts as just born, not wrapped round to fully grown
+    float age=mod(uPxTime.w-float(aB.z|(aB.w<<8)),65536.); if(age>60000.) age=0.;
+    vL=l; vR=r; vI=uvec4(0u,aB.y,((aB.z|(aB.w<<8))*37u+uint(aP.x&255))&255u,uint(min(age,255.)*16.)); vC=uPal[aB.y%12u].rgb; // pulse phase: from the pellet itself
   }`;
   const FS = `#version 300 es
   precision mediump float;
@@ -344,7 +346,7 @@ function createGL(canvas, E) {
     vec3 c=vC;
     highp float ph=uPxTime.y*4.+float(vI.z)*.0245;
     float pulse=.75+.25*sin(ph);
-    float born=smoothstep(0.,10.,float(vI.w));   // fade in over ~0.6 s: no popping
+    float born=smoothstep(0.,10.,float(vI.w)*.0625);   // fade in over ~0.6 s, smoothly every frame
     float rr=r*(.4+.6*born);
     if(d>=max(rr*${FOOD_GLOW},rr*.7+aa)) discard; // corner of the quad, outside the glow: nothing to blend
     float core=(1.-smoothstep(rr*.7-aa,rr*.7+aa,d))*born;
@@ -729,15 +731,17 @@ struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
   let tiny = r / F.pxTime.x < 1.6;                         // under ~1.6 px: no halo
   let l = q * select(r * ${FOOD_GLOW}, r * .7 + F.pxTime.x * 1.5, tiny);
   let c = (c0 + l) / F.camHalf.zw;
-  let age = (u32(F.pxTime.w) - (b.z | (b.w << 8u))) & 0xffffu;
-  o.pos = vec4f(c.x, -c.y, 0., 1.); o.l = l; o.r = r; o.info = vec4u(0u, b.y, (((b.z | (b.w << 8u)) * 37u + u32(pq.x & 255)) & 255u), min(age, 255u)); // pulse phase: from the pellet itself
+  // age in quarter-steps, smooth (the clock has fractions); "born in the future" (online:
+  // drawn slightly in the past) counts as just born, not wrapped round to fully grown
+  var age = F.pxTime.w - f32(b.z | (b.w << 8u)); age = age - 65536. * floor(age / 65536.); if (age > 60000.) { age = 0.; }
+  o.pos = vec4f(c.x, -c.y, 0., 1.); o.l = l; o.r = r; o.info = vec4u(0u, b.y, (((b.z | (b.w << 8u)) * 37u + u32(pq.x & 255)) & 255u), u32(min(age, 255.) * 16.)); // pulse phase: from the pellet itself
   o.col = PAL[b.y % 12u].rgb; return o;
 }
 @fragment fn fsFood(i: FoodO) -> @location(0) vec4f {
   let d = length(i.l); let r = i.r; let aa = F.pxTime.x * 1.2;
   let c = i.col;
   let pulse = .75 + .25 * sin(F.pxTime.y * 4. + f32(i.info.z) * .0245);
-  let born = smoothstep(0., 10., f32(i.info.w));
+  let born = smoothstep(0., 10., f32(i.info.w) * .0625); // fade in, smoothly every frame
   let rr = r * (.4 + .6 * born);
   if (d >= max(rr * ${FOOD_GLOW}, rr * .7 + aa)) { discard; } // corner of the quad, outside the glow: nothing to blend
   let core = hf((1. - smoothstep(rr * .7 - aa, rr * .7 + aa, d)) * born);
@@ -1575,7 +1579,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     miniPrep(camX, camY, hw, hh);
     frameOut[0] = foodHigh; frameOut[3] = ntup;
     frameBlk[0] = camX; frameBlk[1] = camY; frameBlk[2] = hw; frameBlk[3] = hh;
-    frameBlk[4] = px; frameBlk[5] = (now / 1000) % 3600; frameBlk[6] = vw / innerWidth; frameBlk[7] = (Math.floor(rt / 4) & 0xffff);
+    frameBlk[4] = px; frameBlk[5] = (now / 1000) % 3600; frameBlk[6] = vw / innerWidth; frameBlk[7] = ((rt / 4) % 65536 + 65536) % 65536; // food clock in quarter-steps, smooth (fractions)
     frameBlk[8] = vw; frameBlk[9] = vh; frameBlk[10] = WR; frameBlk[11] = 0;
     const t1 = performance.now();
     R.draw(frameNo++, playing, !perfEl.classList.contains("off"));

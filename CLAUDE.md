@@ -96,6 +96,7 @@ The online game is live at **https://br8t.com/slither.io/** (deployed 30 Sep 202
 - History on the owner's Intel iGPU: texture tile 1.97 ms → per-vertex grid 1.64 → clear-based 0.52 → flat lighter lines 0.26 (mid-map). The edge was 1.70 ms total GPU with the old glow; now all flat, not yet re-measured. Writing pixels is the real cost.
 
 ## Other GPU details
+- Food fade-in: `frameBlk[7]` is a **smooth** food clock in quarter-steps, with fractions: offline `(tick - 1 + alpha) / 4`, online `rt / 4`. The shaders compute `age = mod(clock - born, 65536)` as a float, and an age above 60000 ("born in the future", online, because the page draws about 4 steps in the past) counts as 0. The old integer clock grew pellets in 15 Hz jumps, and online a new pellet flashed at full size for about 4 frames before snapping small. `vI.w` carries `age × 16`.
 - Food: one 4-vertex quad per pellet, halo radius `FOOD_GLOW` = 1.7 pellet radii (was 1.9). An octagon version (fewer pixels, 8 vertices) measured slower on the owner's iGPU (food 0.20 → 0.33 ms) and was reverted.
 - Minimap: pixels that would add nothing are discarded (no blend), and the flat inside areas skip the edge maths.
 - No dynamic resolution: the owner asked that sharpness is never lowered automatically. Only the Quality setting (Sharp / Balanced / Fast) chooses the pixel density. Don't add it back.

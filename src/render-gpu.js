@@ -94,15 +94,17 @@ struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
   let tiny = r / F.pxTime.x < 1.6;                         // under ~1.6 px: no halo
   let l = q * select(r * ${FOOD_GLOW}, r * .7 + F.pxTime.x * 1.5, tiny);
   let c = (c0 + l) / F.camHalf.zw;
-  let age = (u32(F.pxTime.w) - (b.z | (b.w << 8u))) & 0xffffu;
-  o.pos = vec4f(c.x, -c.y, 0., 1.); o.l = l; o.r = r; o.info = vec4u(0u, b.y, (((b.z | (b.w << 8u)) * 37u + u32(pq.x & 255)) & 255u), min(age, 255u)); // pulse phase: from the pellet itself
+  // age in quarter-steps, smooth (the clock has fractions); "born in the future" (online:
+  // drawn slightly in the past) counts as just born, not wrapped round to fully grown
+  var age = F.pxTime.w - f32(b.z | (b.w << 8u)); age = age - 65536. * floor(age / 65536.); if (age > 60000.) { age = 0.; }
+  o.pos = vec4f(c.x, -c.y, 0., 1.); o.l = l; o.r = r; o.info = vec4u(0u, b.y, (((b.z | (b.w << 8u)) * 37u + u32(pq.x & 255)) & 255u), u32(min(age, 255.) * 16.)); // pulse phase: from the pellet itself
   o.col = PAL[b.y % 12u].rgb; return o;
 }
 @fragment fn fsFood(i: FoodO) -> @location(0) vec4f {
   let d = length(i.l); let r = i.r; let aa = F.pxTime.x * 1.2;
   let c = i.col;
   let pulse = .75 + .25 * sin(F.pxTime.y * 4. + f32(i.info.z) * .0245);
-  let born = smoothstep(0., 10., f32(i.info.w));
+  let born = smoothstep(0., 10., f32(i.info.w) * .0625); // fade in, smoothly every frame
   let rr = r * (.4 + .6 * born);
   if (d >= max(rr * ${FOOD_GLOW}, rr * .7 + aa)) { discard; } // corner of the quad, outside the glow: nothing to blend
   let core = hf((1. - smoothstep(rr * .7 - aa, rr * .7 + aa, d)) * born);

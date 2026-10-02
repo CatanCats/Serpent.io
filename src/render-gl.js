@@ -125,8 +125,10 @@ function createGL(canvas, E) {
     vec2 l = q*(tiny ? r*.7+uPxTime.x*1.5 : r*${FOOD_GLOW});
     vec2 c = (c0+l)/uCamHalf.zw;
     gl_Position = vec4(c.x,-c.y,0,1);
-    uint age=(uint(uPxTime.w)-(aB.z|(aB.w<<8)))&0xffffu;
-    vL=l; vR=r; vI=uvec4(0u,aB.y,((aB.z|(aB.w<<8))*37u+uint(aP.x&255))&255u,min(age,255u)); vC=uPal[aB.y%12u].rgb; // pulse phase: from the pellet itself
+    // age in quarter-steps, smooth (the clock has fractions); a pellet "born in the future"
+    // (online: drawn slightly in the past) counts as just born, not wrapped round to fully grown
+    float age=mod(uPxTime.w-float(aB.z|(aB.w<<8)),65536.); if(age>60000.) age=0.;
+    vL=l; vR=r; vI=uvec4(0u,aB.y,((aB.z|(aB.w<<8))*37u+uint(aP.x&255))&255u,uint(min(age,255.)*16.)); vC=uPal[aB.y%12u].rgb; // pulse phase: from the pellet itself
   }`;
   const FS = `#version 300 es
   precision mediump float;
@@ -138,7 +140,7 @@ function createGL(canvas, E) {
     vec3 c=vC;
     highp float ph=uPxTime.y*4.+float(vI.z)*.0245;
     float pulse=.75+.25*sin(ph);
-    float born=smoothstep(0.,10.,float(vI.w));   // fade in over ~0.6 s: no popping
+    float born=smoothstep(0.,10.,float(vI.w)*.0625);   // fade in over ~0.6 s, smoothly every frame
     float rr=r*(.4+.6*born);
     if(d>=max(rr*${FOOD_GLOW},rr*.7+aa)) discard; // corner of the quad, outside the glow: nothing to blend
     float core=(1.-smoothstep(rr*.7-aa,rr*.7+aa,d))*born;

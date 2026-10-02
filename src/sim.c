@@ -1008,7 +1008,7 @@ EXPORT("frame") void frame(float dt, float aim, i32 boost, i32 mode, float vw, f
   frameOut[2] = maxK; frameOut[3] = (i32)ntup;
   frameOut[4] = miniPrep(camX, camY, hw, hh);
   frameBlk[0] = camX; frameBlk[1] = camY; frameBlk[2] = hw; frameBlk[3] = hh;
-  frameBlk[4] = px; frameBlk[5] = time; frameBlk[6] = vw / cssW; frameBlk[7] = (float)((tick >> 2) & 0xffffu);
+  frameBlk[4] = px; frameBlk[5] = time; frameBlk[6] = vw / cssW; frameBlk[7] = ((float)(tick & 0x3ffffu) - 1.f + alpha) * 0.25f; /* food clock in quarter-steps, at the drawn moment (smooth) */
   frameBlk[8] = vw; frameBlk[9] = vh; frameBlk[10] = WR; frameBlk[11] = 0;
   frameMs[0] = (float)(t1 - t0); frameMs[1] = (float)(nowMs() - t1);
 }
