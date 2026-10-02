@@ -491,7 +491,18 @@ static i32 hitTest(i32 s) {
       if (o == s) continue;
       i32 j = i & RMASK;
       float dx = UQ(tr[o][j][0]) - hx, dy = UQ(tr[o][j][1]) - hy, t = (k->r + S[o].r) * 0.66f;
-      if (dx * dx + dy * dy < t * t) return o;
+      if (dx * dx + dy * dy >= t * t) continue;
+      /* Touching the other's head end (its newest points, about two radii): the heads
+         are touching too, so both would "hit" and whichever is checked first would die.
+         Decide fairly instead: the one driving INTO the other dies. A head ramming your
+         neck from the side dies; your head, moving along, is spared. */
+      if (((S[o].pc - 1u - (u32)j) & RMASK) < 6u) {
+        Snake *q = &S[o];
+        float ox = q->hx - hx, oy = q->hy - hy;
+        float mine = k->dcx * ox + k->dcy * oy, theirs = -(q->dcx * ox + q->dcy * oy); /* closing speed of each head */
+        if (mine < theirs) continue; /* it is ramming me: it dies in its own test */
+      }
+      return o;
     }
   return -1;
 }
