@@ -42,7 +42,8 @@ extern "C" {
     fn sim_add_human() -> i32;
     fn sim_remove_human(s: i32);
     fn sim_spawn_human(s: i32, skin: i32);
-    fn sim_set_input(s: i32, aim: f32, boost: i32);
+    fn sim_set_input(s: i32, aim: f32, boost: i32, late: i32);
+    fn sim_set_jitter(s: i32, steps: i32);
     fn sim_set_lag(s: i32, steps: f32);
     fn sim_set_aspect(s: i32, a: f32);
     fn sim_set_menu_focus(on: i32, x: f32, y: f32, r: f32);
@@ -86,7 +87,8 @@ impl Sim {
 
 /* ---------------- protocol (little-endian; mirrored in online/client/client.js) ----------------
  client -> server:  1 JOIN  u8 skin, u16 aspect*1000, u8 len, name   (also respawns)
-                    2 INPUT u16 aim (-pi..pi), u8 boost, u8 seq (counts up; echoed back for the client's prediction)
+                    2 INPUT u16 aim (-pi..pi), u8 boost, u8 seq (counts up; echoed back for the client's prediction),
+                          u16 when it was made (the page's clock, ms): how late each input arrives, see on_input
                     3 VIEW  u16 aspect*1000
                     4 LEAVE (back to the menu)
                     5 PING  u8 id   (answered at once with PONG, by the connection, not the game loop)
@@ -127,7 +129,7 @@ impl Out {
     fn patch16(&mut self, at: usize, v: u16) { self.0[at..at + 2].copy_from_slice(&v.to_le_bytes()) }
 }
 
-enum Ev { Open { id: u64, tx: mpsc::Sender<Vec<u8>> }, Msg { id: u64, data: Vec<u8> }, Close { id: u64 } }
+enum Ev { Open { id: u64, tx: mpsc::Sender<Vec<u8>> }, Msg { id: u64, data: Vec<u8>, at: Instant }, Close { id: u64 } }
 
 struct Client {
     tx: mpsc::Sender<Vec<u8>>,
@@ -140,6 +142,8 @@ struct Client {
     pend: Vec<u8>,         // food changes in those sectors since the last snapshot
     npend: u32,
     rtt_ms: u16,           // its measured network round trip
+    clk: i64, clk_lo: u16, clk_ok: bool, // the page's clock, unwrapped from its 16-bit stamps
+    offs: std::collections::VecDeque<i64>, lates: std::collections::VecDeque<u8>, jitter: i32, late_max: i32, // (late_max: for the log)
     in_seq: u8, in_tick: u32, // the last input it sent and the step count when it arrived
     reset: bool,           // a snapshot was dropped: resend everything
     cap: usize,            // size of its last snapshot: the next buffer is allocated once, right-sized
@@ -159,7 +163,7 @@ fn clean_name(b: &[u8]) -> String {
 
 struct Game {
     sim: Sim, clients: HashMap<u64, Client>, names: Vec<String>,
-    spectate: usize, spec_t: f32, stats: Arc<Stats>, snakes_out: Vec<SnakeOut>, live: Vec<u8>,
+    t0: Instant, spectate: usize, spec_t: f32, stats: Arc<Stats>, snakes_out: Vec<SnakeOut>, live: Vec<u8>,
     food: FoodIndex,
 }
 
@@ -180,14 +184,14 @@ impl Game {
             Ev::Open { id, tx } => {
                 let players = self.clients.values().filter(|c| c.slot >= 0).count().min(255) as u8;
                 let mut c = Client { tx, slot: -1, alive: false, aspect: 1.78, last: (0., 0., 900.), sent_pc: vec![0; self.sim.maxs], sent_from: vec![0; self.sim.maxs], sent_head: vec![(0, 0, 0); self.sim.maxs],
-                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, rtt_ms: 0, in_seq: 0, in_tick: 0, reset: false, cap: 1024, msgs: 0 };
+                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, rtt_ms: 0, clk: 0, clk_lo: 0, clk_ok: false, offs: Default::default(), lates: Default::default(), jitter: -1, late_max: 0, in_seq: 0, in_tick: 0, reset: false, cap: 1024, msgs: 0 };
                 let mut o = Out(Vec::new());
                 o.u8(1); o.u8(self.sim.maxs as u8); o.u16(self.sim.ring as u16); o.f32(self.sim.wr); o.u8(self.sim.bots as u8); o.u8(players);
                 Self::send(&mut c, o.0);
                 for s in 0..self.sim.maxs { if !self.names[s].is_empty() { let m = self.name_msg(s); Self::send(&mut c, m); } }
                 self.clients.insert(id, c);
             }
-            Ev::Msg { id, data } => self.on_msg(id, &data),
+            Ev::Msg { id, data, at } => self.on_msg(id, &data, at),
             Ev::Close { id } => { if let Some(mut c) = self.clients.remove(&id) { self.food.resubscribe(id, c.rect, Rect::EMPTY); self.leave(&mut c); } }
         }
     }
@@ -201,7 +205,7 @@ impl Game {
         let m = self.name_msg(s); self.broadcast(m);
     }
 
-    fn on_msg(&mut self, id: u64, d: &[u8]) {
+    fn on_msg(&mut self, id: u64, d: &[u8], at: Instant) {
         let Some(mut c) = self.clients.remove(&id) else { return };
         c.msgs += 1;
         if c.msgs <= 240 && !d.is_empty() && d.len() <= 64 {
@@ -217,7 +221,7 @@ impl Game {
                     let s = c.slot as usize;
                     self.names[s] = clean_name(&d[5..5 + len]);
                     c.aspect = aspect;
-                    unsafe { sim_set_aspect(c.slot, aspect); sim_spawn_human(c.slot, d[1] as i32); sim_set_lag(c.slot, lag_steps(c.rtt_ms)); }
+                    unsafe { sim_set_aspect(c.slot, aspect); sim_spawn_human(c.slot, d[1] as i32); sim_set_lag(c.slot, lag_steps(c.rtt_ms)); if c.jitter >= 0 { sim_set_jitter(c.slot, c.jitter); } }
                     c.alive = true; c.sent_pc.iter_mut().for_each(|v| *v = 0);
                     let m = self.name_msg(s);
                     self.clients.insert(id, c);
@@ -226,7 +230,8 @@ impl Game {
                 }
                 2 if d.len() >= 4 && c.slot >= 0 => {
                     let aim = u16::from_le_bytes([d[1], d[2]]) as f32 / 65535. * std::f32::consts::TAU - std::f32::consts::PI;
-                    unsafe { sim_set_input(c.slot, aim, d[3] as i32) };
+                    let late = if d.len() >= 7 { self.input_late(&mut c, u16::from_le_bytes([d[5], d[6]]), at) } else { 0 };
+                    unsafe { sim_set_input(c.slot, aim, d[3] as i32, late) };
                     if d.len() >= 5 { c.in_seq = d[4]; c.in_tick = unsafe { sim_tick() }; } // applied by the next step
                 }
                 3 if d.len() >= 3 => {
@@ -242,6 +247,26 @@ impl Game {
             }
         }
         self.clients.insert(id, c);
+    }
+
+    /// How many steps late this input arrived, compared with this player's normal delay:
+    /// (arrival - when it was made) minus the smallest such gap seen lately. Inputs on a steady
+    /// connection come out at 0, so there is nothing to make up for; a lag spike shows up here.
+    /// Also keeps the player's usual lateness (90th percentile) up to date: how long the server
+    /// waits, after a hit, for an input still on its way.
+    fn input_late(&self, c: &mut Client, made: u16, at: Instant) -> i32 {
+        c.clk = if c.clk_ok { c.clk + made.wrapping_sub(c.clk_lo) as i16 as i64 } else { made as i64 };
+        c.clk_lo = made; c.clk_ok = true;
+        let off = at.duration_since(self.t0).as_millis() as i64 - c.clk;
+        c.offs.push_back(off); if c.offs.len() > 180 { c.offs.pop_front(); }
+        let base = *c.offs.iter().min().unwrap();
+        let late = (((off - base) as f32 / (1000. / 60.)).round() as i32).clamp(0, 12);
+        c.late_max = c.late_max.max(late);
+        c.lates.push_back(late as u8); if c.lates.len() > 180 { c.lates.pop_front(); }
+        let mut v: Vec<u8> = c.lates.iter().copied().collect(); v.sort_unstable();
+        let jitter = v[(v.len() * 9) / 10].min(9) as i32 + 1;
+        if jitter != c.jitter && c.slot >= 0 { c.jitter = jitter; unsafe { sim_set_jitter(c.slot, jitter) }; }
+        late
     }
 
     fn pick_spectate(&mut self) {
@@ -542,7 +567,7 @@ fn game_thread(rx: smpsc::Receiver<Ev>, stats: Arc<Stats>, bots: i32) {
     let seed = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u32) | 1;
     let sim = Sim::new(seed, bots);
     let (maxs, maxf) = (sim.maxs, sim.maxf);
-    let mut g = Game { sim, clients: HashMap::new(), names: vec![String::new(); maxs], spectate: 1, spec_t: 99., stats: stats.clone(), food: FoodIndex::new(maxf), snakes_out: Vec::new(), live: Vec::new() };
+    let mut g = Game { t0: Instant::now(), sim, clients: HashMap::new(), names: vec![String::new(); maxs], spectate: 1, spec_t: 99., stats: stats.clone(), food: FoodIndex::new(maxf), snakes_out: Vec::new(), live: Vec::new() };
     let dt = Duration::from_nanos(1_000_000_000 / 60);
     let mut next = Instant::now();
     let mut log_t = Instant::now();
@@ -556,8 +581,10 @@ fn game_thread(rx: smpsc::Receiver<Ev>, stats: Arc<Stats>, bots: i32) {
         next += dt;
         if log_t.elapsed() > Duration::from_secs(std::env::var("LOG_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30)) {
             let (s, n) = (stats.step_ns.swap(0, Relaxed), stats.send_ns.swap(0, Relaxed));
-            println!("players {} · connections {} · sim {:.0} µs/step · network {:.0} µs/step",
-                     stats.players.load(Relaxed), stats.conns.load(Relaxed), s as f64 / 1e3 / steps as f64, n as f64 / 1e3 / steps as f64);
+            let lates: Vec<(i32, i32)> = g.clients.values().filter(|c| c.slot >= 0 && c.jitter >= 0).map(|c| (c.jitter - 1, c.late_max)).collect();
+            for c in g.clients.values_mut() { c.late_max = 0; }
+            println!("players {} · connections {} · sim {:.0} µs/step · network {:.0} µs/step · input lateness in steps (usual, max) {:?}",
+                     stats.players.load(Relaxed), stats.conns.load(Relaxed), s as f64 / 1e3 / steps as f64, n as f64 / 1e3 / steps as f64, lates);
             steps = 0; log_t = Instant::now();
         }
     }
@@ -600,7 +627,7 @@ async fn connection(sock: WebSocket, app: Arc<App>, ip: IpAddr) {
     while let Some(Ok(msg)) = stream.next().await {
         match msg {
             Message::Binary(b) if b.len() == 2 && b[0] == 5 => { let _ = pong_tx.try_send(vec![8, b[1]]); }
-            Message::Binary(b) => { let _ = app.ev.lock().unwrap().send(Ev::Msg { id, data: b.to_vec() }); }
+            Message::Binary(b) => { let _ = app.ev.lock().unwrap().send(Ev::Msg { id, data: b.to_vec(), at: Instant::now() }); }
             Message::Close(_) => break,
             _ => {}
         }

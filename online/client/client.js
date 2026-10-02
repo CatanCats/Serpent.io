@@ -318,11 +318,12 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   function sendInput(now, aim, b) {
     if (Math.abs(aim - lastAimSent) < 0.004 && b === lastBoostSent && now - lastInputAt < 250) return;
     if (now - lastInputAt < 15 && b === lastBoostSent) return; // at most ~60/s
-    const u = new Uint8Array(5), dv = new DataView(u.buffer);
+    const u = new Uint8Array(7), dv = new DataView(u.buffer);
     let a = aim; while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI;
     const q = Math.round(((a + Math.PI) / (2 * Math.PI)) * 65535);
     inSeq = (inSeq + 1) & 255; sentAt[inSeq] = now;
     u[0] = 2; dv.setUint16(1, q, true); u[3] = b; u[4] = inSeq;
+    dv.setUint16(5, Math.floor(now) & 0xffff, true); // when it was made (this page's clock, ms): the server sees how late each input arrives
     sendRaw(u); lastAimSent = aim; lastBoostSent = b; lastInputAt = now;
     sentAim = q / 65535 * 2 * Math.PI - Math.PI; // exactly what the server will steer toward
   }

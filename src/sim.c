@@ -378,6 +378,9 @@ static float spawnRoom(i32 self, float x, float y) {
     if (o == self || !S[o].alive) continue;
     float dx = S[o].hx - x, dy = S[o].hy - y, d2 = dx * dx + dy * dy, reach = (float)S[o].n * S[o].spacing;
     if (d2 < best) best = d2;
+    /* where its head will be in about 1.5 s: don't appear in front of a moving snake */
+    float fx = S[o].hx + S[o].dcx * 300.f - x, fy = S[o].hy + S[o].dcy * 300.f - y, f2 = fx * fx + fy * fy;
+    if (f2 < best) best = f2;
     if (d2 > (reach + 1000.f) * (reach + 1000.f)) continue; /* its whole body is far away */
     for (i32 j = 8; j < S[o].n; j += 8) {
       float bx = TX(o, j) - x, by = TY(o, j) - y, b2 = bx * bx + by * by;
@@ -387,22 +390,34 @@ static float spawnRoom(i32 self, float x, float y) {
   return sqrtf_(best);
 }
 #define SPAWN_GAP 600.f /* no other snake (head or body) closer than this to a new one, when possible */
+/* Room for a whole new snake: its head at (x, y) and its straight body laid back along -(cx, cy)
+   for len units. The body needs a third of the head's room; it must lie inside the world. */
+static float spawnFit(i32 self, float x, float y, float cx, float cy, float len) {
+  float c = spawnRoom(self, x, y), lim = WR * 0.97f;
+  for (float d = 120.f; d < len + 60.f && c > 0.f; d += 120.f) {
+    float px = x - cx * d, py = y - cy * d;
+    if (px * px + py * py > lim * lim) return 0.f;
+    float b = spawnRoom(self, px, py) * 3.f;
+    if (b < c) c = b;
+  }
+  return c;
+}
 
 static void spawnSnake(i32 s, float mass, i32 skin) {
   i32 bot = s != 0;
   Snake *k = &S[s];
-  float x = 0, y = 0, bx = 0, by = 0, bc = -1.f;
+  float x = 0, y = 0, bx = 0, by = 0, bc = -1.f, ba = 0.f, len = (float)segsFor(mass) * radiusFor(mass) * 0.42f;
   for (i32 t = 0; t < 40; t++) { /* the first spot at least SPAWN_GAP from everyone, else the roomiest tried */
     if (!bot) randomRing(WR * 0.72f, WR * 0.86f, &x, &y); /* player: outer rim */
     else randomRing(WR * 0.4f, WR * 0.88f, &x, &y);     /* bots: anywhere but the middle */
     float dx = x - focX, dy = y - focY;
     if (bot && t < 30 && dx * dx + dy * dy < (focR + 300.f) * (focR + 300.f)) continue; /* never pop in on screen */
-    float c = spawnRoom(s, x, y);
-    if (c > bc) { bc = c; bx = x; by = y; }
+    float a = frand() * TAU - PI, c = spawnFit(s, x, y, cosf_(a), sinf_(a), len); /* the head, and the body behind it */
+    if (c > bc) { bc = c; bx = x; by = y; ba = a; }
     if (c >= SPAWN_GAP) break;
   }
   x = bx; y = by;
-  k->ang = k->tang = frand() * TAU - PI; k->dcx = cosf_(k->ang); k->dcy = sinf_(k->ang);
+  k->ang = k->tang = ba; k->dcx = cosf_(k->ang); k->dcy = sinf_(k->ang);
   k->mass = mass; k->r = radiusFor(mass); k->spacing = k->r * 0.42f; k->n = segsFor(mass);
   k->skin = skin; k->kills = 0; k->boost = k->wantBoost = 0;
   k->dropT = k->dropMass = 0; k->aiT = 0; k->huntT = 0; k->target = -1; k->near = 1; k->rushT = 0; k->orbit = 1;

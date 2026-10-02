@@ -111,17 +111,20 @@ static u8 human[MAXS];           /* slot belongs to a network player */
 /* How far behind a player's screen shows the other snakes, in steps: their measured
    network round trip plus the page's smoothing delay (set by the server, see sim_set_lag). */
 static float lagSteps[MAXS];
-/* Grace for a slow connection: a player's turn reaches the server about half a round trip
-   after they made it. When a player's head hits a snake, the death waits graceSteps[s]
-   (their measured one-way delay + 2 steps). Each step of it, the server replays the
-   player's recent steps as if every aim had arrived on time (made one-way-delay earlier):
-   if that path is clear, the player lives, on that path. If not, and no turn arrives in
-   time, the death stands, so nobody glides through a body by going straight. The world's
-   edge gets no grace. */
+/* Late inputs (online). The page predicts its own snake, so an input that arrives with
+   the player's usual delay is on time: the server applies it exactly where the page showed
+   it. Only a lag spike makes one late; the server measures that per input (main.rs:
+   input_late) and passes it with the input.
+   When a player's head hits a snake, the death waits graceSteps[s] (the player's usual
+   lateness + 1) for inputs still on their way. Each step of the wait, the server replays the
+   player's recent steps with every late input moved back to when it should have arrived:
+   if that path is clear, the player lives, on that path. On-time inputs are never moved,
+   so a turn made after hitting a snake never saves anyone. */
 static float graceSteps[MAXS];
 static i32 pendT[MAXS], pendK[MAXS]; /* pendT: steps waited + 1 (0 = none) */
-/* Each player's head before each of the last 32 steps, for rewinding (see rescue). */
-typedef struct { float hx, hy, ang, dcx, dcy, aim; u32 pc, wantBoost; } HState; /* aim, wantBoost: the input as it arrived */
+static i32 inArrived[MAXS], inLate[MAXS]; /* an input arrived since the last step, and how many steps late */
+/* Each player's state before each of the last 32 steps, for replays (see rescue). */
+typedef struct { float hx, hy, ang, dcx, dcy, aim; u32 pc, wantBoost, arrived, late; } HState; /* aim, wantBoost: the input in effect */
 static HState hist[MAXS][32];
 static i32 killedBy[MAXS];       /* who killed each human (-1: the world edge) */
 static float aspect[MAXS];       /* each player's screen width/height: sets its view */
@@ -376,6 +379,9 @@ static float spawnRoom(i32 self, float x, float y) {
     if (o == self || !S[o].alive) continue;
     float dx = S[o].hx - x, dy = S[o].hy - y, d2 = dx * dx + dy * dy, reach = (float)S[o].n * S[o].spacing;
     if (d2 < best) best = d2;
+    /* where its head will be in about 1.5 s: don't appear in front of a moving snake */
+    float fx = S[o].hx + S[o].dcx * 300.f - x, fy = S[o].hy + S[o].dcy * 300.f - y, f2 = fx * fx + fy * fy;
+    if (f2 < best) best = f2;
     if (d2 > (reach + 1000.f) * (reach + 1000.f)) continue; /* its whole body is far away */
     for (i32 j = 8; j < S[o].n; j += 8) {
       float bx = TX(o, j) - x, by = TY(o, j) - y, b2 = bx * bx + by * by;
@@ -385,21 +391,33 @@ static float spawnRoom(i32 self, float x, float y) {
   return sqrtf_(best);
 }
 #define SPAWN_GAP 600.f /* no other snake (head or body) closer than this to a new one, when possible */
+/* Room for a whole new snake: its head at (x, y) and its straight body laid back along -(cx, cy)
+   for len units. The body needs a third of the head's room; it must lie inside the world. */
+static float spawnFit(i32 self, float x, float y, float cx, float cy, float len) {
+  float c = spawnRoom(self, x, y), lim = WR * 0.97f;
+  for (float d = 120.f; d < len + 60.f && c > 0.f; d += 120.f) {
+    float px = x - cx * d, py = y - cy * d;
+    if (px * px + py * py > lim * lim) return 0.f;
+    float b = spawnRoom(self, px, py) * 3.f;
+    if (b < c) c = b;
+  }
+  return c;
+}
 
 static void spawnSnake(i32 s, float mass, i32 skin) {
   i32 bot = !human[s];
   Snake *k = &S[s];
-  float x = 0, y = 0, bx = 0, by = 0, bc = -1.f;
+  float x = 0, y = 0, bx = 0, by = 0, bc = -1.f, ba = 0.f, len = (float)segsFor(mass) * radiusFor(mass) * 0.42f;
   for (i32 t = 0; t < 40; t++) { /* the first spot at least SPAWN_GAP from everyone, else the roomiest tried */
     if (!bot) randomRing(WR * 0.72f, WR * 0.86f, &x, &y); /* players: outer rim */
     else randomRing(WR * 0.4f, WR * 0.88f, &x, &y);     /* bots: anywhere but the middle */
     if (bot && t < 30 && nearFocus(x, y, 300.f)) continue; /* never pop in on anyone's screen */
-    float c = spawnRoom(s, x, y);
-    if (c > bc) { bc = c; bx = x; by = y; }
+    float a = frand() * TAU - PI, c = spawnFit(s, x, y, cosf_(a), sinf_(a), len); /* the head, and the body behind it */
+    if (c > bc) { bc = c; bx = x; by = y; ba = a; }
     if (c >= SPAWN_GAP) break;
   }
   x = bx; y = by;
-  k->ang = k->tang = frand() * TAU - PI; k->dcx = cosf_(k->ang); k->dcy = sinf_(k->ang);
+  k->ang = k->tang = ba; k->dcx = cosf_(k->ang); k->dcy = sinf_(k->ang);
   k->mass = mass; k->r = radiusFor(mass); k->spacing = k->r * 0.42f; k->n = segsFor(mass);
   k->skin = skin; k->kills = 0; k->boost = k->wantBoost = 0;
   k->dropT = k->dropMass = 0; k->aiT = 0; k->huntT = 0; k->target = -1; k->near = 1; k->rushT = 0; k->orbit = 1;
@@ -478,27 +496,39 @@ static void moveSnake(i32 s, float dt) {
 
 static i32 hitAt(i32 s, float hx, float hy, float hdx, float hdy);
 static void moveSnake(i32 s, float dt);
-/* Player s's inputs reach the server R steps after they were made. Replay its last W steps
-   as if each input (aim and boost) had arrived on time, i.e. the input that arrived R steps
-   later (or the current one), with the other snakes as they are now. Only when that changes
-   the path (a turn or boost really was late), and only if the new path is clear, is it
-   committed: return 1. */
-static i32 rescue(i32 s, i32 R, i32 W) {
+/* Replay player s's last W steps with each late input moved back to the step it should
+   have arrived at (others as they are now). Only if that changes some input, and the new
+   head path is clear, is it committed: return 1. */
+static i32 rescue(i32 s, i32 W) {
   Snake *k = &S[s];
-  if (R < 1) R = 1;
+  /* reach back at least to the step the earliest late input was meant for */
+  for (u32 u = tick - 30u; (i32)(u - tick) <= 0; u++) {
+    HState *e = &hist[s][u & 31u];
+    if (e->arrived && e->late && k->pc - e->pc <= 128u) { i32 need = (i32)(tick - (u - e->late)) + 1; if (need > W) W = need; }
+  }
   if (W > 30) W = 30;
-  if (W < R) W = R;
+  if (W < 1) W = 1;
   u32 t0 = tick - (u32)W + 1u; /* the first replayed step */
   HState h = hist[s][t0 & 31u];
   if (k->pc - h.pc > 128u || k->pc - h.pc + (u32)k->n + 8u > RING) return 0; /* history doesn't reach (or respawned) */
   float aims[32]; i32 boosts[32], late = 0;
   for (i32 i = 0; i < W; i++) {
-    u32 t = t0 + (u32)i + (u32)R, now = (i32)(tick - t) >= 0;
-    aims[i] = now ? hist[s][t & 31u].aim : k->tang; boosts[i] = now ? (i32)hist[s][t & 31u].wantBoost : k->wantBoost;
-    HState *o = &hist[s][(t0 + (u32)i) & 31u]; float d = wrapa(aims[i] - o->aim);
-    late |= d > 0.05f || d < -0.05f || boosts[i] != (i32)o->wantBoost;
+    u32 t = t0 + (u32)i;
+    /* the input in effect at step t if every input had arrived on time: of the inputs that
+       arrived up to now, the one meant for the latest step <= t */
+    i32 best = -1; u32 bestMeant = 0;
+    for (u32 u = tick - 30u; (i32)(u - tick) <= 0; u++) {
+      HState *e = &hist[s][u & 31u];
+      if (!e->arrived || k->pc - e->pc > 128u) continue; /* (an entry from a previous life doesn't count) */
+      u32 meant = u - e->late;
+      if ((i32)(meant - t) <= 0 && (best < 0 || (i32)(meant - bestMeant) >= 0)) { best = (i32)u; bestMeant = meant; }
+    }
+    HState *src = best >= 0 ? &hist[s][(u32)best & 31u] : &hist[s][(t0 - 1u) & 31u];
+    aims[i] = src->aim; boosts[i] = (i32)src->wantBoost;
+    HState *o = &hist[s][t & 31u]; float d = wrapa(aims[i] - o->aim);
+    late |= d > 0.01f || d < -0.01f || boosts[i] != (i32)o->wantBoost;
   }
-  if (!late) return 0; /* no input was in flight: the hit stands as it happened */
+  if (!late) return 0; /* nothing arrived late: the hit stands as it happened */
   /* dry run: the head only, steered and sped exactly as moveSnake does */
   float x = h.hx, y = h.hy, a = h.ang, dx = h.dcx, dy = h.dcy;
   float turn = 5.2f / (1.f + (k->r - 12.f) * 0.045f) * DT;
@@ -829,7 +859,7 @@ static void step(float dt) {
     if (!k->alive) continue;
     /* far bots move every 4th step; they recheck on those steps too (the near
        zone already reaches 450 units past each player's screen) */
-    if (human[s]) { k->near = 1; hist[s][tick & 31] = (HState){k->hx, k->hy, k->ang, k->dcx, k->dcy, k->tang, k->pc, (u32)k->wantBoost}; }
+    if (human[s]) { k->near = 1; hist[s][tick & 31] = (HState){k->hx, k->hy, k->ang, k->dcx, k->dcy, k->tang, k->pc, (u32)k->wantBoost, (u32)inArrived[s], (u32)inLate[s]}; inArrived[s] = 0; inLate[s] = 0; }
     else if (k->near || ((tick + (u32)s) & 3u) == 0) k->near = snakeNear(s, k->hx, k->hy, k->r * 2.f);
     if (k->near) moveSnake(s, dt);
     else if (((tick + (u32)s) & 3u) == 0) moveSnake(s, dt * 4.f); /* far away: quarter rate, same speed */
@@ -839,12 +869,11 @@ static void step(float dt) {
   for (i32 s = 0; s < NS; s++) {
     if (!S[s].alive || !S[s].near) continue;
     i32 h = hitTest(s);
-    if (human[s] && graceSteps[s] > 0.f && h != -2) {
-      i32 R = (i32)(graceSteps[s] - 2.f + 0.5f) + 1;                  /* how late its inputs arrive, in steps */
+    if (human[s] && h != -2) {
       if (h >= 0 && !pendT[s]) { pendT[s] = 1; pendK[s] = h; }
       if (pendT[s]) {
-        /* replay with its inputs on time; covers turns that arrived before the hit and ones still arriving */
-        if (rescue(s, R, R + pendT[s] + 12)) { pendT[s] = 0; rescued[s] = 1; anyRescue = 1; continue; } /* clear: lives */
+        /* replay with late inputs moved to when they should have arrived */
+        if (rescue(s, pendT[s] + 13)) { pendT[s] = 0; rescued[s] = 1; anyRescue = 1; continue; } /* clear: lives */
         if ((float)pendT[s]++ < graceSteps[s]) continue;              /* a turn may still be on its way */
         if (h == -1) h = pendK[s];                                     /* the first hit stands */
         pendT[s] = 0;
@@ -916,7 +945,7 @@ void sim_remove_human(i32 s) {
 }
 /* (Re)spawn a player's snake on the outer rim, like offline. */
 void sim_spawn_human(i32 s, i32 skin) {
-  if (s >= 0 && s < MAXS) pendT[s] = 0;
+  if (s >= 0 && s < MAXS) { pendT[s] = 0; inArrived[s] = 0; if (graceSteps[s] < 1.f) graceSteps[s] = 1.f; }
   if (s < 0 || s >= MAXS || !human[s] || S[s].alive) return;
   S[s].tier = 0; killedBy[s] = -1;
   spawnSnake(s, 10.f, (skin % 12 + 12) % 12);
@@ -924,15 +953,12 @@ void sim_spawn_human(i32 s, i32 skin) {
   for (i32 f = 0; f < nfoc; f++) if (focS[f] == s) { countFood(f); maintainFood(f, 4000); }
   publish();
 }
-void sim_set_lag(i32 s, float steps) {
-  if (s < 0 || s >= MAXS) return;
-  lagSteps[s] = steps < 0.f ? 0.f : steps > 24.f ? 24.f : steps;
-  /* steps = round trip + 5: the turn needs about half the round trip, plus a step to be applied */
-  graceSteps[s] = lagSteps[s] > 5.f ? minf((lagSteps[s] - 5.f) * 0.5f + 2.f, 14.f) : 0.f;
-}
-void sim_set_input(i32 s, float aim, i32 boost) {
+void sim_set_lag(i32 s, float steps) { if (s >= 0 && s < MAXS) lagSteps[s] = steps < 0.f ? 0.f : steps > 24.f ? 24.f : steps; }
+void sim_set_jitter(i32 s, i32 steps) { if (s >= 0 && s < MAXS) graceSteps[s] = (float)(steps < 1 ? 1 : steps > 10 ? 10 : steps); }
+void sim_set_input(i32 s, float aim, i32 boost, i32 late) {
   if (s < 0 || s >= MAXS || !human[s] || !S[s].alive) return;
   S[s].tang = wrapa(aim); S[s].wantBoost = boost != 0;
+  inArrived[s] = 1; inLate[s] = late < 0 ? 0 : late > 12 ? 12 : late;
 }
 void sim_set_menu_focus(i32 on, float x, float y, float r) {
   float dx = x - exX, dy = y - exY;
