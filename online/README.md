@@ -38,6 +38,9 @@ online/
 - **Delay compensation:** the page measures its round trip with tiny pings when it connects
   and every 4 s, and tells the server. When judging whether *you* crashed, the server ignores the
   part of other snakes that was laid too recently to be on your screen yet, given your delay.
+- **Late turns count:** if you hit a snake, the server waits for your delay before deciding.
+  It replays your last moments as if your turns had arrived on time; if that path is clear,
+  you live. Going straight into a body still kills you.
 - **Your own snake is predicted** in the browser (same turning and speed rules as the
   simulation), so it turns the moment you move the mouse instead of a round trip plus
   ~70 ms later; the server stays in charge and the prediction is corrected smoothly
