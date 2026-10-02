@@ -68,11 +68,19 @@ The online game is live at **https://br8t.com/slither.io/** (deployed 30 Sep 202
 - **Delay compensation** (online): when the page connects it sends 5 PINGs (type 5), then one every 4 s. The connection task answers each at once with PONG (8), not via the game loop. The page sends the median of the last 5 round trips as DELAY (6, u16 ms) when it changes by more than 8 ms, and on every join. The server turns that into `lag_steps = rtt × 0.06 + 5` (round trip in steps + INTERP 4 + half a snapshot) and calls `sim_set_lag`. In `hitTest` for a human, another snake's points laid within that many steps (`lag × DT × speed / spacing + 1`) don't count: they weren't on the player's screen yet. Bots' own tests are unchanged, so a bot that rams you still dies. Capped at 24 steps. Tested by placing snakes in `sim-server.c` (`human[0] = 1`; its grid covers the whole world, so `syncBody()` after placing). With 100 ms ping, a snake that crossed 3 points ago no longer kills you; one that crossed 17 points ago still does. Headless Chromium measures about 100 ms too high, because its main thread is slow under software rendering; Node measures the true value.
 - The online P panel shows `ping`.
 - **Late-turn rescue** (`rescue()` in `sim-server.c`): when a player's head hits a snake (not the world edge), the death waits `graceSteps` = one-way delay in steps + 2 (from `sim_set_lag`, max 14).
-  - Each step of that wait, the server replays the player's last W = R + waited + 12 steps (max 30) from `hist[s][tick & 31]` (head, heading, aim, pc, boost recorded before each move), with every aim shifted R steps earlier (R ≈ the one-way delay).
-  - If the head path is clear (dry run with `hitAt`), it rewinds for real: `unlinkBody`, restore, `moveSnake` W times with mass held. Then `pc += RING`, so every client takes the whole new body.
+  - Each step of that wait, the server replays the player's last W = R + waited + 12 steps (max 30). It uses `hist[s][tick & 31]`: head, heading, trail position, and the inputs (aim, wantBoost) as they arrived, recorded before each move. Every input is shifted R steps earlier (R ≈ the one-way delay).
+  - Only if that changes some input (a turn or boost really was late) and the dry-run head path (with `hitAt`) is clear does it commit:
+    - `unlinkBody`, restore, `moveSnake` W times with mass and boost food held, rewriting `hist` to the new path;
+    - then `pc += RING` (same ring slots; every client takes the whole new body).
+  - A snake that died hitting a rescued player's old position is re-checked against its new one.
+  - A mutual hit (the other dies from hitting the player in the same step, i.e. head-on) gets no grace. Delay compensation is also off when the two heads touch, or a slower connection would win every head-on.
   - Never turning still dies, and so does turning too late for the real delay.
-  - Tested with `/tmp/simtest/grace.c`-style runs (one process per trial: trials in one process affect each other). At no delay, step 43 is the last turn that survives; that turn arriving 2–8 steps late used to kill, and now the player lives at the matching ping.
-  - 40-player load with a 200 ms ping reported: no change in sim or network time.
+- Test suite for all this (recreate in `/tmp/simtest`; one process per scenario, because scenarios in one process affect each other): `#include "sim-server.c"`, place snakes, `sim_step`, plus a body-grid consistency check (linked nodes = `pc - tail` = `n`). Results (2 Oct):
+  - At no delay, the last safe turn is step 43. Turns arriving 2–10 steps late die without the allowance and live with the matching ping.
+  - Never turning (0/120/400 ms) dies; 12 steps late at 66 ms dies.
+  - A late turn while boosting lives, with mass within ~1 of turning on time. Two walls with both turns late: rescued twice.
+  - Head-on at ping 0 or 200: both die. Hit without turning, body vanishes during grace: dies.
+  - Random stress (24 players with 0–500 ms, 60 bots, 5 min, 7 seeds): grid always consistent, 29–47 rescues per run. Also clean under gcc AddressSanitizer + UBSan (clang here lacks the ASan runtime).
 - A delay proxy for latency tests: a small Node TCP proxy that `setTimeout`s each chunk; open `/?server=ws://localhost:<proxy>/ws`.
 - `pkill -f <pattern>` / `pgrep -f` kill or match the shell running the command, because the pattern is in its own command line. Find processes with `ps -eo pid,comm` instead.
 - On the owner's Intel iGPU, **writing pixels** is the GPU cost, not the maths per pixel. Removing texture reads and maths from a full-screen pass saved only ~17%; not writing most pixels (fast clear) saved ~70%. Any full-screen effect (vignette, gradients) costs about 1.5 ms there. Avoid adding one.
