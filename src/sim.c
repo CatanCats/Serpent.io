@@ -500,12 +500,16 @@ static i32 hitTest(i32 s) {
   float hx = k->hx, hy = k->hy;
   float lim = WR - k->r * 0.5f;
   if (hx * hx + hy * hy > lim * lim) return -2;
-  FOR_CELLS(hx, hy, (k->r + 40.f) * 0.66f, c) /* 40 = largest radius */
+  /* Only the FRONT of the head counts: the point half a head-radius ahead of its centre
+     must be well inside the other's body (within 80% of its radius of the body's centre
+     line). Brushing past a body with the side of the head, or the body behind it, is fine. */
+  float fx = hx + k->dcx * k->r * 0.5f, fy = hy + k->dcy * k->r * 0.5f;
+  FOR_CELLS(fx, fy, 40.f * 0.8f, c) /* 40 = largest radius */
     for (i32 i = gHead[c]; i >= 0; i = gNext[i]) {
       i32 o = i / RING;
       if (o == s) continue;
       i32 j = i & RMASK;
-      float dx = UQ(tr[o][j][0]) - hx, dy = UQ(tr[o][j][1]) - hy, t = (k->r + S[o].r) * 0.66f;
+      float dx = UQ(tr[o][j][0]) - fx, dy = UQ(tr[o][j][1]) - fy, t = S[o].r * 0.8f;
       if (dx * dx + dy * dy >= t * t) continue;
       /* Touching the other's head end (its newest points, about two radii): the heads
          are touching too, so both would "hit" and whichever is checked first would die.

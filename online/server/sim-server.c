@@ -122,7 +122,11 @@ static float lagSteps[MAXS];
    so a turn made after hitting a snake never saves anyone. */
 static float graceSteps[MAXS];
 static i32 pendT[MAXS], pendK[MAXS]; /* pendT: steps waited + 1 (0 = none) */
-static i32 inArrived[MAXS], inLate[MAXS]; /* an input arrived since the last step, and how many steps late */
+static i32 inArrived[MAXS], inLate[MAXS]; /* an input arrived since the last step, and the most steps late of them */
+/* Every input as it arrived (several can arrive in one step, e.g. after a stall): the step it
+   took effect, how late it was, and what it said. */
+typedef struct { u32 at, pc; i32 late; float aim; u32 boost; } InRec;
+static InRec inLog[MAXS][64]; static u32 inN[MAXS];
 /* Each player's state before each of the last 32 steps, for replays (see rescue). */
 typedef struct { float hx, hy, ang, dcx, dcy, aim; u32 pc, wantBoost, arrived, late; } HState; /* aim, wantBoost: the input in effect */
 static HState hist[MAXS][32];
@@ -501,10 +505,15 @@ static void moveSnake(i32 s, float dt);
    head path is clear, is it committed: return 1. */
 static i32 rescue(i32 s, i32 W) {
   Snake *k = &S[s];
-  /* reach back at least to the step the earliest late input was meant for */
-  for (u32 u = tick - 30u; (i32)(u - tick) <= 0; u++) {
-    HState *e = &hist[s][u & 31u];
-    if (e->arrived && e->late && k->pc - e->pc <= 128u) { i32 need = (i32)(tick - (u - e->late)) + 1; if (need > W) W = need; }
+  if (W < 1) W = 1;
+  /* the inputs of this life that took effect in the last 31 steps, oldest first */
+  InRec *ins[64]; i32 ni = 0;
+  for (u32 q = inN[s] > 64u ? inN[s] - 64u : 0u; q != inN[s]; q++) {
+    InRec *e = &inLog[s][q & 63u];
+    if ((i32)(tick - e->at) > 30 || (i32)(e->at - tick) > 0 || k->pc - e->pc > 128u) continue;
+    ins[ni++] = e;
+    i32 need = (i32)(tick - (e->at - (u32)e->late)) + 1; /* reach back to the step it was meant for */
+    if (e->late && need > W) W = need;
   }
   if (W > 30) W = 30;
   if (W < 1) W = 1;
@@ -514,17 +523,15 @@ static i32 rescue(i32 s, i32 W) {
   float aims[32]; i32 boosts[32], late = 0;
   for (i32 i = 0; i < W; i++) {
     u32 t = t0 + (u32)i;
-    /* the input in effect at step t if every input had arrived on time: of the inputs that
-       arrived up to now, the one meant for the latest step <= t */
-    i32 best = -1; u32 bestMeant = 0;
-    for (u32 u = tick - 30u; (i32)(u - tick) <= 0; u++) {
-      HState *e = &hist[s][u & 31u];
-      if (!e->arrived || k->pc - e->pc > 128u) continue; /* (an entry from a previous life doesn't count) */
-      u32 meant = u - e->late;
-      if ((i32)(meant - t) <= 0 && (best < 0 || (i32)(meant - bestMeant) >= 0)) { best = (i32)u; bestMeant = meant; }
+    /* the input in effect at step t if every input had arrived on time: the one meant for
+       the latest step <= t (later in the log wins a tie: messages arrive in order) */
+    InRec *best = 0; u32 bestMeant = 0;
+    for (i32 q = 0; q < ni; q++) {
+      u32 meant = ins[q]->at - (u32)ins[q]->late;
+      if ((i32)(meant - t) <= 0 && (!best || (i32)(meant - bestMeant) >= 0)) { best = ins[q]; bestMeant = meant; }
     }
-    HState *src = best >= 0 ? &hist[s][(u32)best & 31u] : &hist[s][(t0 - 1u) & 31u];
-    aims[i] = src->aim; boosts[i] = (i32)src->wantBoost;
+    if (best) { aims[i] = best->aim; boosts[i] = (i32)best->boost; }
+    else { aims[i] = hist[s][(t0 - 1u) & 31u].aim; boosts[i] = (i32)hist[s][(t0 - 1u) & 31u].wantBoost; }
     HState *o = &hist[s][t & 31u]; float d = wrapa(aims[i] - o->aim);
     late |= d > 0.01f || d < -0.01f || boosts[i] != (i32)o->wantBoost;
   }
@@ -541,18 +548,24 @@ static i32 rescue(i32 s, i32 W) {
   }
   /* clear: rewind for real and replay. Mass, and the boost food it would drop, stay as they
      are (the boosting already happened and was paid for once). */
-  float mass = k->mass, r = k->r, spc = k->spacing, aim = k->tang, dm = k->dropMass, dt_ = k->dropT; i32 n = k->n, wb = k->wantBoost;
+  float mass = k->mass, r = k->r, spc = k->spacing, aim = k->tang, dm = k->dropMass, dt_ = k->dropT, ox = k->hx, oy = k->hy; i32 n = k->n, wb = k->wantBoost;
   unlinkBody(s);
   k->hx = h.hx; k->hy = h.hy; k->ang = h.ang; k->dcx = h.dcx; k->dcy = h.dcy; k->pc = k->tail = h.pc;
   for (i32 i = 0; i < W; i++) {
     HState *e = &hist[s][(t0 + (u32)i) & 31u]; /* the history now follows the new path (inputs as they arrived) */
-    e->hx = k->hx; e->hy = k->hy; e->ang = k->ang; e->dcx = k->dcx; e->dcy = k->dcy; e->pc = k->pc + RING;
+    e->hx = k->hx; e->hy = k->hy; e->ang = k->ang; e->dcx = k->dcx; e->dcy = k->dcy; e->pc = k->pc;
     k->tang = aims[i]; k->wantBoost = boosts[i]; k->dropT = 0.f; k->dropMass = 0.f;
     moveSnake(s, DT); k->mass = mass;
   }
   k->mass = mass; k->r = r; k->spacing = spc; k->n = n; k->wantBoost = wb; k->tang = aim; k->dropMass = dm; k->dropT = dt_;
   syncBody(s);
-  k->pc += RING; k->tail += RING; /* same ring slots; the jump makes every client take the whole new body */
+  /* A real change of path: bump pc (same ring slots) so every client takes the whole new
+     body. A small nudge (a few units) isn't worth re-sending bodies for. */
+  float mx = k->hx - ox, my = k->hy - oy;
+  if (mx * mx + my * my > 10.f * 10.f) {
+    k->pc += RING; k->tail += RING;
+    for (i32 i = 0; i < W; i++) hist[s][(t0 + (u32)i) & 31u].pc += RING;
+  }
   k->phx = k->hx; k->phy = k->hy; k->ppc = k->pc;
   return 1;
 }
@@ -562,13 +575,18 @@ static i32 hitAt(i32 s, float hx, float hy, float hdx, float hdy) {
   Snake *k = &S[s];
   float lim = WR - k->r * 0.5f;
   if (hx * hx + hy * hy > lim * lim) return -2;
-  FOR_CELLS(hx, hy, (k->r + 40.f) * 0.66f, c) /* 40 = largest radius */
+  /* Only the FRONT of the head counts: the point half a head-radius ahead of its centre
+     must be well inside the other's body (within 80% of its radius of the body's centre
+     line). Brushing past a body with the side of the head, or the body behind it, is fine. */
+  float fx = hx + hdx * k->r * 0.5f, fy = hy + hdy * k->r * 0.5f;
+  FOR_CELLS(fx, fy, 40.f * 0.8f, c) /* 40 = largest radius */
     for (i32 i = gHead[c]; i >= 0; i = gNext[i]) {
       i32 o = i / RING;
       if (o == s) continue;
       i32 j = i & RMASK;
-      float dx = UQ(tr[o][j][0]) - hx, dy = UQ(tr[o][j][1]) - hy, t = (k->r + S[o].r) * 0.66f;
+      float dx = UQ(tr[o][j][0]) - fx, dy = UQ(tr[o][j][1]) - fy, t = S[o].r * 0.8f;
       if (dx * dx + dy * dy >= t * t) continue;
+      float th = (k->r + S[o].r) * 0.66f; /* heads this close touch each other (head-on) */
       /* Delay compensation: a player sees other snakes lagSteps late. Points the other
          laid within that time (the very front of it) were not on the player's screen
          yet, so the player cannot have steered around them: they don't count against
@@ -577,7 +595,7 @@ static i32 hitAt(i32 s, float hx, float hy, float hdx, float hdy) {
       /* (Not when the two heads touch each other: that is a head-on, decided below the same
          way for everyone; else a slower connection would win every head-on.) */
       float hdx2 = S[o].hx - hx, hdy2 = S[o].hy - hy;
-      if (human[s] && lagSteps[s] > 0.f && hdx2 * hdx2 + hdy2 * hdy2 >= t * t) {
+      if (human[s] && lagSteps[s] > 0.f && hdx2 * hdx2 + hdy2 * hdy2 >= th * th) {
         float laid = lagSteps[s] * DT * (S[o].boost ? 430.f : 195.f) / S[o].spacing + 1.f;
         if ((float)((S[o].pc - 1u - (u32)j) & RMASK) < laid) continue;
       }
@@ -868,6 +886,10 @@ static void step(float dt) {
   i32 nd = 0, anyRescue = 0; u8 rescued[MAXS] = {0};
   for (i32 s = 0; s < NS; s++) {
     if (!S[s].alive || !S[s].near) continue;
+    /* A player's input arrived late (a lag spike): apply it at the step it was meant for,
+       right away (if that path is clear), so the server's snake follows the path the player
+       saw on their screen instead of being pulled sideways later. */
+    if (human[s] && hist[s][tick & 31u].late && !pendT[s] && rescue(s, 1)) { rescued[s] = 1; anyRescue = 1; }
     i32 h = hitTest(s);
     if (human[s] && h != -2) {
       if (h >= 0 && !pendT[s]) { pendT[s] = 1; pendK[s] = h; }
@@ -958,7 +980,9 @@ void sim_set_jitter(i32 s, i32 steps) { if (s >= 0 && s < MAXS) graceSteps[s] = 
 void sim_set_input(i32 s, float aim, i32 boost, i32 late) {
   if (s < 0 || s >= MAXS || !human[s] || !S[s].alive) return;
   S[s].tang = wrapa(aim); S[s].wantBoost = boost != 0;
-  inArrived[s] = 1; inLate[s] = late < 0 ? 0 : late > 12 ? 12 : late;
+  late = late < 0 ? 0 : late > 12 ? 12 : late;
+  inLog[s][inN[s] & 63u] = (InRec){tick + 1u, S[s].pc, late, S[s].tang, (u32)S[s].wantBoost}; inN[s]++;
+  inArrived[s] = 1; if (late > inLate[s]) inLate[s] = late;
 }
 void sim_set_menu_focus(i32 on, float x, float y, float r) {
   float dx = x - exX, dy = y - exY;

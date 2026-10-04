@@ -260,8 +260,9 @@ impl Game {
         let off = at.duration_since(self.t0).as_millis() as i64 - c.clk;
         c.offs.push_back(off); if c.offs.len() > 180 { c.offs.pop_front(); }
         let base = *c.offs.iter().min().unwrap();
-        let late = (((off - base) as f32 / (1000. / 60.)).round() as i32).clamp(0, 12);
+        let late = (((off - base) as f32 / (1000. / 60.)).floor() as i32).clamp(0, 12); // whole steps only: arriving anywhere inside a step is normal
         c.late_max = c.late_max.max(late);
+        if late > 0 && std::env::var_os("DEBUG_LATE").is_some() { eprintln!("late input: {late} steps (gap {} ms over the usual)", off - base); }
         c.lates.push_back(late as u8); if c.lates.len() > 180 { c.lates.pop_front(); }
         let mut v: Vec<u8> = c.lates.iter().copied().collect(); v.sort_unstable();
         let jitter = v[(v.len() * 9) / 10].min(9) as i32 + 1;

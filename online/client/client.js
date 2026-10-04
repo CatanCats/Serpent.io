@@ -169,24 +169,52 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const PREDICT = new URLSearchParams(location.search).get("predict") !== "0"; // ?predict=0: off (for comparison)
   const pred = { on: false, x: 0, y: 0, a: 0, hist: [] }; // hist: {t, x, y}, newest last
   const wrapA = (a) => { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; };
-  function predStart(x, y, a) { pred.on = true; pred.x = x; pred.y = y; pred.a = a; pred.hist.length = 0; }
+  function predStart(x, y, a) { pred.on = true; pred.x = x; pred.y = y; pred.a = a; pred.dx = Math.cos(a); pred.dy = Math.sin(a); pred.acc = 0; pred.m = mass[me]; pred.hist.length = 0; }
+  // Fixed 1/60 s steps with exactly the simulation's maths (moveSnake): rotate the heading
+  // by at most the turn rate, then move. A long frame runs several steps, so the path bends
+  // the way the server's does (one big turn-then-move made it drift sideways).
+  const STEP = 1 / 60;
   function predStep(now, dt) {
-    const turn = 5.2 / (1 + (radius(mass[me]) - 12) * 0.045) * dt; // as moveSnake in the simulation
-    const da = Math.max(-turn, Math.min(turn, wrapA(sentAim - pred.a)));
-    pred.a = wrapA(pred.a + da);
-    const v = (lastBoostSent > 0 && mass[me] > 14 ? 430 : 195) * dt;
-    pred.x += Math.cos(pred.a) * v; pred.y += Math.sin(pred.a) * v;
-    pred.hist.push({ t: now, x: pred.x, y: pred.y }); if (pred.hist.length > 240) pred.hist.shift();
+    pred.acc = Math.min((pred.acc || 0) + dt, 0.5);
+    while (pred.acc >= STEP) {
+      pred.acc -= STEP;
+      const turn = 5.2 / (1 + (radius(mass[me]) - 12) * 0.045) * STEP;
+      let da = wrapA(sentAim - pred.a); da = Math.max(-turn, Math.min(turn, da));
+      if (da !== 0) {
+        pred.a = wrapA(pred.a + da);
+        const d2 = da * da, c = 1 - d2 * 0.5 + d2 * d2 / 24, sn = da * (1 - d2 / 6);
+        const x = pred.dx * c - pred.dy * sn, y = pred.dx * sn + pred.dy * c, f = 1.5 - 0.5 * (x * x + y * y);
+        pred.dx = x * f; pred.dy = y * f;
+      }
+      // boosting needs mass over 14 and uses it up (as moveSnake): predict that too, or the
+      // boost would run on here after the server has stopped it, and the snake jump back
+      const boosting = lastBoostSent > 0 && pred.m > 14;
+      if (boosting) pred.m -= (6 + pred.m * 0.006) * STEP;
+      const v = (boosting ? 430 : 195) * STEP;
+      pred.x += pred.dx * v; pred.y += pred.dy * v;
+      pred.hist.push({ t: now - pred.acc * 1000, x: pred.x, y: pred.y }); if (pred.hist.length > 240) pred.hist.shift();
+    }
   }
+  // where to draw the head: the last step, carried forward by the part of a step since
+  const predShown = () => { const v = (lastBoostSent > 0 && pred.m > 14 ? 430 : 195) * (pred.acc || 0); return [pred.x + pred.dx * v, pred.y + pred.dy * v]; };
   function predCorrect(seq, steps, sx, sy) { // server head (sx, sy), `steps` steps after it received input `seq`
     const h = pred.hist, t = sentAt[seq] + steps * (1000 / 60);
     if (!pred.on || h.length < 2 || t < h[0].t || t > h[h.length - 1].t) return;
+    // Compare only a moment for which the server had every input this page had sent by then.
+    // If the next input was sent before that moment but hadn't reached the server (a stall),
+    // the server's head is still on the old course while ours has turned: "correcting" toward
+    // it would pull the snake sideways and back again when the input arrives.
+    const nxt = (seq + 1) & 255;
+    if (inSeq !== seq && sentAt[nxt] > sentAt[seq] && sentAt[nxt] < t - 4) return;
     let i = h.length - 2; while (i > 0 && h[i].t > t) i--;
     const f = (t - h[i].t) / Math.max(1e-6, h[i + 1].t - h[i].t);
     const ex = sx - (h[i].x + (h[i + 1].x - h[i].x) * f), ey = sy - (h[i].y + (h[i + 1].y - h[i].y) * f);
-    if (ex * ex + ey * ey > 150 * 150) { predStart(sx, sy, pred.a); return; } // far off (lag spike): start again from the server
     pred.err = Math.hypot(ex, ey);
-    const kx = ex * 0.3, ky = ey * 0.3; // a third per snapshot: smooth, settles in ~0.2 s
+    if (window.__predLog) window.__predLog.push({ t: performance.now(), err: pred.err, seq, steps, boost: lastBoostSent, mass: mass[me], aimGap: wrapA(sentAim - pred.a), hist: h.length });
+    // a third of the gap per snapshot: smooth, settles in ~0.2 s. A big gap (the server was
+    // told otherwise, e.g. after a lag spike) is closed at once, but here and now: the server
+    // head is from a moment ago, so jumping to it would throw the snake back.
+    const k = ex * ex + ey * ey > 60 * 60 ? 1 : 0.3, kx = ex * k, ky = ey * k;
     pred.x += kx; pred.y += ky; for (const e of h) { e.x += kx; e.y += ky; }
   }
   // food: server slot -> local slot (local slots stay dense so the GPU draws few)
@@ -236,9 +264,13 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         const h = hist[s], last = h[h.length - 1];
         if (fl & 8) { x = d.getInt16(o, true) * 0.25; y = d.getInt16(o + 2, true) * 0.25; o += 4; }
         else { x = (last ? last.x : 0) + d.getInt8(o) * 0.25; y = (last ? last.y : 0) + d.getInt8(o + 1) * 0.25; o += 2; }
-        if (fl & 16) { mass[s] = d.getUint16(o, true) / 4; o += 2; }
+        if (fl & 16) { mass[s] = d.getUint16(o, true) / 4; o += 2;
+          if (s === me && pred.on) pred.m = mass[s] - (lastBoostSent > 0 && mass[s] > 14 ? (6 + mass[s] * 0.006) * rttMs / 1000 : 0); } // (that server mass is a round trip old)
         if (last && (x !== last.x || y !== last.y)) angOf[s] = Math.atan2(y - last.y, x - last.x);
-        if (s === me && pred.on) predCorrect(ackSeq, ackSteps, x, y); // your body follows the prediction instead
+        if (s === me && pred.on) {
+          if (!(fl & 1) && lastBoostSent > 0 && ((ackSeq - boostSeq) & 255) < 128 && pred.m > 14) pred.m = 14; // it has our boost press but isn't boosting: too small
+          predCorrect(ackSeq, ackSteps, x, y); // your body follows the prediction instead
+        }
         else layTrail(s, x, y);
       }
       segN[s] = segsFor(mass[s]); alive[s] = 1; seen[s] = 1;
@@ -289,14 +321,14 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   }
   const sendRaw = (bytes) => { if (connected && ws.readyState === 1) ws.send(bytes); };
   /* Delay test: tiny PING messages, answered at once by the server. A burst of 5 when the
-     connection opens, then one every 4 s in the background. The median of the last 5
+     connection opens, then one every 4 s in the background. The fastest of the last 5
      round trips goes to the server, which allows for it when judging your collisions. */
   const pingAt = new Float64Array(256), rtts = []; let pingId = 0, rttMs = 0, rttSent = -1, pingTimer = 0;
   let msgAt = 0; // when the browser received the last message (not when this page got to it)
   function ping() { pingId = (pingId + 1) & 255; pingAt[pingId] = performance.now(); sendRaw(new Uint8Array([5, pingId])); }
   function onPong(id) {
     rtts.push(Math.max(0, msgAt - pingAt[id])); if (rtts.length > 5) rtts.shift();
-    rttMs = [...rtts].sort((a, b) => a - b)[rtts.length >> 1];
+    rttMs = Math.min(...rtts); // the fastest recent round trip: the true delay plus as little extra as possible (never too high)
     if (rtts.length >= 3 && Math.abs(rttMs - rttSent) > 8) sendDelay();
   }
   function sendDelay() { const b = new Uint8Array(3); b[0] = 6; new DataView(b.buffer).setUint16(1, Math.min(1000, Math.round(rttMs)), true); sendRaw(b); rttSent = rttMs; }
@@ -313,7 +345,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     sendRaw(b);
     if (rtts.length >= 3) sendDelay(); // the server applies it to the new snake
   }
-  let lastAimSent = 9, lastBoostSent = -1, lastInputAt = 0, sentAim = 0, inSeq = 0;
+  let lastAimSent = 9, lastBoostSent = -1, lastInputAt = 0, sentAim = 0, inSeq = 0, boostSeq = 0; // boostSeq: the input that pressed boost
   const sentAt = new Float64Array(256); // when each input (by its 8-bit number) was sent
   function sendInput(now, aim, b) {
     if (Math.abs(aim - lastAimSent) < 0.004 && b === lastBoostSent && now - lastInputAt < 250) return;
@@ -322,6 +354,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     let a = aim; while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI;
     const q = Math.round(((a + Math.PI) / (2 * Math.PI)) * 65535);
     inSeq = (inSeq + 1) & 255; sentAt[inSeq] = now;
+    if (b && lastBoostSent <= 0) boostSeq = inSeq;
     u[0] = 2; dv.setUint16(1, q, true); u[3] = b; u[4] = inSeq;
     dv.setUint16(5, Math.floor(now) & 0xffff, true); // when it was made (this page's clock, ms): the server sees how late each input arrives
     sendRaw(u); lastAimSent = aim; lastBoostSent = b; lastInputAt = now;
@@ -555,9 +588,15 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     const rt = estTick - INTERP;
     const mine = PREDICT && playing && me >= 0 && alive[me] && hist[me].length;
     if (!mine) pred.on = false;
-    else { if (!pred.on) { const l = hist[me][hist[me].length - 1]; predStart(l.x, l.y, l.a); } predStep(now, dt); }
+    else {
+      if (!pred.on) { // start where the server's snake is NOW: its last head is from a round trip ago
+        const l = hist[me][hist[me].length - 1], ahead = 195 * Math.min(rttMs, 500) / 1000;
+        predStart(l.x + Math.cos(l.a) * ahead, l.y + Math.sin(l.a) * ahead, l.a);
+      }
+      predStep(now, dt);
+    }
     interp(rt);
-    if (pred.on) { hx[me] = pred.x; hy[me] = pred.y; ha[me] = pred.a; shown[me] = 1; layTrail(me, pred.x, pred.y); }
+    if (pred.on) { const [px, py] = predShown(); hx[me] = px; hy[me] = py; ha[me] = pred.a; shown[me] = 1; layTrail(me, pred.x, pred.y); }
     // camera, exactly like offline
     let tx = camX, ty = camY, tH = camH;
     if (playing && me >= 0 && shown[me]) { tx = hx[me]; ty = hy[me]; tH = 560 + (radius(mass[me]) - 12) * 18; }
