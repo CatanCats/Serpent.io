@@ -74,6 +74,12 @@ The online game is live at **https://br8t.com/slither.io/** (deployed 30 Sep 202
   - big gaps closed in place, never by jumping to the (older) server head; the start is placed a round trip ahead.
   - Measured with a 120 ms link plus 150 ms stalls every 3 s: largest gap 40–127 units → ~22, median ~3 (`window.__predLog` collects comparisons for tests). What remains: boosting right at mass 14, where eating decides.
 - Server env `DEBUG_LATE=1` prints every input measured late.
+- **Keyboard steering (both pages):**
+  - The keys aim relative to the snake's **current** heading: `aim = heading ± 0.6` while a key is held, `= heading` when released. Offline the heading comes from `W.playerAng()` (export), online from `pred.a`.
+  - The old rule (`aim += keyTurn × dt × 4.2`) ran ahead of big snakes, which turn slower: a head radius of 40 turns at 2.3 rad/s. More than half a turn ahead, the snake turned the other way: 29 of 180 steps while holding Left.
+  - The mouse takes over only after a real move of more than 6 px from where it was when the keys took over. Browsers send `pointermove` with no movement when the page changes under the cursor.
+  - Both arrow keys are tracked (`keysDown`).
+  - Browser test: hold, release, fake move, key swap, real mouse — all correct offline and online. Through a 120 ms link with stalls, the prediction gap is ~5 units median and ~21 max.
 - **Late-input rescue** (`rescue()` in `sim-server.c`; lateness measured in `input_late` in `main.rs`):
   - Because the page predicts its own snake, an input arriving with the player's usual delay is **on time**. Never move on-time inputs: the first version moved every input back by the ping, and players slipped through the backs of snakes by turning just after hitting them.
   - INPUT carries the page's clock in ms (u16). For each input the server computes (arrival − made) minus the smallest such gap over the last 180 inputs: its lateness in **whole** steps (floor, not round: arriving anywhere inside a step is normal), 0–12. It passes that to `sim_set_input(s, aim, boost, late)`. The 90th percentile + 1 is the player's grace (`sim_set_jitter`, 1–10 steps).

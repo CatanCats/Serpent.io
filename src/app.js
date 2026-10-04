@@ -186,9 +186,16 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   nameEl.addEventListener("keydown", (e) => { if (e.key === "Enter") start(); e.stopPropagation(); });
 
   /* ---------------- Input ---------------- */
-  let aim = 0, mouseBoost = false, keyBoost = false, touchBoost = false, keyTurn = 0, usingKeys = false;
+  let aim = 0, mouseBoost = false, keyBoost = false, touchBoost = false, keyTurn = 0, usingKeys = false; const keysDown = new Set();
   let mx = innerWidth / 2 + 100, my = innerHeight / 2;
-  cv.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse") { mx = e.clientX; my = e.clientY; usingKeys = false; } });
+  // The mouse takes over again only when it really moves: browsers also send "moves" when
+  // the page changes under a still cursor, which used to swing the snake toward it.
+  let keyAnchorX = 0, keyAnchorY = 0;
+  cv.addEventListener("pointermove", (e) => {
+    if (e.pointerType !== "mouse") return;
+    mx = e.clientX; my = e.clientY;
+    if (usingKeys && Math.hypot(mx - keyAnchorX, my - keyAnchorY) > 6) usingKeys = false;
+  });
   cv.addEventListener("mousedown", () => { mouseBoost = true; });
   addEventListener("mouseup", () => { mouseBoost = false; });
   const touches = new Map();
@@ -205,8 +212,10 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (e.repeat) return;
     const k = e.key;
     if (k === " " || k === "Shift" || k === "ArrowUp" || k === "w") { keyBoost = true; e.preventDefault(); }
-    else if (k === "ArrowLeft" || k === "a") { keyTurn = -1; usingKeys = true; }
-    else if (k === "ArrowRight" || k === "d") { keyTurn = 1; usingKeys = true; }
+    else if (k === "ArrowLeft" || k === "a" || k === "ArrowRight" || k === "d") {
+      keysDown.add(k === "ArrowLeft" || k === "a" ? "L" : "R"); keyTurn = (keysDown.has("R") ? 1 : 0) - (keysDown.has("L") ? 1 : 0);
+      if (!usingKeys) { usingKeys = true; keyAnchorX = mx; keyAnchorY = my; }
+    }
     else if (k === "p" || k === "P") $("perf").classList.toggle("off");
     else if (k === "Enter" && state !== "play") start();
     else if (k === "Escape" && state !== "menu") toMenu();
@@ -214,10 +223,11 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   addEventListener("keyup", (e) => {
     const k = e.key;
     if (k === " " || k === "Shift" || k === "ArrowUp" || k === "w") keyBoost = false;
-    else if ((k === "ArrowLeft" || k === "a") && keyTurn < 0) keyTurn = 0;
-    else if ((k === "ArrowRight" || k === "d") && keyTurn > 0) keyTurn = 0;
+    else if (k === "ArrowLeft" || k === "a" || k === "ArrowRight" || k === "d") {
+      keysDown.delete(k === "ArrowLeft" || k === "a" ? "L" : "R"); keyTurn = (keysDown.has("R") ? 1 : 0) - (keysDown.has("L") ? 1 : 0);
+    }
   });
-  addEventListener("blur", () => { keyBoost = mouseBoost = false; keyTurn = 0; });
+  addEventListener("blur", () => { keyBoost = mouseBoost = false; keyTurn = 0; keysDown.clear(); });
 
   /* ---------------- HUD (throttled DOM work; ranking done in WASM) ---------------- */
   const TIERS = ["ROOKIE", "CASUAL", "HUNTER", "ELITE", "LEGEND"];
@@ -288,7 +298,11 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (!playing && now - last < 30) return; // menu / game-over: ~30 fps is plenty
     const dt = Math.min((now - last) / 1000, 0.25); last = now;
     if (playing) {
-      if (usingKeys) aim += keyTurn * dt * 4.2;
+      // Keys steer relative to where the snake is heading NOW: aim a little to that side
+      // (it then turns at its own top speed) or straight ahead. An aim that ran on by itself
+      // could get more than half a turn ahead of a slow-turning big snake, which then turned
+      // the other way.
+      if (usingKeys) aim = W.playerAng() + keyTurn * 0.6;
       else aim = Math.atan2(my - innerHeight / 2, mx - innerWidth / 2);
     }
 

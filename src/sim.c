@@ -1038,3 +1038,4 @@ EXPORT("worldRadius") float worldRadius(void) { return WR; }
 EXPORT("snakeCount") i32 snakeCount(void) { return NS; }
 EXPORT("kills") i32 kills(i32 s) { return S[s].kills; }
 EXPORT("killer") i32 killer(void) { return playerKiller; }
+EXPORT("playerAng") float playerAng(void) { return S[0].ang; } /* where the player's snake is heading (keyboard steering) */
