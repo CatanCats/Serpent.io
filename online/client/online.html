@@ -79,7 +79,7 @@
   #board li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #board li.me { color: #fff; font-weight: 600; }
   #board li.me .nm::after { content: " •"; color: var(--accent); }
-  .tg { flex: none; font-size: 8.5px; font-weight: 600; letter-spacing: .08em; padding: 1px 5px; border-radius: 6px; }
+  .tg { flex: none; width: 16px; text-align: center; font-size: 10px; font-weight: 800; line-height: 15px; border-radius: 5px; } /* one letter: the level's initial in its colour */
   .tg.t0 { color: #6ee7b7; background: rgba(52,211,153,.12); }
   .tg.t1 { color: #7dd3fc; background: rgba(56,189,248,.12); }
   .tg.t2 { color: #fbbf24; background: rgba(251,191,36,.12); }
@@ -142,7 +142,26 @@
   a.mode.dl { display: block; width: fit-content; margin: 8px auto 0; font-size: 13px; }
   button.play:disabled { filter: grayscale(.8) brightness(.7); cursor: default; box-shadow: none; }
 
+  /* chat: small, bottom-left above the length box; hidden with the 💬 button (remembered) */
+  #chat { left: max(16px, env(safe-area-inset-left)); bottom: calc(max(16px, env(safe-area-inset-bottom)) + 140px); width: 260px; pointer-events: none; }
+  #chatLog { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; font-size: 13px; line-height: 1.3; }
+  #chatLog div { padding: 2px 8px; border-radius: 8px; background: rgba(8,12,22,.55); color: var(--text); overflow-wrap: anywhere;
+    transition: opacity 1s; text-shadow: 0 1px 2px #000; }
+  #chatLog div.old { opacity: 0; }
+  #chat.open #chatLog div.old { opacity: .85; }
+  #chatLog b { font-weight: 600; color: var(--accent2); }
+  #chatIn { display: none; width: 100%; pointer-events: auto; font: 13px inherit; font-family: inherit; color: var(--text);
+    background: rgba(8,12,22,.85); border: 1px solid rgba(56,189,248,.45); border-radius: 8px; padding: 6px 8px; outline: none; }
+  #chat.open #chatIn { display: block; }
+  #chat.hidden #chatLog { display: none; }
+  #chatTog { position: fixed; left: max(16px, env(safe-area-inset-left)); bottom: calc(max(16px, env(safe-area-inset-bottom)) + 112px); pointer-events: auto;
+    width: 26px; height: 22px; padding: 0; border: none; border-radius: 7px; background: rgba(8,12,22,.6); color: var(--dim); font-size: 12px; cursor: pointer; }
+  #chatTog.off { opacity: .45; }
+  body:not(.playing) #chatTog { display: none; }
+
   @media (max-width: 640px) {
+    #chat { width: 200px; bottom: calc(max(16px, env(safe-area-inset-bottom)) + 118px); }
+    #chatTog { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 90px); }
     #board { width: 164px; padding: 10px 12px; }
     #board li { font-size: 12px; }
     #board li:nth-child(n+6) { display: none; }
@@ -164,6 +183,8 @@
 </div>
 <div id="board" class="hud glass"><h3>Leaderboard</h3><ol id="lb"></ol></div>
 <div id="mini" class="hud game"></div>
+<div id="chat" class="hud game"><div id="chatLog" aria-live="polite"></div><input id="chatIn" maxlength="80" autocomplete="off" spellcheck="false" placeholder="Say something… (Enter to send, Esc to close)"></div>
+<button id="chatTog" title="Hide / show chat (Enter to type)" aria-label="Hide or show chat">💬</button>
 
 <div id="menu" class="screen">
   <div class="card glass">
@@ -175,7 +196,7 @@
     <div class="net" id="net">Connecting…</div>
     <a class="mode" href="offline.html">Play offline instead (runs on this device) →</a>
     <a class="mode dl" href="offline.html" download="serpent-offline.html" title="One file: open it in a browser to play without internet">⬇ Download the offline game</a>
-    <div class="keys"><kbd>Mouse</kbd> steer · <kbd>Click</kbd>/<kbd>Space</kbd> boost<br><kbd>←</kbd><kbd>→</kbd> steer with keys · Touch: drag to steer, 2 fingers boost · <kbd>P</kbd> perf</div>
+    <div class="keys"><kbd>Mouse</kbd> steer · <kbd>Click</kbd>/<kbd>Space</kbd> boost<br><kbd>←</kbd><kbd>→</kbd> steer with keys · Touch: drag to steer, 2 fingers boost · <kbd>P</kbd> perf · <kbd>Enter</kbd> chat</div>
     <div class="rsw" id="qsw" role="group" aria-label="Quality">
       <span>Quality</span>
       <button data-q="sharp">Sharp</button><button data-q="balanced">Balanced</button><button data-q="fast">Fast</button>

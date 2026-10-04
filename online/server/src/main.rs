@@ -93,6 +93,7 @@ impl Sim {
                     4 LEAVE (back to the menu)
                     5 PING  u8 id   (answered at once with PONG, by the connection, not the game loop)
                     6 DELAY u16 round trip in ms (the page's measurement; used to compensate collisions)
+                    7 CHAT  u8 len, text (UTF-8, at most 80 characters; one message per 1.2 s; joined players only)
  server -> client:  1 WELCOME u8 maxSnakes, u16 ring, f32 worldRadius, u8 bots, u8 players
                     2 SNAP  u32 tick, u8 you (255 none), u8 spectate, u8 flags (1 = reset), u16 your kills,
                           u8 last input seq received, u8 steps since it was received, u8 n, snakes, u16 m, food
@@ -109,7 +110,8 @@ impl Sim {
                     5 DEATH u8 killer (255 = world edge), u16 kills, f32 mass
                     6 MINI  u16 k, k x (u8 slot, u8 x, u8 y (0..255 across the world), u8 skin | size<<4)
                     7 FULL  (server full)
-                    8 PONG  u8 id */
+                    8 PONG  u8 id
+                    9 CHAT  u8 slot, u8 len, name, u8 len, text (to everyone) */
 
 /// How many steps behind the server a player's screen shows the other snakes: its round
 /// trip (your own snake is predicted ahead by half of it, the others arrive half of it
@@ -142,6 +144,7 @@ struct Client {
     pend: Vec<u8>,         // food changes in those sectors since the last snapshot
     npend: u32,
     rtt_ms: u16,           // its measured network round trip
+    chat_at: Option<Instant>, // its last chat message (rate limit)
     clk: i64, clk_lo: u16, clk_ok: bool, // the page's clock, unwrapped from its 16-bit stamps
     offs: std::collections::VecDeque<i64>, lates: std::collections::VecDeque<u8>, jitter: i32, late_max: i32, // (late_max: for the log)
     in_seq: u8, in_tick: u32, // the last input it sent and the step count when it arrived
@@ -152,6 +155,14 @@ struct Client {
 
 #[derive(Default)]
 struct Stats { players: AtomicU32, conns: AtomicU32, tick: AtomicU32, step_ns: AtomicU64, send_ns: AtomicU64 }
+
+/// A chat line as sent on: no control characters, at most 80 characters, trimmed.
+fn clean_chat(b: &[u8]) -> String {
+    let s: String = String::from_utf8_lossy(b).chars().filter(|c| !c.is_control()).take(80).collect();
+    let mut t = s.trim().to_string();
+    while t.len() > 240 { t.pop(); } // its byte length must fit the u8 on the wire
+    t
+}
 
 fn clean_name(b: &[u8]) -> String {
     let s: String = String::from_utf8_lossy(b).chars().filter(|c| !c.is_control() && !"<>&\"".contains(*c)).take(16).collect();
@@ -177,6 +188,7 @@ impl Game {
         o.u8(4); o.u8(s as u8); o.u8(b.len() as u8); o.0.extend_from_slice(b);
         o.0
     }
+    fn broadcast_except(&mut self, skip: u64, m: Vec<u8>) { for (id, c) in self.clients.iter_mut() { if *id != skip { Self::send(c, m.clone()); } } }
     fn broadcast(&mut self, m: Vec<u8>) { for c in self.clients.values_mut() { Self::send(c, m.clone()); } }
 
     fn on_event(&mut self, ev: Ev) {
@@ -184,7 +196,7 @@ impl Game {
             Ev::Open { id, tx } => {
                 let players = self.clients.values().filter(|c| c.slot >= 0).count().min(255) as u8;
                 let mut c = Client { tx, slot: -1, alive: false, aspect: 1.78, last: (0., 0., 900.), sent_pc: vec![0; self.sim.maxs], sent_from: vec![0; self.sim.maxs], sent_head: vec![(0, 0, 0); self.sim.maxs],
-                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, rtt_ms: 0, clk: 0, clk_lo: 0, clk_ok: false, offs: Default::default(), lates: Default::default(), jitter: -1, late_max: 0, in_seq: 0, in_tick: 0, reset: false, cap: 1024, msgs: 0 };
+                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, rtt_ms: 0, chat_at: None, clk: 0, clk_lo: 0, clk_ok: false, offs: Default::default(), lates: Default::default(), jitter: -1, late_max: 0, in_seq: 0, in_tick: 0, reset: false, cap: 1024, msgs: 0 };
                 let mut o = Out(Vec::new());
                 o.u8(1); o.u8(self.sim.maxs as u8); o.u16(self.sim.ring as u16); o.f32(self.sim.wr); o.u8(self.sim.bots as u8); o.u8(players);
                 Self::send(&mut c, o.0);
@@ -208,7 +220,7 @@ impl Game {
     fn on_msg(&mut self, id: u64, d: &[u8], at: Instant) {
         let Some(mut c) = self.clients.remove(&id) else { return };
         c.msgs += 1;
-        if c.msgs <= 240 && !d.is_empty() && d.len() <= 64 {
+        if c.msgs <= 240 && !d.is_empty() && (d.len() <= 64 || (d[0] == 7 && d.len() <= 250)) {
             match d[0] {
                 1 if d.len() >= 5 => { // join / respawn
                     let aspect = (u16::from_le_bytes([d[2], d[3]]) as f32 / 1000.).clamp(0.3, 4.);
@@ -239,6 +251,21 @@ impl Game {
                     if c.slot >= 0 { unsafe { sim_set_aspect(c.slot, c.aspect) }; }
                 }
                 4 => { self.leave(&mut c); }
+                7 if d.len() >= 2 && c.slot >= 0 => { // chat: joined players, one line per 1.2 s
+                    let len = (d[1] as usize).min(d.len() - 2);
+                    let text = clean_chat(&d[2..2 + len]);
+                    if !text.is_empty() && c.chat_at.map_or(true, |t| at.duration_since(t) >= Duration::from_millis(1200)) {
+                        c.chat_at = Some(at);
+                        let (name, tb) = (self.names[c.slot as usize].as_bytes().to_vec(), text.into_bytes());
+                        let mut o = Out(Vec::with_capacity(4 + name.len() + tb.len()));
+                        o.u8(9); o.u8(c.slot as u8); o.u8(name.len() as u8); o.0.extend_from_slice(&name); o.u8(tb.len() as u8); o.0.extend_from_slice(&tb);
+                        let m = o.0;
+                        Self::send(&mut c, m.clone());
+                        self.clients.insert(id, c);
+                        self.broadcast_except(id, m);
+                        return;
+                    }
+                }
                 6 if d.len() >= 3 => {
                     c.rtt_ms = u16::from_le_bytes([d[1], d[2]]).min(1000);
                     if c.slot >= 0 { unsafe { sim_set_lag(c.slot, lag_steps(c.rtt_ms)) }; }

@@ -380,6 +380,12 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         break;
       }
       case 8: onPong(d.getUint8(1)); break;
+      case 9: { // chat line: slot, name, text
+        const nl = d.getUint8(2), td = new TextDecoder();
+        const name = td.decode(new Uint8Array(d.buffer, d.byteOffset + 3, nl)), tl = d.getUint8(3 + nl);
+        addChat(name || "Player", td.decode(new Uint8Array(d.buffer, d.byteOffset + 4 + nl, tl)));
+        break;
+      }
       case 7: setStatus("The server is full right now — try again soon, or play offline", "bad"); state = "menu"; showMenu(); break;
     }
   }
@@ -446,8 +452,36 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   cv.addEventListener("touchmove", (e) => { for (const t of e.changedTouches) touches.set(t.identifier, t); onTouch(); e.preventDefault(); }, { passive: false });
   const endT = (e) => { for (const t of e.changedTouches) touches.delete(t.identifier); onTouch(); };
   cv.addEventListener("touchend", endT); cv.addEventListener("touchcancel", endT);
+  /* ---------------- chat (small, bottom-left; 💬 hides it, remembered) ---------------- */
+  const chatEl = $("chat"), chatLog = $("chatLog"), chatIn = $("chatIn"), chatTog = $("chatTog");
+  let chatHidden = store.get("serpent.chat") === "off";
+  const showChatState = () => { chatEl.classList.toggle("hidden", chatHidden); chatTog.classList.toggle("off", chatHidden); };
+  showChatState();
+  chatTog.onclick = (e) => { chatHidden = !chatHidden; store.set("serpent.chat", chatHidden ? "off" : "on"); if (chatHidden) closeChat(); showChatState(); e.currentTarget.blur(); };
+  function addChat(name, text) {
+    const el = document.createElement("div");
+    const b = document.createElement("b"); b.textContent = name + ": "; // text only: nothing in a message is read as HTML
+    el.append(b, document.createTextNode(text));
+    chatLog.append(el);
+    while (chatLog.children.length > 6) chatLog.firstChild.remove(); // only the last few lines
+    setTimeout(() => el.classList.add("old"), 10000);                 // then they fade (still shown while typing)
+  }
+  function openChat() { if (chatHidden || state !== "play") return; chatEl.classList.add("open"); chatIn.focus(); }
+  function closeChat() { chatEl.classList.remove("open"); chatIn.value = ""; chatIn.blur(); }
+  chatIn.addEventListener("keydown", (e) => {
+    e.stopPropagation(); // typing never steers or boosts
+    if (e.key === "Enter") {
+      const t = chatIn.value.trim();
+      if (t) { const tb = new TextEncoder().encode(t).slice(0, 240), m = new Uint8Array(2 + tb.length); m[0] = 7; m[1] = tb.length; m.set(tb, 2); sendRaw(m); }
+      closeChat();
+    } else if (e.key === "Escape") closeChat();
+  });
+  chatIn.addEventListener("keyup", (e) => e.stopPropagation());
+  chatIn.addEventListener("blur", () => chatEl.classList.remove("open"));
+
   addEventListener("keydown", (e) => {
     if (e.repeat) return;
+    if (e.key === "Enter" && state === "play" && !chatHidden) { e.preventDefault(); openChat(); return; }
     const k = e.key;
     if (k === " " || k === "Shift" || k === "ArrowUp" || k === "w") { keyBoost = true; e.preventDefault(); }
     else if (k === "ArrowLeft" || k === "a" || k === "ArrowRight" || k === "d") {
@@ -499,7 +533,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   function updateHud() {
     let html = "";
     board.top.forEach(([s, t, sk, hu, m], i) => {
-      const tag = s === me ? `<span class="tg you">YOU</span>` : hu ? `<span class="tg pl">PLAYER</span>` : `<span class="tg t${t}">${TIERS[t]}</span>`;
+      const tag = s === me ? `<span class="tg you" title="YOU">Y</span>` : hu ? `<span class="tg pl" title="PLAYER">P</span>` : `<span class="tg t${t}" title="${TIERS[t]}">${TIERS[t][0]}</span>`;
       html += `<li class="${s === me ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[sk % 12][0]}"></span><span class="nm">${esc(s === me ? playerName() : hu ? pnames[s] || "Player" : botName(s))}</span>${tag}<span class="sc">${Math.floor(m * 10)}</span></li>`;
     });
     if (html !== lastLb) { lbEl.innerHTML = html; lastLb = html; }

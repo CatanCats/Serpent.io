@@ -240,7 +240,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     let html = "";
     for (let i = 0; i < 10 && lb[2 + i] >= 0; i++) {
       const s = lb[2 + i], b = s * SN, t = snap[b + 5];
-      const tag = s === 0 ? `<span class="tg you">YOU</span>` : `<span class="tg t${t}">${TIERS[t]}</span>`;
+      const tag = s === 0 ? `<span class="tg you" title="YOU">Y</span>` : `<span class="tg t${t}" title="${TIERS[t]}">${TIERS[t][0]}</span>`;
       html += `<li class="${s === 0 ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[snap[b + 4]][0]}"></span><span class="nm">${esc(s === 0 ? playerName() : names[s])}</span>${tag}<span class="sc">${Math.floor(snap[b + 3] * 10)}</span></li>`;
     }
     if (html !== lastLb) { lbEl.innerHTML = html; lastLb = html; }

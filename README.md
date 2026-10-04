@@ -18,6 +18,7 @@ The online version uses the same rules and bots. A server runs the world (the of
 | Steer | move the pointer | ← → / A D | drag |
 | Boost (costs length) | hold click | Space / Shift / ↑ / W | two fingers |
 | Respawn / menu | | Enter / Esc | |
+| Chat (online; 💬 hides it) | | Enter, type, Enter (Esc closes) | |
 | Performance overlay (off by default) | | P | |
 
 On the menu you can also pick Quality (Sharp / Balanced / Fast: caps the pixel density at 2× / 1.25× / 1×) and Renderer (Auto / WebGPU / WebGL). `?renderer=webgl` in the address forces WebGL.
