@@ -77,7 +77,13 @@
   #board li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #board li.me { color: #fff; font-weight: 600; }
   #board li.me .nm::after { content: " •"; color: var(--accent); }
-  .tg { flex: none; width: 16px; text-align: center; font-size: 10px; font-weight: 800; line-height: 15px; border-radius: 5px; } /* one letter: the level's initial in its colour */
+  /* level tag: the full name on computers; on phones and touch screens only its initial, in its colour */
+  .tg { flex: none; font-size: 8.5px; font-weight: 600; letter-spacing: .08em; padding: 1px 5px; border-radius: 6px; }
+  .tg::after { content: attr(data-l); }
+  @media (max-width: 640px), (hover: none) {
+    .tg { width: 16px; padding: 0; text-align: center; font-size: 10px; font-weight: 800; letter-spacing: 0; line-height: 15px; border-radius: 5px; }
+    .tg::after { content: attr(data-s); }
+  }
   .tg.t0 { color: #6ee7b7; background: rgba(52,211,153,.12); }
   .tg.t1 { color: #7dd3fc; background: rgba(56,189,248,.12); }
   .tg.t2 { color: #fbbf24; background: rgba(251,191,36,.12); }
@@ -1262,7 +1268,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     let html = "";
     for (let i = 0; i < 10 && lb[2 + i] >= 0; i++) {
       const s = lb[2 + i], b = s * SN, t = snap[b + 5];
-      const tag = s === 0 ? `<span class="tg you" title="YOU">Y</span>` : `<span class="tg t${t}" title="${TIERS[t]}">${TIERS[t][0]}</span>`;
+      const tag = s === 0 ? `<span class="tg you" title="YOU" data-l="YOU" data-s="Y"></span>` : `<span class="tg t${t}" title="${TIERS[t]}" data-l="${TIERS[t]}" data-s="${TIERS[t][0]}"></span>`;
       html += `<li class="${s === 0 ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[snap[b + 4]][0]}"></span><span class="nm">${esc(s === 0 ? playerName() : names[s])}</span>${tag}<span class="sc">${Math.floor(snap[b + 3] * 10)}</span></li>`;
     }
     if (html !== lastLb) { lbEl.innerHTML = html; lastLb = html; }

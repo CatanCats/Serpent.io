@@ -77,8 +77,9 @@ The online game is live at **https://br8t.com/slither.io/** (deployed 30 Sep 202
 - **Chat (online):**
   - CHAT messages: client→server 7 `u8 len, text`; server→client 9 `u8 slot, u8 namelen, name, u8 len, text`, to everyone.
   - Joined players only, one line per 1.2 s, at most 80 characters and 240 bytes, control characters removed. The on_msg size limit allows type 7 up to 250 bytes.
-  - The page shows the last 6 lines, which fade after 10 s. Enter opens the box, Enter sends, Esc closes; the input stops key events, so typing never steers. 💬 hides it, remembered in `serpent.chat`. Text is inserted as text nodes, never as HTML.
-- **Leaderboard tags (both pages):** a single coloured letter for the level (R/C/H/E/L, P = another player, Y = you), with the full name as a tooltip.
+  - The page shows the last 6 lines, which fade after 10 s. Enter or the "💬 Chat" button opens the box (and un-hides it); Enter sends, Esc closes; the box's "Hide" button hides it, remembered in `serpent.chat`. The input stops key events, so typing never steers. Text is inserted as text nodes, never as HTML.
+  - The page keeps its own 1.25 s gap (says "One message per second") and, since the server echoes every line to its writer, shows "The server didn't answer: it may need updating" if no echo comes within 3 s (an older server ignores type 7). The first "chat doesn't work" report was the live server not yet redeployed plus 💬 only hiding the chat.
+- **Leaderboard tags (both pages):** the full level name (ROOKIE…LEGEND, PLAYER, YOU) on computers; a single coloured letter (R/C/H/E/L/P/Y) on phones and touch screens (`max-width: 640px` or `hover: none`). The span carries both in `data-l` / `data-s`, and CSS `::after { content: attr(...) }` picks one.
 - **Keyboard steering (both pages):**
   - The keys aim relative to the snake's **current** heading: `aim = heading ± 0.6` while a key is held, `= heading` when released. Offline the heading comes from `W.playerAng()` (export), online from `pred.a`.
   - The old rule (`aim += keyTurn × dt × 4.2`) ran ahead of big snakes, which turn slower: a head radius of 40 turns at 2.3 rad/s. More than half a turn ahead, the snake turned the other way: 29 of 180 steps while holding Left.

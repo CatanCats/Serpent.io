@@ -79,7 +79,13 @@
   #board li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #board li.me { color: #fff; font-weight: 600; }
   #board li.me .nm::after { content: " •"; color: var(--accent); }
-  .tg { flex: none; width: 16px; text-align: center; font-size: 10px; font-weight: 800; line-height: 15px; border-radius: 5px; } /* one letter: the level's initial in its colour */
+  /* level tag: the full name on computers; on phones and touch screens only its initial, in its colour */
+  .tg { flex: none; font-size: 8.5px; font-weight: 600; letter-spacing: .08em; padding: 1px 5px; border-radius: 6px; }
+  .tg::after { content: attr(data-l); }
+  @media (max-width: 640px), (hover: none) {
+    .tg { width: 16px; padding: 0; text-align: center; font-size: 10px; font-weight: 800; letter-spacing: 0; line-height: 15px; border-radius: 5px; }
+    .tg::after { content: attr(data-s); }
+  }
   .tg.t0 { color: #6ee7b7; background: rgba(52,211,153,.12); }
   .tg.t1 { color: #7dd3fc; background: rgba(56,189,248,.12); }
   .tg.t2 { color: #fbbf24; background: rgba(251,191,36,.12); }
@@ -150,13 +156,20 @@
   #chatLog div.old { opacity: 0; }
   #chat.open #chatLog div.old { opacity: .85; }
   #chatLog b { font-weight: 600; color: var(--accent2); }
-  #chatIn { display: none; width: 100%; pointer-events: auto; font: 13px inherit; font-family: inherit; color: var(--text);
+  #chatRow { display: none; gap: 4px; pointer-events: auto; }
+  #chat.open #chatRow { display: flex; }
+  #chatHide { flex: none; padding: 0 8px; border: none; border-radius: 8px; background: rgba(8,12,22,.85); color: var(--dim); font: 12px inherit; font-family: inherit; cursor: pointer; }
+  #chatHide:hover { color: var(--text); }
+  #chatIn { flex: 1; min-width: 0; pointer-events: auto; font: 13px inherit; font-family: inherit; color: var(--text);
     background: rgba(8,12,22,.85); border: 1px solid rgba(56,189,248,.45); border-radius: 8px; padding: 6px 8px; outline: none; }
-  #chat.open #chatIn { display: block; }
   #chat.hidden #chatLog { display: none; }
   #chatTog { position: fixed; left: max(16px, env(safe-area-inset-left)); bottom: calc(max(16px, env(safe-area-inset-bottom)) + 112px); pointer-events: auto;
-    width: 26px; height: 22px; padding: 0; border: none; border-radius: 7px; background: rgba(8,12,22,.6); color: var(--dim); font-size: 12px; cursor: pointer; }
+    height: 22px; padding: 0 7px; border: none; border-radius: 7px; background: rgba(8,12,22,.6); color: var(--dim); font: 12px inherit; font-family: inherit; cursor: pointer; }
+  #chatTog:hover { color: var(--text); }
+  #chat.open ~ #chatTog { display: none; }
+  @media (max-width: 640px), (hover: none) { #chatTog span { display: none; } }
   #chatTog.off { opacity: .45; }
+  #chatLog div.sys { color: var(--dim); font-style: italic; }
   body:not(.playing) #chatTog { display: none; }
 
   @media (max-width: 640px) {
@@ -183,8 +196,8 @@
 </div>
 <div id="board" class="hud glass"><h3>Leaderboard</h3><ol id="lb"></ol></div>
 <div id="mini" class="hud game"></div>
-<div id="chat" class="hud game"><div id="chatLog" aria-live="polite"></div><input id="chatIn" maxlength="80" autocomplete="off" spellcheck="false" placeholder="Say something… (Enter to send, Esc to close)"></div>
-<button id="chatTog" title="Hide / show chat (Enter to type)" aria-label="Hide or show chat">💬</button>
+<div id="chat" class="hud game"><div id="chatLog" aria-live="polite"></div><div id="chatRow"><input id="chatIn" maxlength="80" autocomplete="off" spellcheck="false" enterkeyhint="send" placeholder="Say something…" title="Enter sends, Esc closes"><button id="chatHide" title="Hide the chat (💬 brings it back)">Hide</button></div></div>
+<button id="chatTog" title="Chat (or press Enter)" aria-label="Open chat">💬<span> Chat</span></button>
 
 <div id="menu" class="screen">
   <div class="card glass">
@@ -1432,6 +1445,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       case 9: { // chat line: slot, name, text
         const nl = d.getUint8(2), td = new TextDecoder();
         const name = td.decode(new Uint8Array(d.buffer, d.byteOffset + 3, nl)), tl = d.getUint8(3 + nl);
+        if (d.getUint8(1) === me) clearTimeout(chatWait); // our own line came back: chat works
         addChat(name || "Player", td.decode(new Uint8Array(d.buffer, d.byteOffset + 4 + nl, tl)));
         break;
       }
@@ -1501,36 +1515,48 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   cv.addEventListener("touchmove", (e) => { for (const t of e.changedTouches) touches.set(t.identifier, t); onTouch(); e.preventDefault(); }, { passive: false });
   const endT = (e) => { for (const t of e.changedTouches) touches.delete(t.identifier); onTouch(); };
   cv.addEventListener("touchend", endT); cv.addEventListener("touchcancel", endT);
-  /* ---------------- chat (small, bottom-left; 💬 hides it, remembered) ---------------- */
+  /* ---------------- chat (small, bottom-left; 💬 or Enter opens it, Hide hides it, remembered) ---------------- */
   const chatEl = $("chat"), chatLog = $("chatLog"), chatIn = $("chatIn"), chatTog = $("chatTog");
-  let chatHidden = store.get("serpent.chat") === "off";
+  let chatHidden = store.get("serpent.chat") === "off", chatSentAt = -1e9, chatWait = 0;
   const showChatState = () => { chatEl.classList.toggle("hidden", chatHidden); chatTog.classList.toggle("off", chatHidden); };
   showChatState();
-  chatTog.onclick = (e) => { chatHidden = !chatHidden; store.set("serpent.chat", chatHidden ? "off" : "on"); if (chatHidden) closeChat(); showChatState(); e.currentTarget.blur(); };
-  function addChat(name, text) {
+  // pointerdown keeps the focus in the box, so a click lands before the box closes on blur
+  for (const el of [chatTog, $("chatHide")]) el.addEventListener("pointerdown", (e) => e.preventDefault());
+  chatTog.onclick = () => { if (chatHidden) { chatHidden = false; store.set("serpent.chat", "on"); showChatState(); } openChat(); };
+  $("chatHide").onclick = () => { chatHidden = true; store.set("serpent.chat", "off"); closeChat(); showChatState(); };
+  function addChat(name, text, sys) {
     const el = document.createElement("div");
-    const b = document.createElement("b"); b.textContent = name + ": "; // text only: nothing in a message is read as HTML
-    el.append(b, document.createTextNode(text));
+    if (sys) el.className = "sys";
+    else { const b = document.createElement("b"); b.textContent = name + ": "; el.append(b); } // text only: nothing in a message is read as HTML
+    el.append(document.createTextNode(text));
     chatLog.append(el);
     while (chatLog.children.length > 6) chatLog.firstChild.remove(); // only the last few lines
     setTimeout(() => el.classList.add("old"), 10000);                 // then they fade (still shown while typing)
   }
-  function openChat() { if (chatHidden || state !== "play") return; chatEl.classList.add("open"); chatIn.focus(); }
+  function openChat() { if (state !== "play") return; if (chatHidden) { chatHidden = false; store.set("serpent.chat", "on"); showChatState(); } chatEl.classList.add("open"); chatIn.focus(); }
   function closeChat() { chatEl.classList.remove("open"); chatIn.value = ""; chatIn.blur(); }
+  function sendChat(t) {
+    const now = performance.now();
+    if (now - chatSentAt < 1250) { addChat("", "One message per second, please.", true); return; } // the server drops faster ones
+    chatSentAt = now;
+    const tb = new TextEncoder().encode(t).slice(0, 240), m = new Uint8Array(2 + tb.length); m[0] = 7; m[1] = tb.length; m.set(tb, 2);
+    if (!connected || ws.readyState !== 1) { addChat("", "Not connected to the server.", true); return; }
+    sendRaw(m);
+    // the server sends every line back to its writer too: no echo means it doesn't know chat (an older server)
+    clearTimeout(chatWait);
+    chatWait = setTimeout(() => addChat("", "The server didn't answer: it may need updating to the version with chat.", true), 3000);
+  }
   chatIn.addEventListener("keydown", (e) => {
     e.stopPropagation(); // typing never steers or boosts
-    if (e.key === "Enter") {
-      const t = chatIn.value.trim();
-      if (t) { const tb = new TextEncoder().encode(t).slice(0, 240), m = new Uint8Array(2 + tb.length); m[0] = 7; m[1] = tb.length; m.set(tb, 2); sendRaw(m); }
-      closeChat();
-    } else if (e.key === "Escape") closeChat();
+    if (e.key === "Enter") { const t = chatIn.value.trim(); if (t) sendChat(t); closeChat(); }
+    else if (e.key === "Escape") closeChat();
   });
   chatIn.addEventListener("keyup", (e) => e.stopPropagation());
   chatIn.addEventListener("blur", () => chatEl.classList.remove("open"));
 
   addEventListener("keydown", (e) => {
     if (e.repeat) return;
-    if (e.key === "Enter" && state === "play" && !chatHidden) { e.preventDefault(); openChat(); return; }
+    if (e.key === "Enter" && state === "play") { e.preventDefault(); openChat(); return; }
     const k = e.key;
     if (k === " " || k === "Shift" || k === "ArrowUp" || k === "w") { keyBoost = true; e.preventDefault(); }
     else if (k === "ArrowLeft" || k === "a" || k === "ArrowRight" || k === "d") {
@@ -1582,7 +1608,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   function updateHud() {
     let html = "";
     board.top.forEach(([s, t, sk, hu, m], i) => {
-      const tag = s === me ? `<span class="tg you" title="YOU">Y</span>` : hu ? `<span class="tg pl" title="PLAYER">P</span>` : `<span class="tg t${t}" title="${TIERS[t]}">${TIERS[t][0]}</span>`;
+      const tag = s === me ? `<span class="tg you" title="YOU" data-l="YOU" data-s="Y"></span>` : hu ? `<span class="tg pl" title="PLAYER" data-l="PLAYER" data-s="P"></span>` : `<span class="tg t${t}" title="${TIERS[t]}" data-l="${TIERS[t]}" data-s="${TIERS[t][0]}"></span>`;
       html += `<li class="${s === me ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[sk % 12][0]}"></span><span class="nm">${esc(s === me ? playerName() : hu ? pnames[s] || "Player" : botName(s))}</span>${tag}<span class="sc">${Math.floor(m * 10)}</span></li>`;
     });
     if (html !== lastLb) { lbEl.innerHTML = html; lastLb = html; }
