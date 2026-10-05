@@ -82,6 +82,12 @@
   #board li.me { color: #fff; font-weight: 600; }
   #board li.me .nm::after { content: " •"; color: var(--accent); }
   .tg { flex: none; font-size: 8.5px; font-weight: 600; letter-spacing: .08em; padding: 1px 5px; border-radius: 6px; } /* the level's name in its colour */
+  .tg::after { content: attr(data-l); }
+  /* phones / touch screens below full size: the level as one coloured letter, so whole snake names fit */
+  #board.short .tg { width: 16px; padding: 0; text-align: center; font-size: 10px; font-weight: 800; letter-spacing: 0; line-height: 15px; border-radius: 5px; }
+  #board.short .tg::after { content: attr(data-s); }
+  #lbGrip { position: absolute; left: -2px; bottom: -2px; width: 22px; height: 22px; pointer-events: auto; cursor: nesw-resize; touch-action: none; }
+  #lbGrip::before { content: ""; position: absolute; left: 6px; bottom: 6px; width: 8px; height: 8px; border-left: 2px solid var(--dim); border-bottom: 2px solid var(--dim); border-radius: 0 0 0 3px; opacity: .7; }
   .tg.t0 { color: #6ee7b7; background: rgba(52,211,153,.12); }
   .tg.t1 { color: #7dd3fc; background: rgba(56,189,248,.12); }
   .tg.t2 { color: #fbbf24; background: rgba(251,191,36,.12); }
@@ -159,7 +165,7 @@
   <div class="big" id="len">10</div>
   <div class="sub">Rank <b id="rank">–</b> of <b id="total">–</b> · Kills <b id="kills">0</b></div>
 </div>
-<div id="board" class="hud glass"><h3>Leaderboard<span class="lbsz"><button data-d="-1" title="Smaller leaderboard" aria-label="Smaller leaderboard">−</button><button data-d="1" title="Bigger leaderboard" aria-label="Bigger leaderboard">+</button></span></h3><ol id="lb"></ol></div>
+<div id="board" class="hud glass"><h3>Leaderboard<span class="lbsz"><button data-d="-1" title="Smaller leaderboard" aria-label="Smaller leaderboard">−</button><button data-d="1" title="Bigger leaderboard" aria-label="Bigger leaderboard">+</button></span></h3><ol id="lb"></ol><div id="lbGrip" title="Drag to resize the leaderboard"></div></div>
 <div id="mini" class="hud game"></div>
 
 <div id="menu" class="screen">
