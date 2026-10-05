@@ -459,7 +459,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const showChatState = () => { chatEl.classList.toggle("hidden", chatHidden); chatTog.classList.toggle("off", chatHidden); };
   showChatState();
   // pointerdown keeps the focus in the box, so a click lands before the box closes on blur
-  for (const el of [chatTog, $("chatHide")]) el.addEventListener("pointerdown", (e) => e.preventDefault());
+  for (const el of [chatTog, $("chatHide"), $("chatSend")]) el.addEventListener("pointerdown", (e) => e.preventDefault());
   chatTog.onclick = () => { if (chatHidden) { chatHidden = false; store.set("serpent.chat", "on"); showChatState(); } openChat(); };
   $("chatHide").onclick = () => { chatHidden = true; store.set("serpent.chat", "off"); closeChat(); showChatState(); };
   function addChat(name, text, sys) {
@@ -484,9 +484,11 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     clearTimeout(chatWait);
     chatWait = setTimeout(() => addChat("", "The server didn't answer: it may need updating to the version with chat.", true), 3000);
   }
+  const submitChat = () => { const t = chatIn.value.trim(); if (t) sendChat(t); closeChat(); };
+  $("chatSend").onclick = submitChat; // touch screens
   chatIn.addEventListener("keydown", (e) => {
     e.stopPropagation(); // typing never steers or boosts
-    if (e.key === "Enter") { const t = chatIn.value.trim(); if (t) sendChat(t); closeChat(); }
+    if (e.key === "Enter") submitChat();
     else if (e.key === "Escape") closeChat();
   });
   chatIn.addEventListener("keyup", (e) => e.stopPropagation());
@@ -542,11 +544,21 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
 
   /* ---------------- HUD ---------------- */
   const lbEl = $("lb");
+  // leaderboard size: − / + in its title, remembered (phones start a step smaller)
+  const LB_SIZES = [0.6, 0.7, 0.8, 0.9, 1, 1.15, 1.3, 1.5];
+  let lbSize = parseInt(store.get("serpent.lbsize"), 10);
+  if (!(lbSize >= 0 && lbSize < LB_SIZES.length)) lbSize = matchMedia("(max-width: 640px)").matches ? 2 : 4;
+  const setLbSize = (i) => { lbSize = Math.max(0, Math.min(LB_SIZES.length - 1, i)); $("board").style.setProperty("--lbs", LB_SIZES[lbSize]); };
+  setLbSize(lbSize);
+  for (const bt of document.querySelectorAll(".lbsz button")) {
+    bt.addEventListener("pointerdown", (e) => e.stopPropagation());
+    bt.onclick = (e) => { setLbSize(lbSize + +bt.dataset.d); store.set("serpent.lbsize", lbSize); e.currentTarget.blur(); };
+  }
   let lastLb = "";
   function updateHud() {
     let html = "";
     board.top.forEach(([s, t, sk, hu, m], i) => {
-      const tag = s === me ? `<span class="tg you" title="YOU" data-l="YOU" data-s="Y"></span>` : hu ? `<span class="tg pl" title="PLAYER" data-l="PLAYER" data-s="P"></span>` : `<span class="tg t${t}" title="${TIERS[t]}" data-l="${TIERS[t]}" data-s="${TIERS[t][0]}"></span>`;
+      const tag = s === me ? `<span class="tg you">YOU</span>` : hu ? `<span class="tg pl">PLAYER</span>` : `<span class="tg t${t}">${TIERS[t]}</span>`;
       html += `<li class="${s === me ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[sk % 12][0]}"></span><span class="nm">${esc(s === me ? playerName() : hu ? pnames[s] || "Player" : botName(s))}</span>${tag}<span class="sc">${Math.floor(m * 10)}</span></li>`;
     });
     if (html !== lastLb) { lbEl.innerHTML = html; lastLb = html; }

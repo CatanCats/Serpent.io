@@ -70,22 +70,20 @@
   #stats .sub { font-size: 14px; color: var(--dim); margin-top: 4px; font-variant-numeric: tabular-nums; }
   #stats .sub b { color: var(--text); font-weight: 600; }
 
-  #board { right: max(16px, env(safe-area-inset-right)); top: max(16px, env(safe-area-inset-top)); width: 264px; padding: 12px 14px; }
-  #board h3 { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); font-weight: 600; margin-bottom: 8px; }
+  #board { right: max(16px, env(safe-area-inset-right)); top: max(16px, env(safe-area-inset-top)); min-width: 220px; padding: 12px 14px;
+    transform: scale(var(--lbs, 1)); transform-origin: top right; } /* size: the − / + buttons, remembered */
+  #board h3 { display: flex; align-items: center; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); font-weight: 600; margin-bottom: 8px; }
   #board ol { list-style: none; padding: 0; font-size: 14px; font-variant-numeric: tabular-nums; }
   #board li { display: flex; gap: 8px; align-items: center; padding: 2px 0; color: #c3cbe0; }
   #board li .n { width: 18px; color: var(--dim); font-size: 12px; }
   #board li .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-  #board li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #board li .nm { flex: 1; white-space: nowrap; } /* whole names: the board grows to fit */
+  .lbsz { margin-left: auto; display: flex; gap: 4px; pointer-events: auto; }
+  .lbsz button { width: 22px; height: 20px; padding: 0; border: none; border-radius: 6px; background: rgba(255,255,255,.08); color: var(--dim); font: 600 14px/20px inherit; font-family: inherit; cursor: pointer; }
+  .lbsz button:hover { color: var(--text); background: rgba(255,255,255,.14); }
   #board li.me { color: #fff; font-weight: 600; }
   #board li.me .nm::after { content: " •"; color: var(--accent); }
-  /* level tag: the full name on computers; on phones and touch screens only its initial, in its colour */
-  .tg { flex: none; font-size: 8.5px; font-weight: 600; letter-spacing: .08em; padding: 1px 5px; border-radius: 6px; }
-  .tg::after { content: attr(data-l); }
-  @media (max-width: 640px), (hover: none) {
-    .tg { width: 16px; padding: 0; text-align: center; font-size: 10px; font-weight: 800; letter-spacing: 0; line-height: 15px; border-radius: 5px; }
-    .tg::after { content: attr(data-s); }
-  }
+  .tg { flex: none; font-size: 8.5px; font-weight: 600; letter-spacing: .08em; padding: 1px 5px; border-radius: 6px; } /* the level's name in its colour */
   .tg.t0 { color: #6ee7b7; background: rgba(52,211,153,.12); }
   .tg.t1 { color: #7dd3fc; background: rgba(56,189,248,.12); }
   .tg.t2 { color: #fbbf24; background: rgba(251,191,36,.12); }
@@ -158,8 +156,8 @@
   #chatLog b { font-weight: 600; color: var(--accent2); }
   #chatRow { display: none; gap: 4px; pointer-events: auto; }
   #chat.open #chatRow { display: flex; }
-  #chatHide { flex: none; padding: 0 8px; border: none; border-radius: 8px; background: rgba(8,12,22,.85); color: var(--dim); font: 12px inherit; font-family: inherit; cursor: pointer; }
-  #chatHide:hover { color: var(--text); }
+  .chatBtn { flex: none; padding: 0 8px; border: none; border-radius: 8px; background: rgba(8,12,22,.85); color: var(--dim); font: 12px inherit; font-family: inherit; cursor: pointer; }
+  .chatBtn:hover { color: var(--text); }
   #chatIn { flex: 1; min-width: 0; pointer-events: auto; font: 13px inherit; font-family: inherit; color: var(--text);
     background: rgba(8,12,22,.85); border: 1px solid rgba(56,189,248,.45); border-radius: 8px; padding: 6px 8px; outline: none; }
   #chat.hidden #chatLog { display: none; }
@@ -167,15 +165,16 @@
     height: 22px; padding: 0 7px; border: none; border-radius: 7px; background: rgba(8,12,22,.6); color: var(--dim); font: 12px inherit; font-family: inherit; cursor: pointer; }
   #chatTog:hover { color: var(--text); }
   #chat.open ~ #chatTog { display: none; }
-  @media (max-width: 640px), (hover: none) { #chatTog span { display: none; } }
+  #chatSend { display: none; } /* touch screens: a Send button beside the box (no Enter key to rely on) */
+  @media (hover: none) { #chatSend { display: block; color: #04130d; background: linear-gradient(90deg,#34d399,#38bdf8); } }
   #chatTog.off { opacity: .45; }
   #chatLog div.sys { color: var(--dim); font-style: italic; }
   body:not(.playing) #chatTog { display: none; }
 
   @media (max-width: 640px) {
-    #chat { width: 200px; bottom: calc(max(16px, env(safe-area-inset-bottom)) + 118px); }
+    #chat { width: min(280px, calc(100vw - 32px)); bottom: calc(max(16px, env(safe-area-inset-bottom)) + 118px); }
     #chatTog { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 90px); }
-    #board { width: 164px; padding: 10px 12px; }
+    #board { min-width: 0; padding: 10px 12px; }
     #board li { font-size: 12px; }
     #board li:nth-child(n+6) { display: none; }
     #mini { width: 112px; height: 112px; }
@@ -194,9 +193,9 @@
   <div class="big" id="len">10</div>
   <div class="sub">Rank <b id="rank">–</b> of <b id="total">–</b> · Kills <b id="kills">0</b></div>
 </div>
-<div id="board" class="hud glass"><h3>Leaderboard</h3><ol id="lb"></ol></div>
+<div id="board" class="hud glass"><h3>Leaderboard<span class="lbsz"><button data-d="-1" title="Smaller leaderboard" aria-label="Smaller leaderboard">−</button><button data-d="1" title="Bigger leaderboard" aria-label="Bigger leaderboard">+</button></span></h3><ol id="lb"></ol></div>
 <div id="mini" class="hud game"></div>
-<div id="chat" class="hud game"><div id="chatLog" aria-live="polite"></div><div id="chatRow"><input id="chatIn" maxlength="80" autocomplete="off" spellcheck="false" enterkeyhint="send" placeholder="Say something…" title="Enter sends, Esc closes"><button id="chatHide" title="Hide the chat (💬 brings it back)">Hide</button></div></div>
+<div id="chat" class="hud game"><div id="chatLog" aria-live="polite"></div><div id="chatRow"><input id="chatIn" maxlength="80" autocomplete="off" spellcheck="false" enterkeyhint="send" placeholder="Say something…" title="Enter sends, Esc closes"><button id="chatSend" class="chatBtn">Send</button><button id="chatHide" class="chatBtn" title="Hide the chat (💬 brings it back)">Hide</button></div></div>
 <button id="chatTog" title="Chat (or press Enter)" aria-label="Open chat">💬<span> Chat</span></button>
 
 <div id="menu" class="screen">

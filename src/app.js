@@ -233,6 +233,16 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const TIERS = ["ROOKIE", "CASUAL", "HUNTER", "ELITE", "LEGEND"];
   const TIER_COL = ["#6ee7b7", "#7dd3fc", "#fcd34d", "#fda4af", "#fbbf24"];
   const lbEl = $("lb");
+  // leaderboard size: − / + in its title, remembered (phones start a step smaller)
+  const LB_SIZES = [0.6, 0.7, 0.8, 0.9, 1, 1.15, 1.3, 1.5];
+  let lbSize = parseInt(store.get("serpent.lbsize"), 10);
+  if (!(lbSize >= 0 && lbSize < LB_SIZES.length)) lbSize = matchMedia("(max-width: 640px)").matches ? 2 : 4;
+  const setLbSize = (i) => { lbSize = Math.max(0, Math.min(LB_SIZES.length - 1, i)); $("board").style.setProperty("--lbs", LB_SIZES[lbSize]); };
+  setLbSize(lbSize);
+  for (const bt of document.querySelectorAll(".lbsz button")) {
+    bt.addEventListener("pointerdown", (e) => e.stopPropagation());
+    bt.onclick = (e) => { setLbSize(lbSize + +bt.dataset.d); store.set("serpent.lbsize", lbSize); e.currentTarget.blur(); };
+  }
   const esc = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
   let lastMass = 10, lastLb = "";
   function updateHud() {
@@ -240,7 +250,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     let html = "";
     for (let i = 0; i < 10 && lb[2 + i] >= 0; i++) {
       const s = lb[2 + i], b = s * SN, t = snap[b + 5];
-      const tag = s === 0 ? `<span class="tg you" title="YOU" data-l="YOU" data-s="Y"></span>` : `<span class="tg t${t}" title="${TIERS[t]}" data-l="${TIERS[t]}" data-s="${TIERS[t][0]}"></span>`;
+      const tag = s === 0 ? `<span class="tg you">YOU</span>` : `<span class="tg t${t}">${TIERS[t]}</span>`;
       html += `<li class="${s === 0 ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[snap[b + 4]][0]}"></span><span class="nm">${esc(s === 0 ? playerName() : names[s])}</span>${tag}<span class="sc">${Math.floor(snap[b + 3] * 10)}</span></li>`;
     }
     if (html !== lastLb) { lbEl.innerHTML = html; lastLb = html; }
