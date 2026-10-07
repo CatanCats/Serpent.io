@@ -30,8 +30,8 @@ struct Mini { c: vec4f };
 @group(0) @binding(4) var atlasTex: texture_2d<f32>;
 @group(0) @binding(5) var linClamp: sampler;
 @group(0) @binding(6) var<uniform> M: Mini;
-// skin palette (12 main, then 12 stripe colours): read once per vertex, passed to pixels flat
-@group(0) @binding(7) var<uniform> PAL: array<vec4f, 24>;
+// skin palette (128 main, then 128 stripe colours): read once per vertex, passed to pixels flat
+@group(0) @binding(7) var<uniform> PAL: array<vec4f, 256>;
 const RM: i32 = ${RING - 1};
 const CR: f32 = 2.38095238;   // 1 / 0.42: circle radius in segment units
 const SP: f32 = 0.42;
@@ -98,7 +98,7 @@ struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
   // drawn slightly in the past) counts as just born, not wrapped round to fully grown
   var age = F.pxTime.w - f32(b.z | (b.w << 8u)); age = age - 65536. * floor(age / 65536.); if (age > 60000.) { age = 0.; }
   o.pos = vec4f(c.x, -c.y, 0., 1.); o.l = l; o.r = r; o.info = vec4u(0u, b.y, (((b.z | (b.w << 8u)) * 37u + u32(pq.x & 255)) & 255u), u32(min(age, 255.) * 16.)); // pulse phase: from the pellet itself
-  o.col = PAL[b.y % 12u].rgb; return o;
+  o.col = PAL[b.y & 127u].rgb; return o;
 }
 @fragment fn fsFood(i: FoodO) -> @location(0) vec4f {
   let d = length(i.l); let r = i.r; let aa = F.pxTime.x * 1.2;
@@ -149,7 +149,7 @@ fn fwd(h1: vec4f) -> vec2f { return vec2f(cos(h1.z), sin(h1.z)); }
   let c = (p + select(-nrm, nrm, side) - F.camHalf.xy) / F.camHalf.zw;
   var o: RibO;
   o.pos = vec4f(c.x, -c.y, 0., 1.); o.t = t; o.v = select(-W, W, side); o.dir = tg;
-  let sk = (h2.w & 255u) % 12u; o.ca = PAL[sk].rgb; o.cb = PAL[12u + sk].rgb;
+  let sk = h2.w & 127u; o.ca = PAL[sk].rgb; o.cb = PAL[128u + sk].rgb;
   o.fl = (h2.w >> 8u) | (h2.y << 8u); o.r = h0.w; o.nl = f32(n - 1); // flags | newest ring index
   return o;
 }
@@ -190,6 +190,11 @@ fn shade(k: f32, l: vec2f, nd: f32, f: vec2f, ca: vec3f, cb: vec3f, r: f32, newe
   var c = vec3f(0.);
   if (e0 > 0.) { c += shade(k0, l0, n0, f, i.ca, i.cb, i.r, i.fl >> 8u) * e0; }
   if (e1 > 0.) { c += shade(k1, l1, n1, f, i.ca, i.cb, i.r, i.fl >> 8u) * e1; }
+  if ((i.fl & 2u) == 0u) { // other snakes (not yours): a thin red outline, so they stand out
+    var rim = smoothstep(.8 - aa, .8 + aa, av);
+    if ((k0 == 0. && dot(l0, f) > 0.) || (k0 == i.nl && dot(l0, f) < 0.)) { rim = max(rim, smoothstep(.8 - aa, .8 + aa, n0)); } // round head front, tail end
+    c = mix(c, vec3f(.94, .16, .2) * a, rim);
+  }
   if ((i.fl & 4u) != 0u) { c += vec3f(1., .85, .4) * .18 * a * (.5 + .5 * sin(i.t * .8 - F.pxTime.y * 3.)); } // shimmering scales
   return vec4f(c + gc * glow, a);
 }
@@ -218,7 +223,7 @@ struct MiniO { @builtin(position) pos: vec4f, @location(0) l: vec2f, @location(1
   let m = p.xy + q * ext;
   var o: MiniO;
   o.pos = vec4f(M.c.xy + vec2f(m.x, -m.y) * M.c.z * 2. / F.resWR.xy, 0., 1.);
-  o.l = q * ext; o.s = ext; o.info = info; o.col = PAL[((info >> 8u) & 255u) % 12u].rgb; return o;
+  o.l = q * ext; o.s = ext; o.info = info; o.col = PAL[(info >> 8u) & 127u].rgb; return o;
 }
 fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
 @fragment fn fsMini(i: MiniO) -> @location(0) vec4f {

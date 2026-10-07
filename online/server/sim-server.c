@@ -970,7 +970,7 @@ void sim_spawn_human(i32 s, i32 skin) {
   if (s >= 0 && s < MAXS) { pendT[s] = 0; inArrived[s] = 0; if (graceSteps[s] < 1.f) graceSteps[s] = 1.f; }
   if (s < 0 || s >= MAXS || !human[s] || S[s].alive) return;
   S[s].tier = 0; killedBy[s] = -1;
-  spawnSnake(s, 10.f, (skin % 12 + 12) % 12);
+  spawnSnake(s, 10.f, skin & 127); /* 0..11 presets, 12..127 the colour picker's shades */
   setFoci(); /* count and fill the new player's view with food at once, like offline */
   for (i32 f = 0; f < nfoc; f++) if (focS[f] == s) { countFood(f); maintainFood(f, 4000); }
   publish();

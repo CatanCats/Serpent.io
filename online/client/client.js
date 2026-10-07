@@ -16,6 +16,22 @@ const SKINS = [
   ["#fbbf24", "#b45309"], ["#fb7185", "#be123c"], ["#a3e635", "#4d7c0f"], ["#22d3ee", "#0e7490"],
   ["#fb923c", "#c2410c"], ["#818cf8", "#4338ca"], ["#f1f5f9", "#64748b"], ["#facc15", "#27272a"],
 ];
+// Skins 12..127: the colour picker's choices (everyone builds the same list, so only the number is sent).
+// 24 hues x 4 lightnesses, 12 soft hues, 8 greys; the stripe colour is a darker shade of the same.
+{
+  const hsl = (h, s, l) => { const f = (n) => { const k = (n + h / 30) % 12, a = s * Math.min(l, 1 - l);
+    return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)))).toString(16).padStart(2, "0"); }; return "#" + f(0) + f(8) + f(4); };
+  const add = (h, s, l) => SKINS.push([hsl(h, s, l), hsl(h, s, l * 0.55)]);
+  for (const l of [0.35, 0.5, 0.65, 0.8]) for (let h = 0; h < 360; h += 15) add(h, 0.85, l);
+  for (let h = 0; h < 360; h += 30) add(h, 0.35, 0.6);
+  for (let i = 0; i < 8; i++) add(0, 0, 0.12 + i * 0.115);
+}
+const nearestSkin = (hex) => { // the picker's colour → the closest skin from 12 on
+  const c = (h) => [1, 3, 5].map((o) => parseInt(h.substr(o, 2), 16)), [r, g, b] = c(hex);
+  let best = 12, bd = 1e9;
+  for (let i = 12; i < SKINS.length; i++) { const [R, G, B] = c(SKINS[i][0]), d = 2 * (R - r) ** 2 + 4 * (G - g) ** 2 + 3 * (B - b) ** 2; if (d < bd) { bd = d; best = i; } }
+  return best;
+};
 const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagini", "Zigzag", "Sir Hiss", "Boop", "Cobra Kai",
   "Pythonista", "Rattler", "Sidewinder", "Jormungandr", "Ouroboros", "Danger Noodle", "Spaghetti", "Slithers", "Taipan",
   "Adder", "Asp", "Basilisk", "Garter", "Krait", "Anaconda", "Boa", "Copperhead", "Hognose", "Kingsnake", "Milk Snake",
@@ -43,8 +59,8 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     arena: { base: 0, hdr: HDR, mini: MINI, food: FOOD, size: FOOD + MAXF * 8 },
   };
   E.arenaBytes = new Uint8Array(mem, 0, E.arena.size);
-  E.palette = new Float32Array(96);
-  SKINS.forEach(([a, b], i) => [a, b].forEach((h, k) => [1, 3, 5].forEach((o, c) => { E.palette[(k * 12 + i) * 4 + c] = parseInt(h.substr(o, 2), 16) / 255; })));
+  E.palette = new Float32Array(SKINS.length * 8); // 128 main colours, then 128 stripe colours
+  SKINS.forEach(([a, b], i) => [a, b].forEach((h, k) => [1, 3, 5].forEach((o, c) => { E.palette[(k * SKINS.length + i) * 4 + c] = parseInt(h.substr(o, 2), 16) / 255; })));
 
   /* ---------------- Renderer: WebGPU, or WebGL 2 when chosen ----------------
      If WebGPU fails (at start or later: driver reset, GPU process restart) the game
@@ -373,9 +389,9 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       case 5: onDeath(d.getUint8(1), d.getUint16(2, true), d.getFloat32(4, true)); break;
       case 6: {
         miniList.length = 0;
-        for (let i = 0, k = d.getUint16(1, true), o = 3; i < k; i++, o += 4) { // slot, x, y (a byte each), skin | size<<4
-          const b = d.getUint8(o + 3), sz = (b >> 4) * 4;
-          miniList.push([d.getUint8(o), (b & 15) % 12, (d.getUint8(o + 1) / 255 * 2 - 1) * WR, (d.getUint8(o + 2) / 255 * 2 - 1) * WR, sz * sz]);
+        for (let i = 0, k = d.getUint16(1, true), o = 3; i < k; i++, o += 5) { // slot, x, y (a byte each), skin, size
+          const sz = d.getUint8(o + 4) * 4;
+          miniList.push([d.getUint8(o), d.getUint8(o + 3) & 127, (d.getUint8(o + 1) / 255 * 2 - 1) * WR, (d.getUint8(o + 2) / 255 * 2 - 1) * WR, sz * sz]);
         }
         break;
       }
@@ -383,8 +399,9 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       case 9: { // chat line: slot, name, text
         const nl = d.getUint8(2), td = new TextDecoder();
         const name = td.decode(new Uint8Array(d.buffer, d.byteOffset + 3, nl)), tl = d.getUint8(3 + nl);
-        if (d.getUint8(1) === me) clearTimeout(chatWait); // our own line came back: chat works
-        addChat(name || "Player", td.decode(new Uint8Array(d.buffer, d.byteOffset + 4 + nl, tl)));
+        const text = td.decode(new Uint8Array(d.buffer, d.byteOffset + 4 + nl, tl));
+        if (text === chatLast) clearTimeout(chatWait); // our own line came back: chat works
+        addChat(name || "Player", text);
         break;
       }
       case 7: setStatus("The server is full right now — try again soon, or play offline", "bad"); state = "menu"; showMenu(); break;
@@ -392,16 +409,26 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   }
 
   /* ---------------- UI ---------------- */
-  let skinSel = +(store.get("serpent.skin") ?? 0) % 12;
+  let skinSel = (+(store.get("serpent.skin") ?? 0) | 0) & 127;
   const skinsEl = $("skins");
-  SKINS.forEach(([a, b], i) => {
+  const pickSkin = (i) => { skinSel = i; store.set("serpent.skin", i); [...skinsEl.children].forEach((c, j) => c.setAttribute("aria-pressed", j === Math.min(i, 12))); };
+  const stripes = ([a, b]) => `repeating-linear-gradient(135deg, ${a} 0 7px, ${b} 7px 14px)`;
+  SKINS.slice(0, 12).forEach((sk, i) => {
     const el = document.createElement("button");
-    el.className = "skin"; el.title = `Skin ${i + 1}`;
-    el.style.background = `repeating-linear-gradient(135deg, ${a} 0 7px, ${b} 7px 14px)`;
-    el.setAttribute("aria-pressed", i === skinSel);
-    el.onclick = () => { skinSel = i; store.set("serpent.skin", i); [...skinsEl.children].forEach((c, j) => c.setAttribute("aria-pressed", j === i)); };
+    el.className = "skin"; el.title = `Skin ${i + 1}`; el.style.background = stripes(sk);
+    el.onclick = () => pickSkin(i);
     skinsEl.appendChild(el);
   });
+  { // last: any colour (a colour picker; the snake gets the nearest of 116 shades)
+    const el = document.createElement("label"), inp = document.createElement("input");
+    el.className = "skin pick"; el.title = "Pick your own colour"; inp.type = "color";
+    const show = () => { el.style.background = skinSel >= 12 ? stripes(SKINS[skinSel]) : ""; };
+    inp.value = SKINS[skinSel >= 12 ? skinSel : 12][0];
+    inp.addEventListener("input", () => { pickSkin(nearestSkin(inp.value)); show(); });
+    el.onclick = () => { if (skinSel < 12) { pickSkin(nearestSkin(inp.value)); show(); } };
+    el.appendChild(inp); skinsEl.appendChild(el); show();
+  }
+  pickSkin(skinSel);
   const nameEl = $("name"); nameEl.value = store.get("serpent.name") ?? "";
   let best = +(store.get("serpent.best.online") ?? 0);
   const playerName = () => nameEl.value.trim() || "You";
@@ -453,15 +480,19 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   cv.addEventListener("touchmove", (e) => { for (const t of e.changedTouches) touches.set(t.identifier, t); onTouch(); e.preventDefault(); }, { passive: false });
   const endT = (e) => { for (const t of e.changedTouches) touches.delete(t.identifier); onTouch(); };
   cv.addEventListener("touchend", endT); cv.addEventListener("touchcancel", endT);
-  /* ---------------- chat (small, bottom-left; 💬 or Enter opens it, Hide hides it, remembered) ---------------- */
+  /* ---------------- chat (small, bottom-left; on the start page too) ----------------
+     The 💬 Chat button turns it on/off (greyed out when off; remembered). When on: the last
+     lines, a box to type in and a small green send button. Enter (in game) jumps to the box. */
   const chatEl = $("chat"), chatLog = $("chatLog"), chatIn = $("chatIn"), chatTog = $("chatTog");
-  let chatHidden = store.get("serpent.chat") === "off", chatSentAt = -1e9, chatWait = 0;
-  const showChatState = () => { chatEl.classList.toggle("hidden", chatHidden); $("chatHide").textContent = chatHidden ? "Show" : "Hide"; };
+  let chatHidden = store.get("serpent.chat") === "off", chatSentAt = -1e9, chatWait = 0, chatLast = "";
+  const showChatState = () => {
+    chatEl.classList.toggle("hidden", chatHidden); chatTog.classList.toggle("off", chatHidden);
+    chatTog.title = chatHidden ? "Chat is off: click to turn it on" : "Chat is on: click to turn it off";
+    document.body.classList.toggle("chatOn", !chatHidden);
+  };
   showChatState();
-  // pointerdown keeps the focus in the box, so a click lands before the box closes on blur
-  for (const el of [chatTog, $("chatHide"), $("chatSend")]) el.addEventListener("pointerdown", (e) => e.preventDefault());
-  chatTog.onclick = () => { if (chatEl.classList.contains("open")) closeChat(); else openChat(); };
-  $("chatHide").onclick = () => { chatHidden = !chatHidden; store.set("serpent.chat", chatHidden ? "off" : "on"); if (chatHidden) closeChat(); showChatState(); };
+  for (const el of [chatTog, $("chatSend")]) el.addEventListener("pointerdown", (e) => e.preventDefault()); // keep the typing focus
+  chatTog.onclick = () => { chatHidden = !chatHidden; store.set("serpent.chat", chatHidden ? "off" : "on"); if (chatHidden) closeChat(); showChatState(); };
   function addChat(name, text, sys) {
     const el = document.createElement("div");
     if (sys) el.className = "sys";
@@ -469,16 +500,18 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     el.append(document.createTextNode(text));
     chatLog.append(el);
     while (chatLog.children.length > 6) chatLog.firstChild.remove(); // only the last few lines
-    setTimeout(() => el.classList.add("old"), 10000);                 // then they fade (still shown while typing)
+    setTimeout(() => el.classList.add("old"), 10000);                 // then they fade in game (still shown while typing)
   }
-  function openChat() { if (state !== "play") return; if (chatHidden) { chatHidden = false; store.set("serpent.chat", "on"); showChatState(); } chatEl.classList.add("open"); chatIn.focus(); }
+  function openChat() { if (chatHidden) return; chatEl.classList.add("open"); chatIn.focus(); }
   function closeChat() { chatEl.classList.remove("open"); chatIn.value = ""; chatIn.blur(); }
   function sendChat(t) {
     const now = performance.now();
     if (now - chatSentAt < 1250) { addChat("", "One message per second, please.", true); return; } // the server drops faster ones
-    chatSentAt = now;
-    const tb = new TextEncoder().encode(t).slice(0, 240), m = new Uint8Array(2 + tb.length); m[0] = 7; m[1] = tb.length; m.set(tb, 2);
     if (!connected || ws.readyState !== 1) { addChat("", "Not connected to the server.", true); return; }
+    chatSentAt = now; chatLast = t;
+    // text, then the typed name (the server uses it only before you join)
+    const enc = new TextEncoder(), tb = enc.encode(t).slice(0, 240), nb = enc.encode(nameEl.value.trim()).slice(0, 48);
+    const m = new Uint8Array(3 + tb.length + nb.length); m[0] = 7; m[1] = tb.length; m.set(tb, 2); m[2 + tb.length] = nb.length; m.set(nb, 3 + tb.length);
     sendRaw(m);
     // the server sends every line back to its writer too: no echo means it doesn't know chat (an older server)
     clearTimeout(chatWait);
@@ -486,6 +519,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   }
   const submitChat = () => { const t = chatIn.value.trim(); if (t) sendChat(t); closeChat(); };
   $("chatSend").onclick = submitChat;
+  chatIn.addEventListener("focus", () => chatEl.classList.add("open"));
   chatIn.addEventListener("keydown", (e) => {
     e.stopPropagation(); // typing never steers or boosts
     if (e.key === "Enter") submitChat();
@@ -574,7 +608,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     let html = "";
     board.top.forEach(([s, t, sk, hu, m], i) => {
       const tag = s === me ? `<span class="tg you" data-l="YOU" data-s="Y"></span>` : hu ? `<span class="tg pl" data-l="PLAYER" data-s="P"></span>` : `<span class="tg t${t}" title="${TIERS[t]}" data-l="${TIERS[t]}" data-s="${TIERS[t][0]}"></span>`;
-      html += `<li class="${s === me ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[sk % 12][0]}"></span><span class="nm">${esc(s === me ? playerName() : hu ? pnames[s] || "Player" : botName(s))}</span>${tag}<span class="sc">${Math.floor(m * 10)}</span></li>`;
+      html += `<li class="${s === me ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[sk & 127][0]}"></span><span class="nm">${esc(s === me ? playerName() : hu ? pnames[s] || "Player" : botName(s))}</span>${tag}<span class="sc">${Math.floor(m * 10)}</span></li>`;
     });
     if (html !== lastLb) { lbEl.innerHTML = html; lastLb = html; }
     for (let s = 0; s < NS; s++) {

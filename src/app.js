@@ -6,6 +6,22 @@ const SKINS = [
   ["#fbbf24", "#b45309"], ["#fb7185", "#be123c"], ["#a3e635", "#4d7c0f"], ["#22d3ee", "#0e7490"],
   ["#fb923c", "#c2410c"], ["#818cf8", "#4338ca"], ["#f1f5f9", "#64748b"], ["#facc15", "#27272a"],
 ];
+// Skins 12..127: the colour picker's choices (everyone builds the same list, so only the number is sent).
+// 24 hues x 4 lightnesses, 12 soft hues, 8 greys; the stripe colour is a darker shade of the same.
+{
+  const hsl = (h, s, l) => { const f = (n) => { const k = (n + h / 30) % 12, a = s * Math.min(l, 1 - l);
+    return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)))).toString(16).padStart(2, "0"); }; return "#" + f(0) + f(8) + f(4); };
+  const add = (h, s, l) => SKINS.push([hsl(h, s, l), hsl(h, s, l * 0.55)]);
+  for (const l of [0.35, 0.5, 0.65, 0.8]) for (let h = 0; h < 360; h += 15) add(h, 0.85, l);
+  for (let h = 0; h < 360; h += 30) add(h, 0.35, 0.6);
+  for (let i = 0; i < 8; i++) add(0, 0, 0.12 + i * 0.115);
+}
+const nearestSkin = (hex) => { // the picker's colour → the closest skin from 12 on
+  const c = (h) => [1, 3, 5].map((o) => parseInt(h.substr(o, 2), 16)), [r, g, b] = c(hex);
+  let best = 12, bd = 1e9;
+  for (let i = 12; i < SKINS.length; i++) { const [R, G, B] = c(SKINS[i][0]), d = 2 * (R - r) ** 2 + 4 * (G - g) ** 2 + 3 * (B - b) ** 2; if (d < bd) { bd = d; best = i; } }
+  return best;
+};
 const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagini", "Zigzag", "Sir Hiss", "Boop", "Cobra Kai",
   "Pythonista", "Rattler", "Sidewinder", "Jormungandr", "Ouroboros", "Danger Noodle", "Spaghetti", "Slithers", "Taipan",
   "Adder", "Asp", "Basilisk", "Garter", "Krait", "Anaconda", "Boa", "Copperhead", "Hognose", "Kingsnake", "Milk Snake",
@@ -48,8 +64,8 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
               food: W.foodPtr() - base, size: W.foodPtr() - base + W.maxFood() * 8 };
   E.arenaBytes = new Uint8Array(mem, base, E.arena.size);
   // skin palette as 24 vec4s (12 main colours, then 12 stripe colours) for a uniform buffer
-  E.palette = new Float32Array(96);
-  SKINS.forEach(([a, b], i) => [a, b].forEach((h, k) => [1, 3, 5].forEach((o, c) => { E.palette[(k * 12 + i) * 4 + c] = parseInt(h.substr(o, 2), 16) / 255; })));
+  E.palette = new Float32Array(SKINS.length * 8); // 128 main colours, then 128 stripe colours
+  SKINS.forEach(([a, b], i) => [a, b].forEach((h, k) => [1, 3, 5].forEach((o, c) => { E.palette[(k * SKINS.length + i) * 4 + c] = parseInt(h.substr(o, 2), 16) / 255; })));
 
   /* ---------------- Renderer: WebGPU, or WebGL 2 when chosen ----------------
      If WebGPU fails (at start or later: driver reset, GPU process restart) the game
@@ -143,16 +159,26 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   addEventListener("resize", resize); resize();
 
   /* ---------------- UI ---------------- */
-  let skinSel = +(store.get("serpent.skin") ?? 0) % 12;
+  let skinSel = (+(store.get("serpent.skin") ?? 0) | 0) & 127;
   const skinsEl = $("skins");
-  SKINS.forEach(([a, b], i) => {
+  const pickSkin = (i) => { skinSel = i; store.set("serpent.skin", i); [...skinsEl.children].forEach((c, j) => c.setAttribute("aria-pressed", j === Math.min(i, 12))); };
+  const stripes = ([a, b]) => `repeating-linear-gradient(135deg, ${a} 0 7px, ${b} 7px 14px)`;
+  SKINS.slice(0, 12).forEach((sk, i) => {
     const el = document.createElement("button");
-    el.className = "skin"; el.title = `Skin ${i + 1}`;
-    el.style.background = `repeating-linear-gradient(135deg, ${a} 0 7px, ${b} 7px 14px)`;
-    el.setAttribute("aria-pressed", i === skinSel);
-    el.onclick = () => { skinSel = i; store.set("serpent.skin", i); [...skinsEl.children].forEach((c, j) => c.setAttribute("aria-pressed", j === i)); };
+    el.className = "skin"; el.title = `Skin ${i + 1}`; el.style.background = stripes(sk);
+    el.onclick = () => pickSkin(i);
     skinsEl.appendChild(el);
   });
+  { // last: any colour (a colour picker; the snake gets the nearest of 116 shades)
+    const el = document.createElement("label"), inp = document.createElement("input");
+    el.className = "skin pick"; el.title = "Pick your own colour"; inp.type = "color";
+    const show = () => { el.style.background = skinSel >= 12 ? stripes(SKINS[skinSel]) : ""; };
+    inp.value = SKINS[skinSel >= 12 ? skinSel : 12][0];
+    inp.addEventListener("input", () => { pickSkin(nearestSkin(inp.value)); show(); });
+    el.onclick = () => { if (skinSel < 12) { pickSkin(nearestSkin(inp.value)); show(); } };
+    el.appendChild(inp); skinsEl.appendChild(el); show();
+  }
+  pickSkin(skinSel);
   const nameEl = $("name"); nameEl.value = store.get("serpent.name") ?? "";
   let best = +(store.get("serpent.best") ?? 0);
   const names = []; for (let i = 0; i < 64; i++) names.push(BOT_NAMES[(i * 7 + 3) % BOT_NAMES.length] + (i >= BOT_NAMES.length ? " II" : ""));

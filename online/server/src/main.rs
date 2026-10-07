@@ -93,7 +93,8 @@ impl Sim {
                     4 LEAVE (back to the menu)
                     5 PING  u8 id   (answered at once with PONG, by the connection, not the game loop)
                     6 DELAY u16 round trip in ms (the page's measurement; used to compensate collisions)
-                    7 CHAT  u8 len, text (UTF-8, at most 80 characters; one message per 1.2 s; joined players only)
+                    7 CHAT  u8 len, text (UTF-8, at most 80 characters; one message per 1.2 s),
+                          then u8 len, name: used only before joining (the start page chats too)
  server -> client:  1 WELCOME u8 maxSnakes, u16 ring, f32 worldRadius, u8 bots, u8 players
                     2 SNAP  u32 tick, u8 you (255 none), u8 spectate, u8 flags (1 = reset), u16 your kills,
                           u8 last input seq received, u8 steps since it was received, u8 n, snakes, u16 m, food
@@ -108,10 +109,10 @@ impl Sim {
                     3 BOARD u16 alive, u16 yourRank, u8 k, k x (u8 slot, u8 tier, u8 skin, u8 human, f32 mass)
                     4 NAME  u8 slot, u8 len, name
                     5 DEATH u8 killer (255 = world edge), u16 kills, f32 mass
-                    6 MINI  u16 k, k x (u8 slot, u8 x, u8 y (0..255 across the world), u8 skin | size<<4)
+                    6 MINI  u16 k, k x (u8 slot, u8 x, u8 y (0..255 across the world), u8 skin (0..127), u8 size)
                     7 FULL  (server full)
                     8 PONG  u8 id
-                    9 CHAT  u8 slot, u8 len, name, u8 len, text (to everyone) */
+                    9 CHAT  u8 slot (255: someone on the start page), u8 len, name, u8 len, text (to everyone) */
 
 /// How many steps behind the server a player's screen shows the other snakes: its round
 /// trip (your own snake is predicted ahead by half of it, the others arrive half of it
@@ -251,14 +252,20 @@ impl Game {
                     if c.slot >= 0 { unsafe { sim_set_aspect(c.slot, c.aspect) }; }
                 }
                 4 => { self.leave(&mut c); }
-                7 if d.len() >= 2 && c.slot >= 0 => { // chat: joined players, one line per 1.2 s
+                7 if d.len() >= 2 => { // chat: one line per 1.2 s; from the start page too (then with the typed name)
                     let len = (d[1] as usize).min(d.len() - 2);
                     let text = clean_chat(&d[2..2 + len]);
                     if !text.is_empty() && c.chat_at.map_or(true, |t| at.duration_since(t) >= Duration::from_millis(1200)) {
                         c.chat_at = Some(at);
-                        let (name, tb) = (self.names[c.slot as usize].as_bytes().to_vec(), text.into_bytes());
+                        let name = if c.slot >= 0 { self.names[c.slot as usize].clone() } else {
+                            let r = &d[2 + len..]; // optional: u8 len, name
+                            let nl = r.first().map_or(0, |&n| (n as usize).min(r.len() - 1));
+                            let n = if nl > 0 { clean_name(&r[1..1 + nl]) } else { String::new() };
+                            if n.is_empty() { "Player".to_string() } else { n }
+                        };
+                        let (name, tb) = (name.into_bytes(), text.into_bytes());
                         let mut o = Out(Vec::with_capacity(4 + name.len() + tb.len()));
-                        o.u8(9); o.u8(c.slot as u8); o.u8(name.len() as u8); o.0.extend_from_slice(&name); o.u8(tb.len() as u8); o.0.extend_from_slice(&tb);
+                        o.u8(9); o.u8(if c.slot >= 0 { c.slot as u8 } else { 255 }); o.u8(name.len() as u8); o.0.extend_from_slice(&name); o.u8(tb.len() as u8); o.0.extend_from_slice(&tb);
                         let m = o.0;
                         Self::send(&mut c, m.clone());
                         self.clients.insert(id, c);
@@ -462,13 +469,13 @@ impl Game {
         order.sort_unstable_by(|&a, &b| sim.p(b).mass.total_cmp(&sim.p(a).mass));
         let mut top = Out(Vec::new());
         for &s in order.iter().take(10) { let p = sim.p(s); top.u8(s as u8); top.u8(p.tier as u8); top.u8(p.skin as u8); top.u8(p.human as u8); top.f32(p.mass); }
-        let mut mini = Out(Vec::with_capacity(3 + order.len() * 4));
+        let mut mini = Out(Vec::with_capacity(3 + order.len() * 5));
         mini.u8(6); mini.u16(order.len() as u16);
         let b = |v: f32| ((v / sim.wr * 0.5 + 0.5) * 255.).round().clamp(0., 255.) as u8; // a byte per coordinate: plenty for the minimap
         for &s in &order {
             let p = sim.p(s);
             mini.u8(s as u8); mini.u8(b(p.hx)); mini.u8(b(p.hy));
-            mini.u8(p.skin as u8 % 12 | ((p.mass.sqrt() / 4.).round().min(15.) as u8) << 4);
+            mini.u8(p.skin as u8 & 127); mini.u8((p.mass.sqrt() / 4.).round().min(15.) as u8);
         }
         let n = order.len();
         for c in self.clients.values_mut() {

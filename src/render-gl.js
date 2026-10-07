@@ -37,7 +37,7 @@ function createGL(canvas, E) {
   // Skin palette in a uniform buffer, looked up once per VERTEX and handed to the pixels
   // as flat colours. (Indexing a constant array per pixel is a slow path on Direct3D,
   // which runs WebGL in Edge/Chrome on Windows.)
-  const PAL = `layout(std140) uniform Pal { vec4 uPal[24]; };`; // 12 main colours, then 12 stripe colours
+  const PAL = `layout(std140) uniform Pal { vec4 uPal[256]; };`; // 128 main colours, then 128 stripe colours
   // Per-frame values shared by every program: ONE uniform-buffer upload per frame.
   // highp members: fragment shaders below default to mediump (half precision on mobile GPUs)
   const FRAME = `layout(std140) uniform Frame { highp vec4 uCamHalf; highp vec4 uPxTime; highp vec4 uResWR; };`;
@@ -128,7 +128,7 @@ function createGL(canvas, E) {
     // age in quarter-steps, smooth (the clock has fractions); a pellet "born in the future"
     // (online: drawn slightly in the past) counts as just born, not wrapped round to fully grown
     float age=mod(uPxTime.w-float(aB.z|(aB.w<<8)),65536.); if(age>60000.) age=0.;
-    vL=l; vR=r; vI=uvec4(0u,aB.y,((aB.z|(aB.w<<8))*37u+uint(aP.x&255))&255u,uint(min(age,255.)*16.)); vC=uPal[aB.y%12u].rgb; // pulse phase: from the pellet itself
+    vL=l; vR=r; vI=uvec4(0u,aB.y,((aB.z|(aB.w<<8))*37u+uint(aP.x&255))&255u,uint(min(age,255.)*16.)); vC=uPal[aB.y&127u].rgb; // pulse phase: from the pellet itself
   }`;
   const FS = `#version 300 es
   precision mediump float;
@@ -188,7 +188,7 @@ function createGL(canvas, E) {
     vec2 c=(p+(side?nrm:-nrm)-uCamHalf.xy)/uCamHalf.zw;
     gl_Position=vec4(c.x,-c.y,0,1);
     vT=t; vV=side?W:-W; vDir=tg;
-    uint sk=(aH2.w&255u)%12u; vCA=uPal[sk].rgb; vCB=uPal[12u+sk].rgb;
+    uint sk=aH2.w&127u; vCA=uPal[sk].rgb; vCB=uPal[128u+sk].rgb;
     vFl=(aH2.w>>8)|(aH2.y<<8); vR=aH0.w; vNl=float(n-1); // flags | newest ring index
   }`;
   const RFS = `#version 300 es
@@ -232,6 +232,11 @@ function createGL(canvas, E) {
     else if((vFl&4u)!=0u){ glow=exp(-pow(max(gd-.85,0.)/.3,2.))*(.45+.15*sin(uPxTime.y*2.5+vT*.3))*(1.-a); gc=vec3(1.,.78,.3); }
     if(a<=0. && glow<=.003) discard;
     vec3 c=(e0>0. ? shade(k0,l0,n0,f)*e0 : vec3(0)) + (e1>0. ? shade(k1,l1,n1,f)*e1 : vec3(0));
+    if((vFl&2u)==0u){ // other snakes (not yours): a thin red outline, so they stand out
+      float rim=smoothstep(.8-aa,.8+aa,av);
+      if((k0==0. && dot(l0,f)>0.) || (k0==vNl && dot(l0,f)<0.)) rim=max(rim,smoothstep(.8-aa,.8+aa,n0)); // round head front, tail end
+      c=mix(c,vec3(.94,.16,.2)*a,rim);
+    }
     if((vFl&4u)!=0u) c+=vec3(1.,.85,.4)*.18*a*(.5+.5*sin(vT*.8-uPxTime.y*3.)); // shimmering scales
     o=vec4(c+gc*glow, a);
   }`;
@@ -264,7 +269,7 @@ function createGL(canvas, E) {
   uniform vec2 uRes;
   out vec2 vL; out vec2 vS; flat out uint vI; flat out vec3 vC;
   void main(){
-    uint kind=aI&255u; vC=uPal[((aI>>8)&255u)%12u].rgb;
+    uint kind=aI&255u; vC=uPal[(aI>>8)&127u].rgb;
     vec2 q=vec2(float(gl_VertexID&1), float(gl_VertexID>>1))*2.-1.;
     vec2 ext = kind==3u ? vec2(aP.z, float(aI>>8)/16777215.) + 6./uMini.z : vec2(aP.z*(kind==0u?1.03:1.) + 1.5/uMini.z);
     vec2 m=aP.xy+q*ext;                       // minimap units (disc radius 1), y down
