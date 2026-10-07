@@ -694,7 +694,7 @@ async fn main() {
         .route("/status", get(|State(a): State<Arc<App>>| async move {
             let s = &a.stats;
             ([(header::CONTENT_TYPE, "application/json"), (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
-             format!("{{\"players\":{},\"connections\":{},\"tick\":{}}}", s.players.load(Relaxed), s.conns.load(Relaxed), s.tick.load(Relaxed)))
+             format!("{{\"players\":{},\"connections\":{},\"tick\":{},\"version\":\"{}\"}}", s.players.load(Relaxed), s.conns.load(Relaxed), s.tick.load(Relaxed), env!("SERPENT_VERSION")))
         }))
         .route("/ws", get(ws_route))
         .with_state(app);

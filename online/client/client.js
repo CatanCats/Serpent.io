@@ -456,12 +456,12 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   /* ---------------- chat (small, bottom-left; 💬 or Enter opens it, Hide hides it, remembered) ---------------- */
   const chatEl = $("chat"), chatLog = $("chatLog"), chatIn = $("chatIn"), chatTog = $("chatTog");
   let chatHidden = store.get("serpent.chat") === "off", chatSentAt = -1e9, chatWait = 0;
-  const showChatState = () => { chatEl.classList.toggle("hidden", chatHidden); chatTog.classList.toggle("off", chatHidden); };
+  const showChatState = () => { chatEl.classList.toggle("hidden", chatHidden); $("chatHide").textContent = chatHidden ? "Show" : "Hide"; };
   showChatState();
   // pointerdown keeps the focus in the box, so a click lands before the box closes on blur
   for (const el of [chatTog, $("chatHide"), $("chatSend")]) el.addEventListener("pointerdown", (e) => e.preventDefault());
-  chatTog.onclick = () => { if (chatHidden) { chatHidden = false; store.set("serpent.chat", "on"); showChatState(); } openChat(); };
-  $("chatHide").onclick = () => { chatHidden = true; store.set("serpent.chat", "off"); closeChat(); showChatState(); };
+  chatTog.onclick = () => { if (chatEl.classList.contains("open")) closeChat(); else openChat(); };
+  $("chatHide").onclick = () => { chatHidden = !chatHidden; store.set("serpent.chat", chatHidden ? "off" : "on"); if (chatHidden) closeChat(); showChatState(); };
   function addChat(name, text, sys) {
     const el = document.createElement("div");
     if (sys) el.className = "sys";
@@ -485,7 +485,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     chatWait = setTimeout(() => addChat("", "The server didn't answer: it may need updating to the version with chat.", true), 3000);
   }
   const submitChat = () => { const t = chatIn.value.trim(); if (t) sendChat(t); closeChat(); };
-  $("chatSend").onclick = submitChat; // touch screens
+  $("chatSend").onclick = submitChat;
   chatIn.addEventListener("keydown", (e) => {
     e.stopPropagation(); // typing never steers or boosts
     if (e.key === "Enter") submitChat();

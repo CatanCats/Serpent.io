@@ -167,19 +167,19 @@
   #chatIn { flex: 1; min-width: 0; pointer-events: auto; font: 13px inherit; font-family: inherit; color: var(--text);
     background: rgba(8,12,22,.85); border: 1px solid rgba(56,189,248,.45); border-radius: 8px; padding: 6px 8px; outline: none; }
   #chat.hidden #chatLog { display: none; }
-  #chatTog { position: fixed; left: max(16px, env(safe-area-inset-left)); bottom: calc(max(16px, env(safe-area-inset-bottom)) + 112px); pointer-events: auto;
+  /* the two buttons under the chat: 💬 Chat writes a message, Hide/Show hides or shows the messages (remembered) */
+  #chatBar { position: fixed; left: max(16px, env(safe-area-inset-left)); bottom: calc(max(16px, env(safe-area-inset-bottom)) + 112px); display: flex; gap: 4px; }
+  #chatTog, #chatHide { pointer-events: auto;
     height: 22px; padding: 0 7px; border: none; border-radius: 7px; background: rgba(8,12,22,.6); color: var(--dim); font: 12px inherit; font-family: inherit; cursor: pointer; }
-  #chatTog:hover { color: var(--text); }
-  #chat.open ~ #chatTog { display: none; }
-  #chatSend { display: none; } /* touch screens: a Send button beside the box (no Enter key to rely on) */
-  @media (hover: none) { #chatSend { display: block; color: #04130d; background: linear-gradient(90deg,#34d399,#38bdf8); } }
-  #chatTog.off { opacity: .45; }
+  #chatTog:hover, #chatHide:hover { color: var(--text); }
+  #chatSend { color: #04130d; font-weight: 600; background: linear-gradient(90deg,#34d399,#38bdf8); }
+  #chatSend:hover { color: #04130d; filter: brightness(1.1); }
   #chatLog div.sys { color: var(--dim); font-style: italic; }
-  body:not(.playing) #chatTog { display: none; }
+  body:not(.playing) #chatBar { display: none; }
 
   @media (max-width: 640px) {
     #chat { width: min(280px, calc(100vw - 32px)); bottom: calc(max(16px, env(safe-area-inset-bottom)) + 118px); }
-    #chatTog { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 90px); }
+    #chatBar { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 90px); }
     #board { min-width: 0; padding: 10px 12px; }
     #board li { font-size: 12px; }
     #board li:nth-child(n+6) { display: none; }
@@ -201,8 +201,8 @@
 </div>
 <div id="board" class="hud glass"><h3>Leaderboard<span class="lbsz"><button data-d="-1" title="Smaller leaderboard" aria-label="Smaller leaderboard">−</button><button data-d="1" title="Bigger leaderboard" aria-label="Bigger leaderboard">+</button></span></h3><ol id="lb"></ol><div id="lbGrip" title="Drag to resize the leaderboard"></div></div>
 <div id="mini" class="hud game"></div>
-<div id="chat" class="hud game"><div id="chatLog" aria-live="polite"></div><div id="chatRow"><input id="chatIn" maxlength="80" autocomplete="off" spellcheck="false" enterkeyhint="send" placeholder="Say something…" title="Enter sends, Esc closes"><button id="chatSend" class="chatBtn">Send</button><button id="chatHide" class="chatBtn" title="Hide the chat (💬 brings it back)">Hide</button></div></div>
-<button id="chatTog" title="Chat (or press Enter)" aria-label="Open chat">💬<span> Chat</span></button>
+<div id="chat" class="hud game"><div id="chatLog" aria-live="polite"></div><div id="chatRow"><input id="chatIn" maxlength="80" autocomplete="off" spellcheck="false" enterkeyhint="send" placeholder="Say something…" title="Enter sends, Esc closes"><button id="chatSend" class="chatBtn" title="Send (Enter)">Send</button></div></div>
+<div id="chatBar"><button id="chatTog" title="Write a message (or press Enter)" aria-label="Write a chat message">💬<span> Chat</span></button><button id="chatHide" title="Hide or show the chat messages">Hide</button></div>
 
 <div id="menu" class="screen">
   <div class="card glass">

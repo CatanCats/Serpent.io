@@ -1,0 +1,83 @@
+# Deploys the online game to the live server (br8t.com/slither.io) whenever main changes
+# the server code or the pages, or by hand (Actions → Deploy → Run workflow).
+#
+# Nothing secret is in this file. It needs two repository secrets
+# (Settings → Secrets and variables → Actions → New repository secret):
+#   SERPENT_HOST     deploy@<server address>
+#   SERPENT_SSH_KEY  the whole SSH private key file (the `deploy` account's key)
+# Without them the job only prints a warning and stops.
+#
+# On the server it follows the live setup (see CLAUDE.md): the source goes to
+# ~/serpent-src, is built there with clang (cargo -j1, the box has one CPU), and the
+# binary and pages are installed into /srv/apps/serpent/. The previous binary is kept
+# as serpent-server.prev and put back if the new one doesn't answer /status.
+name: Deploy
+on:
+  push:
+    branches: [main]
+    paths: ['online/server/**', 'index.html', 'offline.html', '.github/workflows/deploy.yml']
+  workflow_dispatch:
+concurrency: { group: deploy, cancel-in-progress: false }
+permissions: { contents: read }
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HOST: ${{ secrets.SERPENT_HOST }}
+      KEY: ${{ secrets.SERPENT_SSH_KEY }}
+    steps:
+      - name: Check the secrets are set
+        id: s
+        run: |
+          if [ -z "$HOST" ] || [ -z "$KEY" ]; then
+            echo "::warning::SERPENT_HOST / SERPENT_SSH_KEY are not set: nothing deployed."; echo "ok=0" >> "$GITHUB_OUTPUT"
+          else echo "ok=1" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/checkout@v4
+        if: steps.s.outputs.ok == '1'
+      - name: SSH key and host check
+        if: steps.s.outputs.ok == '1'
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/key && chmod 600 ~/.ssh/key
+          ssh-keyscan -t ed25519 "${HOST#*@}" > ~/.ssh/known_hosts 2>/dev/null
+          # the server's published host key fingerprint: refuse to talk to anything else
+          fp=$(ssh-keygen -lf ~/.ssh/known_hosts | awk '{print $2}')
+          [ "$fp" = "SHA256:it4w+thtC2Pxm48rG34PJuPGyPaIlibCqaFmTapARgI" ] || { echo "::error::host key does not match"; exit 1; }
+      - name: Upload
+        if: steps.s.outputs.ok == '1'
+        run: |
+          tar czf /tmp/serpent.tgz --exclude=target -C online/server . 
+          tar czf /tmp/pages.tgz index.html offline.html
+          scp -i ~/.ssh/key -o IdentitiesOnly=yes -o BatchMode=yes /tmp/serpent.tgz /tmp/pages.tgz "$HOST":/tmp/
+      - name: Build and install on the server
+        if: steps.s.outputs.ok == '1'
+        run: |
+          ssh -i ~/.ssh/key -o IdentitiesOnly=yes -o BatchMode=yes "$HOST" "VER=${GITHUB_SHA::7} bash -s" <<'REMOTE'
+          set -euo pipefail
+          # the crate root: ~/serpent-src itself, or ~/serpent-src/online/server if a whole repo copy is there
+          SRC=~/serpent-src; [ -f "$SRC/online/server/Cargo.toml" ] && SRC="$SRC/online/server"
+          mkdir -p "$SRC" && cd "$SRC"
+          find . -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} +   # fresh source, keep the build cache
+          tar xzf /tmp/serpent.tgz
+          [ -f ~/.cargo/env ] && . ~/.cargo/env
+          CC=clang SERPENT_VERSION="$VER" nice cargo build --release -j1
+          mkdir -p /tmp/serpent-pages && tar xzf /tmp/pages.tgz -C /tmp/serpent-pages
+          D=/srv/apps/serpent
+          sudo cp "$D/serpent-server" "$D/serpent-server.prev"
+          sudo install -m 755 target/release/serpent-server "$D/serpent-server"
+          sudo install -m 644 /tmp/serpent-pages/index.html /tmp/serpent-pages/offline.html "$D/"
+          sudo systemctl restart serpent
+          for i in 1 2 3 4 5 6 7 8 9 10; do sleep 1; if curl -fsS http://127.0.0.1:8010/status; then echo; break; fi; done
+          if ! curl -fsS http://127.0.0.1:8010/status | grep -q "\"version\":\"$VER\""; then
+            echo "new server did not come up: rolling back"; sudo install -m 755 "$D/serpent-server.prev" "$D/serpent-server"; sudo systemctl restart serpent; exit 1
+          fi
+          rm -rf /tmp/serpent.tgz /tmp/pages.tgz /tmp/serpent-pages
+          free -m | head -2
+          REMOTE
+      - name: Check over HTTPS
+        if: steps.s.outputs.ok == '1'
+        run: curl -fsS https://br8t.com/slither.io/status && echo
+      - name: Remove the key
+        if: always()
+        run: rm -f ~/.ssh/key

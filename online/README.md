@@ -76,10 +76,16 @@ cargo build --release                # needs Rust (rustup.rs) and a C compiler
 WEB_ROOT=../.. ./target/release/serpent-server   # http://localhost:8080
 ```
 Settings (environment): `PORT` (8080), `BOTS` (60), `WEB_ROOT` (folder with index.html),
-`MAX_PER_IP` (8 connections per address), `LOG_SECS` (30). `GET /status` returns players online.
+`MAX_PER_IP` (8 connections per address), `LOG_SECS` (30). `GET /status` returns players online and the server's version (commit).
 
 ## Deploy
-`online/deploy/deploy.sh` does all of this on a Debian box that already runs Caddy:
+**Live server (automatic):** `.github/workflows/deploy.yml` updates the live server on every push to
+`main` that changes the server or the pages, or by hand from the Actions tab. Add two repository
+secrets first (Settings → Secrets and variables → Actions): `SERPENT_HOST` = `deploy@<address>` and
+`SERPENT_SSH_KEY` = the SSH private key. Nothing secret is in the repository. It checks the server's
+host key, builds on the server, keeps the previous binary, and rolls back if the new one doesn't start.
+
+**A new box:** `online/deploy/deploy.sh` does all of this on a Debian box that already runs Caddy:
 builds a portable binary here, copies it to `/srv/apps/serpent/`, installs the systemd unit
 (bound to 127.0.0.1, memory- and CPU-capped), adds a Caddy site block (validated, with the
 old file restored if it fails) and checks `/status`. The host and key come from the
