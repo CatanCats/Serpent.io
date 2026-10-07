@@ -60,21 +60,24 @@ struct RingO { @builtin(position) pos: vec4f, @location(0) @interpolate(flat) co
 @fragment fn fsRing(i: RingO) -> @location(0) vec4f { return vec4f(i.col, 1.); } // one flat colour: no maths per pixel
 struct HexO { @builtin(position) pos: vec4f, @location(0) @interpolate(flat) col: vec3f };
 @vertex fn vsHex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> HexO {
-  // each hex owns 3 of its 6 edges (the rest belong to neighbours); unit hex: inradius .5
-  var ea = array<vec2f, 3>(vec2f(-.2887, -.5), vec2f(.2887, -.5), vec2f(.5774, 0.));
-  var eb = array<vec2f, 3>(vec2f(.2887, -.5), vec2f(.5774, 0.), vec2f(.2887, .5));
+  // a dot at each hex corner: each hex owns 2 of its 6 (every corner is shared by 3 hexes:
+  // its right one and its upper-right one); unit hex: inradius .5
+  var dc = array<vec2f, 2>(vec2f(.5774, 0.), vec2f(.2887, .5));
   let S = vec2f(${FLOOR_HX}, ${FLOOR_HY});
   let nx = i32(ceil(2. * F.camHalf.z / S.x)) + 3;               // columns, first column and row: as floorPlan
   let f0 = vec2i(floor((F.camHalf.xy - F.camHalf.zw) / S)) - 1;
   let cell = i32(ii >> 1u);
   let ctr = (vec2f(f32(cell % nx + f0.x), f32(cell / nx + f0.y)) + f32(ii & 1u) * .5) * S;
   var o: HexO;
-  if (length(ctr) > F.resWR.z) { o.pos = vec4f(2., 2., 2., 1.); return o; } // outside the world: no lines
+  if (length(ctr) > F.resWR.z) { o.pos = vec4f(2., 2., 2., 1.); return o; } // outside the world: no dots
   let e = vi / 6u; let k = corner(vi % 6u);
-  let A = ctr + ea[e] * 46.; let B = ctr + eb[e] * 46.; let dd = normalize(B - A); let n = vec2f(-dd.y, dd.x);
-  let side = select(-.5, .5, k.y > .5) * F.pxTime.x;             // exactly one pixel wide: no gaps, fewest pixels
-  let c = (select(A, B, k.x > .5) + n * side - F.camHalf.xy) / F.camHalf.zw;
-  o.pos = vec4f(c.x, -c.y, 0., 1.); o.col = FB * (1. + (${FLOOR_LINE_K} - 1.) * lineFade());
+  let P = ctr + dc[e] * 46.;
+  let c = (P + (k * 2. - 1.) * F.pxTime.x * max(1., F.pxTime.z) - F.camHalf.xy) / F.camHalf.zw; // a square 2 CSS pixels wide
+  o.pos = vec4f(c.x, -c.y, 0., 1.);
+  let d = length(P); let WR = F.resWR.z;
+  var col = mix(vec3f(${FLOOR_DOT.join(", ")}), vec3f(${FLOOR_DOT_MID.join(", ")}), 1. - smoothstep(WR * .35 - 150., WR * .35, d));
+  col = mix(col, vec3f(${FLOOR_DOT_EDGE.join(", ")}), smoothstep(WR - 1600., WR - 200., d));
+  o.col = mix(FB, col, lineFade());
   return o;
 }
 @fragment fn fsHex(i: HexO) -> @location(0) vec4f { return vec4f(i.col, 1.); } // one flat colour: no blending, no maths
@@ -320,7 +323,7 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
     if (i === 0) { // floor: the pass cleared (nearly free); flat inside area when outside; hex lines; edge band + darkness
       pass.setPipeline(P.ring);
       if (plan.out) pass.draw(FLOOR_RING_SEG * 6, 1, 0, 0);
-      if (plan.hexes) { pass.setPipeline(P.hex); pass.draw(18, plan.hexes); pass.setPipeline(P.ring); }
+      if (plan.hexes) { pass.setPipeline(P.hex); pass.draw(12, plan.hexes); pass.setPipeline(P.ring); }
       pass.draw(FLOOR_RING_SEG * 6, 2, 0, plan.out ? 1 : 2); // kinds 1+2 or 2+3
       return;
     }

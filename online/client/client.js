@@ -249,10 +249,10 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     const ex = sx - (h[i].x + (h[i + 1].x - h[i].x) * f), ey = sy - (h[i].y + (h[i + 1].y - h[i].y) * f);
     pred.err = Math.hypot(ex, ey);
     if (window.__predLog) window.__predLog.push({ t: performance.now(), err: pred.err, seq, steps, boost: lastBoostSent, mass: mass[me], aimGap: wrapA(sentAim - pred.a), hist: h.length });
-    // a third of the gap per snapshot: smooth, settles in ~0.2 s. A big gap (the server was
-    // told otherwise, e.g. after a lag spike) is closed at once, but here and now: the server
-    // head is from a moment ago, so jumping to it would throw the snake back.
-    const k = ex * ex + ey * ey > 60 * 60 ? 1 : 0.3, kx = ex * k, ky = ey * k;
+    // 30% of the gap per 2 steps (whatever the snapshot rate): smooth, settles in ~0.2 s. A big
+    // gap (the server was told otherwise, e.g. after a lag spike) is closed at once, but here
+    // and now: the server head is from a moment ago, so jumping to it would throw the snake back.
+    const k = ex * ex + ey * ey > 60 * 60 ? 1 : 1 - Math.pow(0.7, snapInt / 2), kx = ex * k, ky = ey * k;
     pred.x += kx; pred.y += ky; for (const e of h) { e.x += kx; e.y += ky; }
   }
   // food: server slot -> local slot (local slots stay dense so the GPU draws few)
@@ -266,13 +266,16 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
      that is ~3.1 steps instead of a fixed 4 (others drawn ~22 ms fresher, measured), on a
      jittery one it grows so nothing stalls.
      Arrivals are timed against the fastest one in the last 3 s (the network's best case). */
-  const arrOff = []; let arrLo = 0, interpGoal = INTERP, interpT = INTERP, interpSent = INTERP, rtS = -1, lastRt = 0;
+  const arrOff = [], gaps = []; let arrLo = 0, interpGoal = INTERP, interpT = INTERP, interpSent = INTERP, rtS = -1, lastRt = 0, snapInt = 2, lastSnapTick = -1;
   function noteArrival(t) {
     arrOff.push(performance.now() - t * (1000 / 60)); if (arrOff.length > 90) arrOff.shift();
+    if (lastSnapTick >= 0 && t > lastSnapTick && t - lastSnapTick < 8) { gaps.push(t - lastSnapTick); if (gaps.length > 30) gaps.shift(); }
+    lastSnapTick = t;
+    if (gaps.length >= 5) snapInt = [...gaps].sort((a, b) => a - b)[gaps.length >> 1]; // steps between snapshots (1 or 2)
     if (arrOff.length < 10) return;
     arrLo = Math.min(...arrOff);
     const late = arrOff.map((o) => (o - arrLo) * 0.06).sort((a, b) => a - b); // steps late, each
-    interpGoal = Math.min(10, Math.max(3, 2 + late[Math.floor(late.length * 0.98)] + 1)); // +1: margin (less ran past the data now and then)
+    interpGoal = Math.min(10, Math.max(snapInt + 1, snapInt + late[Math.floor(late.length * 0.98)] + 1)); // +1: margin (less ran past the data now and then)
   }
 
   function clearWorld() {
@@ -438,8 +441,8 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       case 8: onPong(d.getUint8(1)); break;
       case 9: { // chat line: slot, name, text
         const nl = d.getUint8(2), td = new TextDecoder();
-        const name = td.decode(new Uint8Array(d.buffer, d.byteOffset + 3, nl)), tl = d.getUint8(3 + nl);
-        const text = td.decode(new Uint8Array(d.buffer, d.byteOffset + 4 + nl, tl));
+        const name = td.decode(new Uint8Array(d.buffer, d.byteOffset + 3, nl)), tl = d.getUint16(3 + nl, true);
+        const text = td.decode(new Uint8Array(d.buffer, d.byteOffset + 5 + nl, tl));
         if (text === chatLast) clearTimeout(chatWait); // our own line came back: chat works
         addChat(name || "Player", text);
         break;
@@ -507,22 +510,37 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   // The mouse takes over again only when it really moves: browsers also send "moves" when
   // the page changes under a still cursor, which used to swing the snake toward it.
   let keyAnchorX = 0, keyAnchorY = 0;
-  cv.addEventListener("pointermove", (e) => {
+  // Keys steer relative to where your snake is heading NOW (the prediction): aim a little to
+  // that side (it turns at its own top speed) or straight ahead. An aim that ran on by
+  // itself could get more than half a turn ahead of a slow-turning big snake, which then
+  // turned the other way. Called every frame, and also straight from input events, so a
+  // move goes out at once instead of at the next frame (sendInput limits it to ~60/s).
+  function steerNow(now) {
+    if (state !== "play") return;
+    if (usingKeys) aim = (pred.on ? pred.a : me >= 0 ? ha[me] : aim) + keyTurn * 0.6;
+    else aim = Math.atan2(my - innerHeight / 2, mx - innerWidth / 2);
+    sendInput(now, aim, mouseBoost || keyBoost || touchBoost ? 1 : 0);
+  }
+  const onMouseMove = (e) => {
     if (e.pointerType !== "mouse") return;
     mx = e.clientX; my = e.clientY;
     if (usingKeys && Math.hypot(mx - keyAnchorX, my - keyAnchorY) > 6) usingKeys = false;
-  });
-  cv.addEventListener("mousedown", () => { mouseBoost = true; });
-  addEventListener("mouseup", () => { mouseBoost = false; });
+    steerNow(performance.now());
+  };
+  // pointerrawupdate (Chrome, Edge; secure pages) arrives as the mouse moves; pointermove is
+  // held back to the next frame. Use the first where there is one.
+  cv.addEventListener("onpointerrawupdate" in window ? "pointerrawupdate" : "pointermove", onMouseMove);
+  cv.addEventListener("mousedown", () => { mouseBoost = true; steerNow(performance.now()); });
+  addEventListener("mouseup", () => { mouseBoost = false; steerNow(performance.now()); });
   const touches = new Map();
-  const onTouch = () => { touchBoost = touches.size >= 2; const t = touches.values().next().value; if (t) { mx = t.clientX; my = t.clientY; usingKeys = false; } };
+  const onTouch = () => { touchBoost = touches.size >= 2; const t = touches.values().next().value; if (t) { mx = t.clientX; my = t.clientY; usingKeys = false; } steerNow(performance.now()); };
   cv.addEventListener("touchstart", (e) => { for (const t of e.changedTouches) touches.set(t.identifier, t); onTouch(); e.preventDefault(); }, { passive: false });
   cv.addEventListener("touchmove", (e) => { for (const t of e.changedTouches) touches.set(t.identifier, t); onTouch(); e.preventDefault(); }, { passive: false });
   const endT = (e) => { for (const t of e.changedTouches) touches.delete(t.identifier); onTouch(); };
   cv.addEventListener("touchend", endT); cv.addEventListener("touchcancel", endT);
   /* ---------------- chat (small, bottom-left; on the start page too) ----------------
-     The 💬 Chat button turns it on/off (greyed out when off; remembered). When on: the last
-     lines, a box to type in and a small green send button. Enter (in game) jumps to the box. */
+     The 💬 Chat button turns it on/off (greyed out when off; remembered). Next to it, while on,
+     the small green ➤: it opens a box to type in (so does Enter in game), and sends. */
   const chatEl = $("chat"), chatLog = $("chatLog"), chatIn = $("chatIn"), chatTog = $("chatTog");
   let chatHidden = store.get("serpent.chat") === "off", chatSentAt = -1e9, chatWait = 0, chatLast = "";
   const showChatState = () => {
@@ -550,15 +568,15 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (!connected || ws.readyState !== 1) { addChat("", "Not connected to the server.", true); return; }
     chatSentAt = now; chatLast = t;
     // text, then the typed name (the server uses it only before you join)
-    const enc = new TextEncoder(), tb = enc.encode(t).slice(0, 240), nb = enc.encode(nameEl.value.trim()).slice(0, 48);
-    const m = new Uint8Array(3 + tb.length + nb.length); m[0] = 7; m[1] = tb.length; m.set(tb, 2); m[2 + tb.length] = nb.length; m.set(nb, 3 + tb.length);
+    const enc = new TextEncoder(), tb = enc.encode(t).slice(0, 480), nb = enc.encode(nameEl.value.trim()).slice(0, 48);
+    const m = new Uint8Array(4 + tb.length + nb.length); m[0] = 7; m[1] = tb.length & 255; m[2] = tb.length >> 8; m.set(tb, 3); m[3 + tb.length] = nb.length; m.set(nb, 4 + tb.length);
     sendRaw(m);
     // the server sends every line back to its writer too: no echo means it doesn't know chat (an older server)
     clearTimeout(chatWait);
     chatWait = setTimeout(() => addChat("", "The server didn't answer: it may need updating to the version with chat.", true), 3000);
   }
   const submitChat = () => { const t = chatIn.value.trim(); if (t) sendChat(t); closeChat(); };
-  $("chatSend").onclick = submitChat;
+  $("chatSend").onclick = () => { if (chatEl.classList.contains("open")) submitChat(); else openChat(); }; // ➤: write, then send
   chatIn.addEventListener("focus", () => chatEl.classList.add("open"));
   chatIn.addEventListener("keydown", (e) => {
     e.stopPropagation(); // typing never steers or boosts
@@ -580,6 +598,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     else if (k === "p" || k === "P") $("perf").classList.toggle("off");
     else if (k === "Enter" && state !== "play") start();
     else if (k === "Escape" && state !== "menu") toMenu();
+    steerNow(performance.now()); // a key turn or boost goes out at once
   });
   addEventListener("keyup", (e) => {
     const k = e.key;
@@ -587,6 +606,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     else if (k === "ArrowLeft" || k === "a" || k === "ArrowRight" || k === "d") {
       keysDown.delete(k === "ArrowLeft" || k === "a" ? "L" : "R"); keyTurn = (keysDown.has("R") ? 1 : 0) - (keysDown.has("L") ? 1 : 0);
     }
+    steerNow(performance.now()); // a key turn or boost goes out at once
   });
   addEventListener("blur", () => { keyBoost = mouseBoost = false; keyTurn = 0; keysDown.clear(); });
 
@@ -760,9 +780,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       // that side (it turns at its own top speed) or straight ahead. An aim that ran on by
       // itself could get more than half a turn ahead of a slow-turning big snake, which then
       // turned the other way.
-      if (usingKeys) aim = (pred.on ? pred.a : me >= 0 ? ha[me] : aim) + keyTurn * 0.6;
-      else aim = Math.atan2(my - innerHeight / 2, mx - innerWidth / 2);
-      sendInput(now, aim, mouseBoost || keyBoost || touchBoost ? 1 : 0);
+      steerNow(now);
     }
     const t0 = performance.now();
     if (estTick >= 0) estTick += dt * 60;

@@ -8,7 +8,11 @@
 const FLOOR_BASE = [.052, .065, .104];         // the floor colour: one colour everywhere inside the world
 const FLOOR_DARK = [.008, .009, .014];         // outside the world: darkness
 const FLOOR_RIM_COL = [.62, .17, .25];         // the world's edge: a thin red line
-const FLOOR_LINE_K = "1.45";                   // hex lines: the floor colour, this much lighter
+// Honeycomb DOTS (one at each hex corner, 2 CSS px square): ~17x fewer pixels than lines, so
+// they can be brighter, and their colour tells where you are (free: worked out per dot).
+const FLOOR_DOT = [.21, .25, .37];             // dots: well lighter than the floor
+const FLOOR_DOT_MID = [.42, .35, .13];         // inside the middle zone (35% of the world radius): gold
+const FLOOR_DOT_EDGE = [.52, .14, .18];        // the last 1600 units before the edge: turning red
 const FOOD_GLOW = "1.7";                        // food halo radius, in pellet radii
 const FLOOR_RING_SEG = 512;                    // segments of the rings (the edge stays round)
 const FLOOR_HX = (46 * Math.sqrt(3)).toFixed(4), FLOOR_HY = "46.";  // hex lattice period (world units)
@@ -85,24 +89,25 @@ function createGL(canvas, E) {
   ${FRAME}
   ${FLOOR_RIM}
   flat out vec3 vCol;
-  // each hex owns 3 of its 6 edges (the other 3 belong to neighbours); unit hex: inradius .5
-  const vec2 EA[3]=vec2[3](vec2(-.2887,-.5),vec2(.2887,-.5),vec2(.5774,0.));
-  const vec2 EB[3]=vec2[3](vec2(.2887,-.5),vec2(.5774,0.),vec2(.2887,.5));
+  // a dot at each hex corner: each hex owns 2 of its 6 (every corner is shared by 3 hexes:
+  // its right one and its upper-right one); unit hex: inradius .5
+  const vec2 DC[2]=vec2[2](vec2(.5774,0.),vec2(.2887,.5));
   void main(){
     vec2 S=vec2(${FLOOR_HX},${FLOOR_HY});
     int nx=int(ceil(2.*uCamHalf.z/S.x))+3;                      // columns, first column and row: as floorPlan
     ivec2 f0=ivec2(floor((uCamHalf.xy-uCamHalf.zw)/S))-1;
     int lat=gl_InstanceID&1, cell=gl_InstanceID>>1;
     vec2 ctr=(vec2(float(cell%nx+f0.x),float(cell/nx+f0.y))+float(lat)*.5)*S;
-    if(length(ctr)>uResWR.z){ gl_Position=vec4(2,2,2,1); return; } // outside the world: no lines
+    if(length(ctr)>uResWR.z){ gl_Position=vec4(2,2,2,1); return; } // outside the world: no dots
     int e=gl_VertexID/6, k=gl_VertexID-e*6;
-    bool atB=(k==1||k==4||k==5), up=(k==2||k==3||k==5);
-    vec2 A=ctr+EA[e]*46., B=ctr+EB[e]*46., d=normalize(B-A), n=vec2(-d.y,d.x);
-    float hw=uPxTime.x*.5;                                       // exactly one pixel wide: no gaps, fewest pixels
-    vec2 w=(atB?B:A)+n*(up?hw:-hw);
-    vec2 c=(w-uCamHalf.xy)/uCamHalf.zw;
+    vec2 q=vec2((k==1||k==4||k==5)?1.:-1., (k==2||k==3||k==5)?1.:-1.);
+    vec2 P=ctr+DC[e]*46.;
+    vec2 c=(P+q*uPxTime.x*max(1.,uPxTime.z)-uCamHalf.xy)/uCamHalf.zw; // a square 2 CSS pixels wide
     gl_Position=vec4(c.x,-c.y,0,1);
-    vCol=vec3(${FLOOR_BASE.join(",")})*(1.+(${FLOOR_LINE_K}-1.)*lineFade());
+    float d=length(P), WR=uResWR.z;
+    vec3 col=mix(vec3(${FLOOR_DOT.join(",")}), vec3(${FLOOR_DOT_MID.join(",")}), 1.-smoothstep(WR*.35-150.,WR*.35,d));
+    col=mix(col, vec3(${FLOOR_DOT_EDGE.join(",")}), smoothstep(WR-1600.,WR-200.,d));
+    vCol=mix(vec3(${FLOOR_BASE.join(",")}), col, lineFade());
   }`;
   const HEX_FS = `#version 300 es
   precision mediump float;
@@ -413,7 +418,7 @@ function createGL(canvas, E) {
       gl.disable(gl.BLEND); gl.bindVertexArray(emptyVao);
       gl.useProgram(ringP);
       if (plan.out) { gl.uniform1i(firstU, 0); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6); } // inside area
-      if (plan.hexes) { gl.useProgram(hexP); gl.drawArraysInstanced(gl.TRIANGLES, 0, 18, plan.hexes); gl.useProgram(ringP); }
+      if (plan.hexes) { gl.useProgram(hexP); gl.drawArraysInstanced(gl.TRIANGLES, 0, 12, plan.hexes); gl.useProgram(ringP); }
       gl.uniform1i(firstU, plan.out ? 1 : 2); gl.drawArraysInstanced(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6, 2); // kinds 1+2 or 2+3
       gl.enable(gl.BLEND);
       mark(); // food

@@ -2,7 +2,7 @@
 //!
 //! * The game is the offline game's simulation (`sim-server.c`: same rules, extended
 //!   for many players), compiled to native machine code and linked in.
-//! * One game thread owns it and steps it at a fixed 60 Hz. Every 2 steps it
+//! * One game thread owns it and steps it at a fixed 60 Hz. After every step (SNAP_EVERY) it
 //!   builds, for each client, a binary snapshot of only what is near that client:
 //!   new trail points of nearby snakes and changed food in view.
 //! * Networking is async (tokio + axum WebSockets). Connections hand messages to the
@@ -94,7 +94,7 @@ impl Sim {
                     5 PING  u8 id   (answered at once with PONG, by the connection, not the game loop)
                     6 DELAY u16 round trip in ms (the page's measurement; used to compensate collisions),
                           u8 the page's smoothing delay in tenths of a step (optional; 4 steps if absent)
-                    7 CHAT  u8 len, text (UTF-8, at most 80 characters; one message per 1.2 s),
+                    7 CHAT  u16 len, text (UTF-8, at most 160 characters / 480 bytes; one message per 1.2 s),
                           then u8 len, name: used only before joining (the start page chats too)
  server -> client:  1 WELCOME u8 maxSnakes, u16 ring, f32 worldRadius, u8 bots, u8 players
                     2 SNAP  u32 tick, u8 you (255 none), u8 spectate, u8 flags (1 = reset), u16 your kills,
@@ -113,17 +113,22 @@ impl Sim {
                     6 MINI  u16 k, k x (u8 slot, u8 x, u8 y (0..255 across the world), u8 skin (0..127), u8 size)
                     7 FULL  (server full)
                     8 PONG  u8 id
-                    9 CHAT  u8 slot (255: someone on the start page), u8 len, name, u8 len, text (to everyone) */
+                    9 CHAT  u8 slot (255: someone on the start page), u8 len, name, u16 len, text (to everyone) */
 
-/// How many steps behind the server a player's screen shows the other snakes: its round
-/// trip (your own snake is predicted ahead by half of it, the others arrive half of it
-/// late), plus the page's smoothing delay (INTERP = 4 steps) and half a snapshot interval.
-/// How many steps late a player sees other snakes: the round trip, the page's smoothing
-/// delay (sent with DELAY in tenths of a step; 4 from pages that don't send it) and half a
-/// snapshot interval.
-fn lag_steps(rtt_ms: u16, interp10: u8) -> f32 { if rtt_ms == 0 { 0. } else { rtt_ms as f32 * 0.06 + if interp10 > 0 { interp10 as f32 / 10. } else { 4. } + 1. } }
+/// Steps between snapshots: SNAP_EVERY (1-4), default 1 = every step (60 a second). Every 2nd
+/// step was measured: 30 players 7.8 KB/s each and ~90 us/step of network work; every step
+/// 9.3 KB/s and ~150 us/step, for other snakes drawn ~25 ms fresher.
+fn snap_every() -> u32 {
+    static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("SNAP_EVERY").ok().and_then(|v| v.parse().ok()).filter(|v| (1..=4).contains(v)).unwrap_or(1))
+}
+/// How many steps late a player sees other snakes: the round trip (your own snake is
+/// predicted ahead by half of it, the others arrive half of it late) plus the page's smoothing
+/// delay (sent with DELAY in tenths of a step, measured from the fastest snapshot arrival, so
+/// nothing more to add). Pages that don't send it: the old fixed 4 + half a snapshot interval.
+fn lag_steps(rtt_ms: u16, interp10: u8) -> f32 { if rtt_ms == 0 { 0. } else { rtt_ms as f32 * 0.06 + if interp10 > 0 { interp10 as f32 / 10. } else { 5. } } }
 
-/// World units to 16-bit fixed point (quarter units), the trail's own format.
+/// World units to 16-bit fixed point (half units), the trail's own format.
 #[inline] fn q1(v: f32) -> i16 { (v * 2.).round().clamp(-32767., 32767.) as i16 } // half units, as the sim stores them
 
 struct Out(Vec<u8>);
@@ -162,11 +167,11 @@ struct Client {
 #[derive(Default)]
 struct Stats { players: AtomicU32, conns: AtomicU32, tick: AtomicU32, step_ns: AtomicU64, send_ns: AtomicU64 }
 
-/// A chat line as sent on: no control characters, at most 80 characters, trimmed.
+/// A chat line as sent on: no control characters, at most 160 characters (480 bytes), trimmed.
 fn clean_chat(b: &[u8]) -> String {
-    let s: String = String::from_utf8_lossy(b).chars().filter(|c| !c.is_control()).take(80).collect();
+    let s: String = String::from_utf8_lossy(b).chars().filter(|c| !c.is_control()).take(160).collect();
     let mut t = s.trim().to_string();
-    while t.len() > 240 { t.pop(); } // its byte length must fit the u8 on the wire
+    while t.len() > 480 { t.pop(); } // at most 480 bytes (160 characters of up to 3 bytes)
     t
 }
 
@@ -226,7 +231,7 @@ impl Game {
     fn on_msg(&mut self, id: u64, d: &[u8], at: Instant) {
         let Some(mut c) = self.clients.remove(&id) else { return };
         c.msgs += 1;
-        if c.msgs <= 240 && !d.is_empty() && (d.len() <= 64 || (d[0] == 7 && d.len() <= 250)) {
+        if c.msgs <= 240 && !d.is_empty() && (d.len() <= 64 || (d[0] == 7 && d.len() <= 560)) {
             match d[0] {
                 1 if d.len() >= 5 => { // join / respawn
                     let aspect = (u16::from_le_bytes([d[2], d[3]]) as f32 / 1000.).clamp(0.3, 4.);
@@ -257,20 +262,20 @@ impl Game {
                     if c.slot >= 0 { unsafe { sim_set_aspect(c.slot, c.aspect) }; }
                 }
                 4 => { self.leave(&mut c); }
-                7 if d.len() >= 2 => { // chat: one line per 1.2 s; from the start page too (then with the typed name)
-                    let len = (d[1] as usize).min(d.len() - 2);
-                    let text = clean_chat(&d[2..2 + len]);
+                7 if d.len() >= 3 => { // chat: one line per 1.2 s; from the start page too (then with the typed name)
+                    let len = (u16::from_le_bytes([d[1], d[2]]) as usize).min(d.len() - 3);
+                    let text = clean_chat(&d[3..3 + len]);
                     if !text.is_empty() && c.chat_at.map_or(true, |t| at.duration_since(t) >= Duration::from_millis(1200)) {
                         c.chat_at = Some(at);
                         let name = if c.slot >= 0 { self.names[c.slot as usize].clone() } else {
-                            let r = &d[2 + len..]; // optional: u8 len, name
+                            let r = &d[3 + len..]; // optional: u8 len, name
                             let nl = r.first().map_or(0, |&n| (n as usize).min(r.len() - 1));
                             let n = if nl > 0 { clean_name(&r[1..1 + nl]) } else { String::new() };
                             if n.is_empty() { "Player".to_string() } else { n }
                         };
                         let (name, tb) = (name.into_bytes(), text.into_bytes());
                         let mut o = Out(Vec::with_capacity(4 + name.len() + tb.len()));
-                        o.u8(9); o.u8(if c.slot >= 0 { c.slot as u8 } else { 255 }); o.u8(name.len() as u8); o.0.extend_from_slice(&name); o.u8(tb.len() as u8); o.0.extend_from_slice(&tb);
+                        o.u8(9); o.u8(if c.slot >= 0 { c.slot as u8 } else { 255 }); o.u8(name.len() as u8); o.0.extend_from_slice(&name); o.u16(tb.len() as u16); o.0.extend_from_slice(&tb);
                         let m = o.0;
                         Self::send(&mut c, m.clone());
                         self.clients.insert(id, c);
@@ -452,7 +457,7 @@ impl Game {
         }
         self.spec_t += 1. / 60.;
         if self.spec_t > 8. || self.sim.p(self.spectate).alive == 0 { self.spec_t = 0.; self.pick_spectate(); }
-        if tick % 2 == 0 {
+        if tick % snap_every() == 0 {
             self.food_flush(tick);
             shared_snakes(&self.sim, &mut self.snakes_out, &mut self.live);
             let (sim, food, sp, sn, live) = (&self.sim, &self.food, self.spectate, &self.snakes_out, &self.live);
@@ -653,7 +658,7 @@ async fn ws_route(ws: WebSocketUpgrade, ConnectInfo(addr): ConnectInfo<SocketAdd
     }
     // small buffers: messages are tiny, and the library zero-fills its read buffer
     // on every read (a 128 KB default cost ~70% of the whole server's CPU)
-    ws.max_message_size(256).read_buffer_size(512).write_buffer_size(0).on_upgrade(move |sock| connection(sock, app, ip))
+    ws.max_message_size(640).read_buffer_size(512).write_buffer_size(0).on_upgrade(move |sock| connection(sock, app, ip))
 }
 
 async fn connection(sock: WebSocket, app: Arc<App>, ip: IpAddr) {

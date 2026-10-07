@@ -238,7 +238,11 @@ const WASM_BASE64 = "AGFzbQEAAAABVA9gAAF8YAF/AX1gAABgAAF/YAh9fX9/fX19fQBgAn9/AGA
 const FLOOR_BASE = [.052, .065, .104];         // the floor colour: one colour everywhere inside the world
 const FLOOR_DARK = [.008, .009, .014];         // outside the world: darkness
 const FLOOR_RIM_COL = [.62, .17, .25];         // the world's edge: a thin red line
-const FLOOR_LINE_K = "1.45";                   // hex lines: the floor colour, this much lighter
+// Honeycomb DOTS (one at each hex corner, 2 CSS px square): ~17x fewer pixels than lines, so
+// they can be brighter, and their colour tells where you are (free: worked out per dot).
+const FLOOR_DOT = [.21, .25, .37];             // dots: well lighter than the floor
+const FLOOR_DOT_MID = [.42, .35, .13];         // inside the middle zone (35% of the world radius): gold
+const FLOOR_DOT_EDGE = [.52, .14, .18];        // the last 1600 units before the edge: turning red
 const FOOD_GLOW = "1.7";                        // food halo radius, in pellet radii
 const FLOOR_RING_SEG = 512;                    // segments of the rings (the edge stays round)
 const FLOOR_HX = (46 * Math.sqrt(3)).toFixed(4), FLOOR_HY = "46.";  // hex lattice period (world units)
@@ -315,24 +319,25 @@ function createGL(canvas, E) {
   ${FRAME}
   ${FLOOR_RIM}
   flat out vec3 vCol;
-  // each hex owns 3 of its 6 edges (the other 3 belong to neighbours); unit hex: inradius .5
-  const vec2 EA[3]=vec2[3](vec2(-.2887,-.5),vec2(.2887,-.5),vec2(.5774,0.));
-  const vec2 EB[3]=vec2[3](vec2(.2887,-.5),vec2(.5774,0.),vec2(.2887,.5));
+  // a dot at each hex corner: each hex owns 2 of its 6 (every corner is shared by 3 hexes:
+  // its right one and its upper-right one); unit hex: inradius .5
+  const vec2 DC[2]=vec2[2](vec2(.5774,0.),vec2(.2887,.5));
   void main(){
     vec2 S=vec2(${FLOOR_HX},${FLOOR_HY});
     int nx=int(ceil(2.*uCamHalf.z/S.x))+3;                      // columns, first column and row: as floorPlan
     ivec2 f0=ivec2(floor((uCamHalf.xy-uCamHalf.zw)/S))-1;
     int lat=gl_InstanceID&1, cell=gl_InstanceID>>1;
     vec2 ctr=(vec2(float(cell%nx+f0.x),float(cell/nx+f0.y))+float(lat)*.5)*S;
-    if(length(ctr)>uResWR.z){ gl_Position=vec4(2,2,2,1); return; } // outside the world: no lines
+    if(length(ctr)>uResWR.z){ gl_Position=vec4(2,2,2,1); return; } // outside the world: no dots
     int e=gl_VertexID/6, k=gl_VertexID-e*6;
-    bool atB=(k==1||k==4||k==5), up=(k==2||k==3||k==5);
-    vec2 A=ctr+EA[e]*46., B=ctr+EB[e]*46., d=normalize(B-A), n=vec2(-d.y,d.x);
-    float hw=uPxTime.x*.5;                                       // exactly one pixel wide: no gaps, fewest pixels
-    vec2 w=(atB?B:A)+n*(up?hw:-hw);
-    vec2 c=(w-uCamHalf.xy)/uCamHalf.zw;
+    vec2 q=vec2((k==1||k==4||k==5)?1.:-1., (k==2||k==3||k==5)?1.:-1.);
+    vec2 P=ctr+DC[e]*46.;
+    vec2 c=(P+q*uPxTime.x*max(1.,uPxTime.z)-uCamHalf.xy)/uCamHalf.zw; // a square 2 CSS pixels wide
     gl_Position=vec4(c.x,-c.y,0,1);
-    vCol=vec3(${FLOOR_BASE.join(",")})*(1.+(${FLOOR_LINE_K}-1.)*lineFade());
+    float d=length(P), WR=uResWR.z;
+    vec3 col=mix(vec3(${FLOOR_DOT.join(",")}), vec3(${FLOOR_DOT_MID.join(",")}), 1.-smoothstep(WR*.35-150.,WR*.35,d));
+    col=mix(col, vec3(${FLOOR_DOT_EDGE.join(",")}), smoothstep(WR-1600.,WR-200.,d));
+    vCol=mix(vec3(${FLOOR_BASE.join(",")}), col, lineFade());
   }`;
   const HEX_FS = `#version 300 es
   precision mediump float;
@@ -643,7 +648,7 @@ function createGL(canvas, E) {
       gl.disable(gl.BLEND); gl.bindVertexArray(emptyVao);
       gl.useProgram(ringP);
       if (plan.out) { gl.uniform1i(firstU, 0); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6); } // inside area
-      if (plan.hexes) { gl.useProgram(hexP); gl.drawArraysInstanced(gl.TRIANGLES, 0, 18, plan.hexes); gl.useProgram(ringP); }
+      if (plan.hexes) { gl.useProgram(hexP); gl.drawArraysInstanced(gl.TRIANGLES, 0, 12, plan.hexes); gl.useProgram(ringP); }
       gl.uniform1i(firstU, plan.out ? 1 : 2); gl.drawArraysInstanced(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6, 2); // kinds 1+2 or 2+3
       gl.enable(gl.BLEND);
       mark(); // food
@@ -726,21 +731,24 @@ struct RingO { @builtin(position) pos: vec4f, @location(0) @interpolate(flat) co
 @fragment fn fsRing(i: RingO) -> @location(0) vec4f { return vec4f(i.col, 1.); } // one flat colour: no maths per pixel
 struct HexO { @builtin(position) pos: vec4f, @location(0) @interpolate(flat) col: vec3f };
 @vertex fn vsHex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> HexO {
-  // each hex owns 3 of its 6 edges (the rest belong to neighbours); unit hex: inradius .5
-  var ea = array<vec2f, 3>(vec2f(-.2887, -.5), vec2f(.2887, -.5), vec2f(.5774, 0.));
-  var eb = array<vec2f, 3>(vec2f(.2887, -.5), vec2f(.5774, 0.), vec2f(.2887, .5));
+  // a dot at each hex corner: each hex owns 2 of its 6 (every corner is shared by 3 hexes:
+  // its right one and its upper-right one); unit hex: inradius .5
+  var dc = array<vec2f, 2>(vec2f(.5774, 0.), vec2f(.2887, .5));
   let S = vec2f(${FLOOR_HX}, ${FLOOR_HY});
   let nx = i32(ceil(2. * F.camHalf.z / S.x)) + 3;               // columns, first column and row: as floorPlan
   let f0 = vec2i(floor((F.camHalf.xy - F.camHalf.zw) / S)) - 1;
   let cell = i32(ii >> 1u);
   let ctr = (vec2f(f32(cell % nx + f0.x), f32(cell / nx + f0.y)) + f32(ii & 1u) * .5) * S;
   var o: HexO;
-  if (length(ctr) > F.resWR.z) { o.pos = vec4f(2., 2., 2., 1.); return o; } // outside the world: no lines
+  if (length(ctr) > F.resWR.z) { o.pos = vec4f(2., 2., 2., 1.); return o; } // outside the world: no dots
   let e = vi / 6u; let k = corner(vi % 6u);
-  let A = ctr + ea[e] * 46.; let B = ctr + eb[e] * 46.; let dd = normalize(B - A); let n = vec2f(-dd.y, dd.x);
-  let side = select(-.5, .5, k.y > .5) * F.pxTime.x;             // exactly one pixel wide: no gaps, fewest pixels
-  let c = (select(A, B, k.x > .5) + n * side - F.camHalf.xy) / F.camHalf.zw;
-  o.pos = vec4f(c.x, -c.y, 0., 1.); o.col = FB * (1. + (${FLOOR_LINE_K} - 1.) * lineFade());
+  let P = ctr + dc[e] * 46.;
+  let c = (P + (k * 2. - 1.) * F.pxTime.x * max(1., F.pxTime.z) - F.camHalf.xy) / F.camHalf.zw; // a square 2 CSS pixels wide
+  o.pos = vec4f(c.x, -c.y, 0., 1.);
+  let d = length(P); let WR = F.resWR.z;
+  var col = mix(vec3f(${FLOOR_DOT.join(", ")}), vec3f(${FLOOR_DOT_MID.join(", ")}), 1. - smoothstep(WR * .35 - 150., WR * .35, d));
+  col = mix(col, vec3f(${FLOOR_DOT_EDGE.join(", ")}), smoothstep(WR - 1600., WR - 200., d));
+  o.col = mix(FB, col, lineFade());
   return o;
 }
 @fragment fn fsHex(i: HexO) -> @location(0) vec4f { return vec4f(i.col, 1.); } // one flat colour: no blending, no maths
@@ -986,7 +994,7 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
     if (i === 0) { // floor: the pass cleared (nearly free); flat inside area when outside; hex lines; edge band + darkness
       pass.setPipeline(P.ring);
       if (plan.out) pass.draw(FLOOR_RING_SEG * 6, 1, 0, 0);
-      if (plan.hexes) { pass.setPipeline(P.hex); pass.draw(18, plan.hexes); pass.setPipeline(P.ring); }
+      if (plan.hexes) { pass.setPipeline(P.hex); pass.draw(12, plan.hexes); pass.setPipeline(P.ring); }
       pass.draw(FLOOR_RING_SEG * 6, 2, 0, plan.out ? 1 : 2); // kinds 1+2 or 2+3
       return;
     }

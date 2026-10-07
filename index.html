@@ -174,7 +174,7 @@
 
   /* chat: small, bottom-left (above the length box while playing; lower on the start page).
      The 💬 Chat button turns it on and off (greyed out when off; remembered). */
-  #chat, #chatTog { z-index: 5; }
+  #chat, #chatBar { z-index: 5; }
   #chat { left: max(16px, env(safe-area-inset-left)); bottom: calc(max(16px, env(safe-area-inset-bottom)) + 140px); width: 260px; pointer-events: none; }
   #chat.hidden { display: none; }
   #chatLog { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; font-size: 13px; line-height: 1.3; }
@@ -184,22 +184,24 @@
   #chat.open #chatLog div.old, body:not(.playing) #chatLog div.old { opacity: .85; }
   #chatLog b { font-weight: 600; color: var(--accent2); }
   #chatLog div.sys { color: var(--dim); font-style: italic; }
-  #chatRow { display: flex; gap: 4px; pointer-events: auto; }
-  #chatIn { flex: 1; min-width: 0; font: 13px inherit; font-family: inherit; color: var(--text);
-    background: rgba(8,12,22,.7); border: 1px solid rgba(255,255,255,.12); border-radius: 8px; padding: 5px 8px; outline: none; }
-  #chatIn:focus { border-color: rgba(56,189,248,.6); background: rgba(8,12,22,.88); }
-  #chatSend { flex: none; width: 30px; padding: 0; border: none; border-radius: 8px; cursor: pointer; font-size: 13px; color: #04130d;
-    background: linear-gradient(90deg,#34d399,#38bdf8); } /* small green send button; goes with the chat when it's off */
-  #chatSend:hover { filter: brightness(1.1); }
-  #chatTog { position: fixed; left: max(16px, env(safe-area-inset-left)); bottom: calc(max(16px, env(safe-area-inset-bottom)) + 112px); pointer-events: auto;
-    height: 22px; padding: 0 8px; border: none; border-radius: 7px; background: rgba(8,12,22,.65); color: var(--text); font: 12px inherit; font-family: inherit; cursor: pointer; }
+  /* the typing box: only while writing (➤ or Enter opens it, ➤ or Enter sends, Esc closes) */
+  #chatIn { display: none; width: 100%; pointer-events: auto; font: 13px inherit; font-family: inherit; color: var(--text);
+    background: rgba(8,12,22,.88); border: 1px solid rgba(56,189,248,.6); border-radius: 8px; padding: 5px 8px; outline: none; }
+  #chat.open #chatIn { display: block; }
+  /* under it: 💬 Chat (on/off, greyed out when off; remembered) and the small green ➤ */
+  #chatBar { position: fixed; left: max(16px, env(safe-area-inset-left)); bottom: calc(max(16px, env(safe-area-inset-bottom)) + 112px); display: flex; gap: 4px; }
+  #chatTog { pointer-events: auto; height: 22px; padding: 0 8px; border: none; border-radius: 7px; background: rgba(8,12,22,.65); color: var(--text); font: 12px inherit; font-family: inherit; cursor: pointer; }
   #chatTog.off { opacity: .5; filter: grayscale(1); color: var(--dim); }
+  #chatSend { pointer-events: auto; width: 28px; height: 22px; padding: 0; border: none; border-radius: 7px; cursor: pointer; font-size: 12px; color: #04130d;
+    background: linear-gradient(90deg,#34d399,#38bdf8); }
+  #chatSend:hover { filter: brightness(1.1); }
+  #chatTog.off + #chatSend { display: none; } /* chat off: no send button */
   body:not(.playing) #chat { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 30px); }
-  body:not(.playing) #chatTog { bottom: max(16px, env(safe-area-inset-bottom)); }
+  body:not(.playing) #chatBar { bottom: max(16px, env(safe-area-inset-bottom)); }
 
   @media (max-width: 640px) {
     #chat { width: min(280px, calc(100vw - 32px)); bottom: calc(max(16px, env(safe-area-inset-bottom)) + 118px); }
-    #chatTog { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 90px); }
+    #chatBar { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 90px); }
     /* start page on a phone: the card scrolls clear of the chat */
     body.chatOn:not(.playing) .screen { overflow-y: auto; padding-bottom: 170px; place-items: start center; }
     #board { min-width: 0; padding: 10px 12px; }
@@ -223,8 +225,8 @@
 </div>
 <div id="board" class="hud glass"><h3>Leaderboard<span class="lbsz"><button data-d="-1" title="Smaller leaderboard" aria-label="Smaller leaderboard">−</button><button data-d="1" title="Bigger leaderboard" aria-label="Bigger leaderboard">+</button><button id="lbX" title="Hide the leaderboard" aria-label="Hide or show the leaderboard">×</button></span></h3><ol id="lb"></ol><div class="lbE" data-rs="w" title="Drag to resize (double-click: fit)"></div><div class="lbE" data-rs="s" title="Drag to resize (double-click: fit)"></div><div id="lbGrip" data-rs="ws" title="Drag to resize (double-click: fit)"></div></div>
 <div id="mini" class="hud game"></div>
-<div id="chat" class="hud"><div id="chatLog" aria-live="polite"></div><div id="chatRow"><input id="chatIn" maxlength="80" autocomplete="off" spellcheck="false" enterkeyhint="send" placeholder="Say something…" title="Enter sends, Esc closes"><button id="chatSend" title="Send" aria-label="Send">➤</button></div></div>
-<button id="chatTog" title="Chat on / off" aria-label="Chat on or off">💬 Chat</button>
+<div id="chat" class="hud"><div id="chatLog" aria-live="polite"></div><input id="chatIn" maxlength="160" autocomplete="off" spellcheck="false" enterkeyhint="send" placeholder="Say something… (Enter sends)" title="Enter sends, Esc closes"></div>
+<div id="chatBar"><button id="chatTog" title="Chat on / off" aria-label="Chat on or off">💬 Chat</button><button id="chatSend" title="Write a message (Enter)" aria-label="Write or send a message">➤</button></div>
 
 <div id="menu" class="screen">
   <div class="card glass">
@@ -275,7 +277,11 @@
 const FLOOR_BASE = [.052, .065, .104];         // the floor colour: one colour everywhere inside the world
 const FLOOR_DARK = [.008, .009, .014];         // outside the world: darkness
 const FLOOR_RIM_COL = [.62, .17, .25];         // the world's edge: a thin red line
-const FLOOR_LINE_K = "1.45";                   // hex lines: the floor colour, this much lighter
+// Honeycomb DOTS (one at each hex corner, 2 CSS px square): ~17x fewer pixels than lines, so
+// they can be brighter, and their colour tells where you are (free: worked out per dot).
+const FLOOR_DOT = [.21, .25, .37];             // dots: well lighter than the floor
+const FLOOR_DOT_MID = [.42, .35, .13];         // inside the middle zone (35% of the world radius): gold
+const FLOOR_DOT_EDGE = [.52, .14, .18];        // the last 1600 units before the edge: turning red
 const FOOD_GLOW = "1.7";                        // food halo radius, in pellet radii
 const FLOOR_RING_SEG = 512;                    // segments of the rings (the edge stays round)
 const FLOOR_HX = (46 * Math.sqrt(3)).toFixed(4), FLOOR_HY = "46.";  // hex lattice period (world units)
@@ -352,24 +358,25 @@ function createGL(canvas, E) {
   ${FRAME}
   ${FLOOR_RIM}
   flat out vec3 vCol;
-  // each hex owns 3 of its 6 edges (the other 3 belong to neighbours); unit hex: inradius .5
-  const vec2 EA[3]=vec2[3](vec2(-.2887,-.5),vec2(.2887,-.5),vec2(.5774,0.));
-  const vec2 EB[3]=vec2[3](vec2(.2887,-.5),vec2(.5774,0.),vec2(.2887,.5));
+  // a dot at each hex corner: each hex owns 2 of its 6 (every corner is shared by 3 hexes:
+  // its right one and its upper-right one); unit hex: inradius .5
+  const vec2 DC[2]=vec2[2](vec2(.5774,0.),vec2(.2887,.5));
   void main(){
     vec2 S=vec2(${FLOOR_HX},${FLOOR_HY});
     int nx=int(ceil(2.*uCamHalf.z/S.x))+3;                      // columns, first column and row: as floorPlan
     ivec2 f0=ivec2(floor((uCamHalf.xy-uCamHalf.zw)/S))-1;
     int lat=gl_InstanceID&1, cell=gl_InstanceID>>1;
     vec2 ctr=(vec2(float(cell%nx+f0.x),float(cell/nx+f0.y))+float(lat)*.5)*S;
-    if(length(ctr)>uResWR.z){ gl_Position=vec4(2,2,2,1); return; } // outside the world: no lines
+    if(length(ctr)>uResWR.z){ gl_Position=vec4(2,2,2,1); return; } // outside the world: no dots
     int e=gl_VertexID/6, k=gl_VertexID-e*6;
-    bool atB=(k==1||k==4||k==5), up=(k==2||k==3||k==5);
-    vec2 A=ctr+EA[e]*46., B=ctr+EB[e]*46., d=normalize(B-A), n=vec2(-d.y,d.x);
-    float hw=uPxTime.x*.5;                                       // exactly one pixel wide: no gaps, fewest pixels
-    vec2 w=(atB?B:A)+n*(up?hw:-hw);
-    vec2 c=(w-uCamHalf.xy)/uCamHalf.zw;
+    vec2 q=vec2((k==1||k==4||k==5)?1.:-1., (k==2||k==3||k==5)?1.:-1.);
+    vec2 P=ctr+DC[e]*46.;
+    vec2 c=(P+q*uPxTime.x*max(1.,uPxTime.z)-uCamHalf.xy)/uCamHalf.zw; // a square 2 CSS pixels wide
     gl_Position=vec4(c.x,-c.y,0,1);
-    vCol=vec3(${FLOOR_BASE.join(",")})*(1.+(${FLOOR_LINE_K}-1.)*lineFade());
+    float d=length(P), WR=uResWR.z;
+    vec3 col=mix(vec3(${FLOOR_DOT.join(",")}), vec3(${FLOOR_DOT_MID.join(",")}), 1.-smoothstep(WR*.35-150.,WR*.35,d));
+    col=mix(col, vec3(${FLOOR_DOT_EDGE.join(",")}), smoothstep(WR-1600.,WR-200.,d));
+    vCol=mix(vec3(${FLOOR_BASE.join(",")}), col, lineFade());
   }`;
   const HEX_FS = `#version 300 es
   precision mediump float;
@@ -680,7 +687,7 @@ function createGL(canvas, E) {
       gl.disable(gl.BLEND); gl.bindVertexArray(emptyVao);
       gl.useProgram(ringP);
       if (plan.out) { gl.uniform1i(firstU, 0); gl.drawArrays(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6); } // inside area
-      if (plan.hexes) { gl.useProgram(hexP); gl.drawArraysInstanced(gl.TRIANGLES, 0, 18, plan.hexes); gl.useProgram(ringP); }
+      if (plan.hexes) { gl.useProgram(hexP); gl.drawArraysInstanced(gl.TRIANGLES, 0, 12, plan.hexes); gl.useProgram(ringP); }
       gl.uniform1i(firstU, plan.out ? 1 : 2); gl.drawArraysInstanced(gl.TRIANGLES, 0, FLOOR_RING_SEG * 6, 2); // kinds 1+2 or 2+3
       gl.enable(gl.BLEND);
       mark(); // food
@@ -763,21 +770,24 @@ struct RingO { @builtin(position) pos: vec4f, @location(0) @interpolate(flat) co
 @fragment fn fsRing(i: RingO) -> @location(0) vec4f { return vec4f(i.col, 1.); } // one flat colour: no maths per pixel
 struct HexO { @builtin(position) pos: vec4f, @location(0) @interpolate(flat) col: vec3f };
 @vertex fn vsHex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> HexO {
-  // each hex owns 3 of its 6 edges (the rest belong to neighbours); unit hex: inradius .5
-  var ea = array<vec2f, 3>(vec2f(-.2887, -.5), vec2f(.2887, -.5), vec2f(.5774, 0.));
-  var eb = array<vec2f, 3>(vec2f(.2887, -.5), vec2f(.5774, 0.), vec2f(.2887, .5));
+  // a dot at each hex corner: each hex owns 2 of its 6 (every corner is shared by 3 hexes:
+  // its right one and its upper-right one); unit hex: inradius .5
+  var dc = array<vec2f, 2>(vec2f(.5774, 0.), vec2f(.2887, .5));
   let S = vec2f(${FLOOR_HX}, ${FLOOR_HY});
   let nx = i32(ceil(2. * F.camHalf.z / S.x)) + 3;               // columns, first column and row: as floorPlan
   let f0 = vec2i(floor((F.camHalf.xy - F.camHalf.zw) / S)) - 1;
   let cell = i32(ii >> 1u);
   let ctr = (vec2f(f32(cell % nx + f0.x), f32(cell / nx + f0.y)) + f32(ii & 1u) * .5) * S;
   var o: HexO;
-  if (length(ctr) > F.resWR.z) { o.pos = vec4f(2., 2., 2., 1.); return o; } // outside the world: no lines
+  if (length(ctr) > F.resWR.z) { o.pos = vec4f(2., 2., 2., 1.); return o; } // outside the world: no dots
   let e = vi / 6u; let k = corner(vi % 6u);
-  let A = ctr + ea[e] * 46.; let B = ctr + eb[e] * 46.; let dd = normalize(B - A); let n = vec2f(-dd.y, dd.x);
-  let side = select(-.5, .5, k.y > .5) * F.pxTime.x;             // exactly one pixel wide: no gaps, fewest pixels
-  let c = (select(A, B, k.x > .5) + n * side - F.camHalf.xy) / F.camHalf.zw;
-  o.pos = vec4f(c.x, -c.y, 0., 1.); o.col = FB * (1. + (${FLOOR_LINE_K} - 1.) * lineFade());
+  let P = ctr + dc[e] * 46.;
+  let c = (P + (k * 2. - 1.) * F.pxTime.x * max(1., F.pxTime.z) - F.camHalf.xy) / F.camHalf.zw; // a square 2 CSS pixels wide
+  o.pos = vec4f(c.x, -c.y, 0., 1.);
+  let d = length(P); let WR = F.resWR.z;
+  var col = mix(vec3f(${FLOOR_DOT.join(", ")}), vec3f(${FLOOR_DOT_MID.join(", ")}), 1. - smoothstep(WR * .35 - 150., WR * .35, d));
+  col = mix(col, vec3f(${FLOOR_DOT_EDGE.join(", ")}), smoothstep(WR - 1600., WR - 200., d));
+  o.col = mix(FB, col, lineFade());
   return o;
 }
 @fragment fn fsHex(i: HexO) -> @location(0) vec4f { return vec4f(i.col, 1.); } // one flat colour: no blending, no maths
@@ -1023,7 +1033,7 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
     if (i === 0) { // floor: the pass cleared (nearly free); flat inside area when outside; hex lines; edge band + darkness
       pass.setPipeline(P.ring);
       if (plan.out) pass.draw(FLOOR_RING_SEG * 6, 1, 0, 0);
-      if (plan.hexes) { pass.setPipeline(P.hex); pass.draw(18, plan.hexes); pass.setPipeline(P.ring); }
+      if (plan.hexes) { pass.setPipeline(P.hex); pass.draw(12, plan.hexes); pass.setPipeline(P.ring); }
       pass.draw(FLOOR_RING_SEG * 6, 2, 0, plan.out ? 1 : 2); // kinds 1+2 or 2+3
       return;
     }
@@ -1349,10 +1359,10 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     const ex = sx - (h[i].x + (h[i + 1].x - h[i].x) * f), ey = sy - (h[i].y + (h[i + 1].y - h[i].y) * f);
     pred.err = Math.hypot(ex, ey);
     if (window.__predLog) window.__predLog.push({ t: performance.now(), err: pred.err, seq, steps, boost: lastBoostSent, mass: mass[me], aimGap: wrapA(sentAim - pred.a), hist: h.length });
-    // a third of the gap per snapshot: smooth, settles in ~0.2 s. A big gap (the server was
-    // told otherwise, e.g. after a lag spike) is closed at once, but here and now: the server
-    // head is from a moment ago, so jumping to it would throw the snake back.
-    const k = ex * ex + ey * ey > 60 * 60 ? 1 : 0.3, kx = ex * k, ky = ey * k;
+    // 30% of the gap per 2 steps (whatever the snapshot rate): smooth, settles in ~0.2 s. A big
+    // gap (the server was told otherwise, e.g. after a lag spike) is closed at once, but here
+    // and now: the server head is from a moment ago, so jumping to it would throw the snake back.
+    const k = ex * ex + ey * ey > 60 * 60 ? 1 : 1 - Math.pow(0.7, snapInt / 2), kx = ex * k, ky = ey * k;
     pred.x += kx; pred.y += ky; for (const e of h) { e.x += kx; e.y += ky; }
   }
   // food: server slot -> local slot (local slots stay dense so the GPU draws few)
@@ -1366,13 +1376,16 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
      that is ~3.1 steps instead of a fixed 4 (others drawn ~22 ms fresher, measured), on a
      jittery one it grows so nothing stalls.
      Arrivals are timed against the fastest one in the last 3 s (the network's best case). */
-  const arrOff = []; let arrLo = 0, interpGoal = INTERP, interpT = INTERP, interpSent = INTERP, rtS = -1, lastRt = 0;
+  const arrOff = [], gaps = []; let arrLo = 0, interpGoal = INTERP, interpT = INTERP, interpSent = INTERP, rtS = -1, lastRt = 0, snapInt = 2, lastSnapTick = -1;
   function noteArrival(t) {
     arrOff.push(performance.now() - t * (1000 / 60)); if (arrOff.length > 90) arrOff.shift();
+    if (lastSnapTick >= 0 && t > lastSnapTick && t - lastSnapTick < 8) { gaps.push(t - lastSnapTick); if (gaps.length > 30) gaps.shift(); }
+    lastSnapTick = t;
+    if (gaps.length >= 5) snapInt = [...gaps].sort((a, b) => a - b)[gaps.length >> 1]; // steps between snapshots (1 or 2)
     if (arrOff.length < 10) return;
     arrLo = Math.min(...arrOff);
     const late = arrOff.map((o) => (o - arrLo) * 0.06).sort((a, b) => a - b); // steps late, each
-    interpGoal = Math.min(10, Math.max(3, 2 + late[Math.floor(late.length * 0.98)] + 1)); // +1: margin (less ran past the data now and then)
+    interpGoal = Math.min(10, Math.max(snapInt + 1, snapInt + late[Math.floor(late.length * 0.98)] + 1)); // +1: margin (less ran past the data now and then)
   }
 
   function clearWorld() {
@@ -1538,8 +1551,8 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       case 8: onPong(d.getUint8(1)); break;
       case 9: { // chat line: slot, name, text
         const nl = d.getUint8(2), td = new TextDecoder();
-        const name = td.decode(new Uint8Array(d.buffer, d.byteOffset + 3, nl)), tl = d.getUint8(3 + nl);
-        const text = td.decode(new Uint8Array(d.buffer, d.byteOffset + 4 + nl, tl));
+        const name = td.decode(new Uint8Array(d.buffer, d.byteOffset + 3, nl)), tl = d.getUint16(3 + nl, true);
+        const text = td.decode(new Uint8Array(d.buffer, d.byteOffset + 5 + nl, tl));
         if (text === chatLast) clearTimeout(chatWait); // our own line came back: chat works
         addChat(name || "Player", text);
         break;
@@ -1607,22 +1620,37 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   // The mouse takes over again only when it really moves: browsers also send "moves" when
   // the page changes under a still cursor, which used to swing the snake toward it.
   let keyAnchorX = 0, keyAnchorY = 0;
-  cv.addEventListener("pointermove", (e) => {
+  // Keys steer relative to where your snake is heading NOW (the prediction): aim a little to
+  // that side (it turns at its own top speed) or straight ahead. An aim that ran on by
+  // itself could get more than half a turn ahead of a slow-turning big snake, which then
+  // turned the other way. Called every frame, and also straight from input events, so a
+  // move goes out at once instead of at the next frame (sendInput limits it to ~60/s).
+  function steerNow(now) {
+    if (state !== "play") return;
+    if (usingKeys) aim = (pred.on ? pred.a : me >= 0 ? ha[me] : aim) + keyTurn * 0.6;
+    else aim = Math.atan2(my - innerHeight / 2, mx - innerWidth / 2);
+    sendInput(now, aim, mouseBoost || keyBoost || touchBoost ? 1 : 0);
+  }
+  const onMouseMove = (e) => {
     if (e.pointerType !== "mouse") return;
     mx = e.clientX; my = e.clientY;
     if (usingKeys && Math.hypot(mx - keyAnchorX, my - keyAnchorY) > 6) usingKeys = false;
-  });
-  cv.addEventListener("mousedown", () => { mouseBoost = true; });
-  addEventListener("mouseup", () => { mouseBoost = false; });
+    steerNow(performance.now());
+  };
+  // pointerrawupdate (Chrome, Edge; secure pages) arrives as the mouse moves; pointermove is
+  // held back to the next frame. Use the first where there is one.
+  cv.addEventListener("onpointerrawupdate" in window ? "pointerrawupdate" : "pointermove", onMouseMove);
+  cv.addEventListener("mousedown", () => { mouseBoost = true; steerNow(performance.now()); });
+  addEventListener("mouseup", () => { mouseBoost = false; steerNow(performance.now()); });
   const touches = new Map();
-  const onTouch = () => { touchBoost = touches.size >= 2; const t = touches.values().next().value; if (t) { mx = t.clientX; my = t.clientY; usingKeys = false; } };
+  const onTouch = () => { touchBoost = touches.size >= 2; const t = touches.values().next().value; if (t) { mx = t.clientX; my = t.clientY; usingKeys = false; } steerNow(performance.now()); };
   cv.addEventListener("touchstart", (e) => { for (const t of e.changedTouches) touches.set(t.identifier, t); onTouch(); e.preventDefault(); }, { passive: false });
   cv.addEventListener("touchmove", (e) => { for (const t of e.changedTouches) touches.set(t.identifier, t); onTouch(); e.preventDefault(); }, { passive: false });
   const endT = (e) => { for (const t of e.changedTouches) touches.delete(t.identifier); onTouch(); };
   cv.addEventListener("touchend", endT); cv.addEventListener("touchcancel", endT);
   /* ---------------- chat (small, bottom-left; on the start page too) ----------------
-     The 💬 Chat button turns it on/off (greyed out when off; remembered). When on: the last
-     lines, a box to type in and a small green send button. Enter (in game) jumps to the box. */
+     The 💬 Chat button turns it on/off (greyed out when off; remembered). Next to it, while on,
+     the small green ➤: it opens a box to type in (so does Enter in game), and sends. */
   const chatEl = $("chat"), chatLog = $("chatLog"), chatIn = $("chatIn"), chatTog = $("chatTog");
   let chatHidden = store.get("serpent.chat") === "off", chatSentAt = -1e9, chatWait = 0, chatLast = "";
   const showChatState = () => {
@@ -1650,15 +1678,15 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (!connected || ws.readyState !== 1) { addChat("", "Not connected to the server.", true); return; }
     chatSentAt = now; chatLast = t;
     // text, then the typed name (the server uses it only before you join)
-    const enc = new TextEncoder(), tb = enc.encode(t).slice(0, 240), nb = enc.encode(nameEl.value.trim()).slice(0, 48);
-    const m = new Uint8Array(3 + tb.length + nb.length); m[0] = 7; m[1] = tb.length; m.set(tb, 2); m[2 + tb.length] = nb.length; m.set(nb, 3 + tb.length);
+    const enc = new TextEncoder(), tb = enc.encode(t).slice(0, 480), nb = enc.encode(nameEl.value.trim()).slice(0, 48);
+    const m = new Uint8Array(4 + tb.length + nb.length); m[0] = 7; m[1] = tb.length & 255; m[2] = tb.length >> 8; m.set(tb, 3); m[3 + tb.length] = nb.length; m.set(nb, 4 + tb.length);
     sendRaw(m);
     // the server sends every line back to its writer too: no echo means it doesn't know chat (an older server)
     clearTimeout(chatWait);
     chatWait = setTimeout(() => addChat("", "The server didn't answer: it may need updating to the version with chat.", true), 3000);
   }
   const submitChat = () => { const t = chatIn.value.trim(); if (t) sendChat(t); closeChat(); };
-  $("chatSend").onclick = submitChat;
+  $("chatSend").onclick = () => { if (chatEl.classList.contains("open")) submitChat(); else openChat(); }; // ➤: write, then send
   chatIn.addEventListener("focus", () => chatEl.classList.add("open"));
   chatIn.addEventListener("keydown", (e) => {
     e.stopPropagation(); // typing never steers or boosts
@@ -1680,6 +1708,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     else if (k === "p" || k === "P") $("perf").classList.toggle("off");
     else if (k === "Enter" && state !== "play") start();
     else if (k === "Escape" && state !== "menu") toMenu();
+    steerNow(performance.now()); // a key turn or boost goes out at once
   });
   addEventListener("keyup", (e) => {
     const k = e.key;
@@ -1687,6 +1716,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     else if (k === "ArrowLeft" || k === "a" || k === "ArrowRight" || k === "d") {
       keysDown.delete(k === "ArrowLeft" || k === "a" ? "L" : "R"); keyTurn = (keysDown.has("R") ? 1 : 0) - (keysDown.has("L") ? 1 : 0);
     }
+    steerNow(performance.now()); // a key turn or boost goes out at once
   });
   addEventListener("blur", () => { keyBoost = mouseBoost = false; keyTurn = 0; keysDown.clear(); });
 
@@ -1860,9 +1890,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       // that side (it turns at its own top speed) or straight ahead. An aim that ran on by
       // itself could get more than half a turn ahead of a slow-turning big snake, which then
       // turned the other way.
-      if (usingKeys) aim = (pred.on ? pred.a : me >= 0 ? ha[me] : aim) + keyTurn * 0.6;
-      else aim = Math.atan2(my - innerHeight / 2, mx - innerWidth / 2);
-      sendInput(now, aim, mouseBoost || keyBoost || touchBoost ? 1 : 0);
+      steerNow(now);
     }
     const t0 = performance.now();
     if (estTick >= 0) estTick += dt * 60;

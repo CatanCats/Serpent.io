@@ -38,8 +38,8 @@ online/
 - **Delay compensation:** the page measures its round trip with tiny pings when it connects
   and every 4 s, and tells the server. When judging whether *you* crashed, the server ignores the
   part of other snakes that was laid too recently to be on your screen yet, given your delay.
-- **Chat:** a small box bottom-left (Enter or 💬 to type, a Send button on touch screens, "Hide" to hide; remembered). Joined players only,
-  one line per 1.2 s, 80 characters, shown as plain text; the last 6 lines, fading after 10 s.
+- **Chat:** bottom-left, on the start page too: "💬 Chat" turns it on or off (remembered); the small green ➤ next to it (or Enter) opens a box to type in and sends.
+  one line per 1.2 s, 160 characters, shown as plain text; the last 6 lines, fading after 10 s.
 - **Lag spikes don't kill you:** each input carries the time it was made, so the server sees
   how late each one arrives compared with your usual delay. If you hit a snake, it waits a moment
   for late inputs and replays your last steps with them on time; if that path is clear, you
