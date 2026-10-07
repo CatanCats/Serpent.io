@@ -1,34 +1,21 @@
 /* ============================================================================
    Death information sheet (both pages; inlined by build.sh).
-   By the time a death is known the snake is already gone from the screen, so while you
-   play a small copy of the screen is kept every 250 ms (createImageBitmap, scaled to at
-   most 960 px wide on the GPU; called right after a frame is drawn, while the canvas still
-   holds it; only the last 3 are kept). At death the latest one from before the crash is
-   the picture. "Download information sheet" draws a PNG card with the run's numbers and
-   that picture on a 2D canvas: nothing is sent anywhere.
+   On the frame where a death is noticed the page draws the moment of death once more
+   (offline: the sim's deathPose(); online: everyone as at the server's crash step, from the
+   DEATH message) and copies that frame right after drawing it, while the canvas still holds
+   it (WebGPU and WebGL keep a frame until the end of the task that drew it), scaled to at
+   most 960 px wide. Nothing is copied while you play. "Download information sheet" then
+   draws a PNG card with the run's numbers and that picture on a 2D canvas: nothing is sent
+   anywhere.
    ========================================================================== */
-const deathShot = { img: null, ring: [], last: 0 };
-function keepShot(cv, now) {
-  if (now - deathShot.last < 250 || !window.createImageBitmap) return;
-  deathShot.last = now;
-  const w = Math.min(960, cv.width), h = Math.max(1, Math.round(cv.height * w / cv.width));
-  createImageBitmap(cv, { resizeWidth: w, resizeHeight: h, resizeQuality: "low" }).then((bm) => {
-    const r = deathShot.ring; r.push({ t: now, bm }); while (r.length > 3) r.shift().bm.close();
-  }, () => {});
-}
-function grabDeathShot(cv, now) { // at death: the newest copy at least 100 ms before it (the crash about to happen)
-  const r = deathShot.ring; let pick = null;
-  for (const e of r) if (e.t <= now - 100) pick = e;
-  if (!pick && r.length) pick = r[0];
-  if (deathShot.img && deathShot.img.close && deathShot.img !== (pick && pick.bm)) deathShot.img.close();
-  if (pick) { deathShot.img = pick.bm; r.splice(r.indexOf(pick), 1); return; } // kept for the sheet
-  try { // no copy yet (died at once): the frame just drawn
+const deathShot = { img: null };
+function grabDeathShot(cv) {
+  try {
     const w = Math.min(960, cv.width), h = Math.max(1, Math.round(cv.height * w / cv.width));
     const c = document.createElement("canvas"); c.width = w; c.height = h;
     c.getContext("2d").drawImage(cv, 0, 0, w, h); deathShot.img = c;
   } catch (e) { deathShot.img = null; }
 }
-function resetShots() { for (const e of deathShot.ring) e.bm.close(); deathShot.ring.length = 0; deathShot.last = 0; }
 // d: { name, mode, length, peak, best, kills, rankNow, rankBest, total, killer, seconds, colour }
 function downloadDeathSheet(d) {
   const W = 1000, pad = 40, pic = deathShot.img;

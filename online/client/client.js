@@ -335,7 +335,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         else layTrail(s, x, y);
       }
       segN[s] = segsFor(mass[s]); alive[s] = 1; seen[s] = 1;
-      const h = hist[s]; h.push({ t: tick, x, y, a: angOf[s] }); if (h.length > 8) h.shift();
+      const h = hist[s]; h.push({ t: tick, x, y, a: angOf[s] }); if (h.length > 24) h.shift(); // 24: back to a crash before a grace wait
     }
     for (let s = 0; s < NS; s++) if (!seen[s] && alive[s]) { alive[s] = 0; hist[s].length = 0; }
     const m = d.getUint16(o, true); o += 2;
@@ -443,7 +443,9 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         break;
       }
       case 4: { const s = d.getUint8(1), len = d.getUint8(2); pnames[s] = new TextDecoder().decode(new Uint8Array(d.buffer, d.byteOffset + 3, len)); human[s] = len ? 1 : human[s]; slotKey[s] = ""; break; }
-      case 5: onDeath(d.getUint8(1), d.getUint16(2, true), d.getFloat32(4, true)); break;
+      case 5: // newer servers add the crash's step and head (Q1): the picture is drawn as at that moment
+        deathPose = d.byteLength >= 16 && me >= 0 ? { s: me, t: d.getUint32(8, true), x: d.getInt16(12, true) * 0.5, y: d.getInt16(14, true) * 0.5 } : null;
+        onDeath(d.getUint8(1), d.getUint16(2, true), d.getFloat32(4, true)); break;
       case 6: {
         miniList.length = 0;
         for (let i = 0, k = d.getUint16(1, true), o = 3; i < k; i++, o += 5) { // slot, x, y (a byte each), skin, size
@@ -495,7 +497,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const run = { t0: 0, peak: 0, rankBest: 0, rankNow: 0, total: 0 }; let lastRun = null, grabPending = false;
   function start() {
     if (!connected) return;
-    Object.assign(run, { t0: performance.now(), peak: 0, rankBest: 0, rankNow: 0, total: 0 }); resetShots();
+    Object.assign(run, { t0: performance.now(), peak: 0, rankBest: 0, rankNow: 0, total: 0 });
     store.set("serpent.name", nameEl.value.trim());
     join();
     state = "play"; document.body.classList.add("playing");
@@ -509,6 +511,30 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     setTimeout(() => { if (state === "dead") { $("over").classList.remove("hidden"); document.body.classList.remove("playing"); } }, 900);
   }
   const esc = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+  /* The moment of death for the information sheet: every snake as at the server's crash step
+     (no smoothing), each body cut back to that head (its newer points were laid after: your
+     own ones by the prediction, ahead of the server). Undone after the one frame drawn so. */
+  let deathPose = null;
+  function poseAt(p) {
+    const undo = [];
+    for (let s = 0; s < NS; s++) {
+      const h = hist[s]; let x = p.x, y = p.y; // yours: exactly where the server had your head (even if a snapshot already dropped you)
+      if (s !== p.s) {
+        if (!alive[s] || !h.length) continue;
+        let a = h[0], b = h[0];
+        if (p.t >= h[h.length - 1].t) a = b = h[h.length - 1];
+        else for (let i = 0; i < h.length - 1; i++) if (h[i + 1].t > p.t) { a = h[i]; b = h[i + 1]; break; }
+        const f = b.t > a.t ? Math.min(1, Math.max(0, (p.t - a.t) / (b.t - a.t))) : 1;
+        x = a.x + (b.x - a.x) * f; y = a.y + (b.y - a.y) * f;
+      }
+      let bj = 0, bd = 1e18;
+      for (let j = 0; j < Math.min(60, segN[s]); j++) { const [qx, qy] = TXY(s, j), d = (qx - x) ** 2 + (qy - y) ** 2; if (d < bd) { bd = d; bj = j; } }
+      undo.push([s, pcOf[s]]); pcOf[s] -= bj;
+      const [bx, by] = TXY(s, 1);
+      hx[s] = x; hy[s] = y; ha[s] = Math.atan2(y - by, x - bx); shown[s] = 1;
+    }
+    return undo;
+  }
   function onDeath(killer, k, m) {
     if (state !== "play") return;
     state = "dead";
@@ -868,6 +894,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (Math.hypot(tx - camX, ty - camY) > 3000) { camX = tx; camY = ty; } // first frame / respawn: jump
     camX += (tx - camX) * kp; camY += (ty - camY) * kp; camH += (tH - camH) * kz;
     const hh = camH, hw = camH * vw / vh, px = hh * 2 / vh;
+    const poseUndo = grabPending && deathPose ? poseAt(deathPose) : null; // the moment of death (one frame)
     renderPrep(camX, camY, hw, hh, px);
     miniPrep(camX, camY, hw, hh);
     frameOut[0] = foodHigh; frameOut[3] = ntup;
@@ -876,8 +903,8 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     frameBlk[8] = vw; frameBlk[9] = vh; frameBlk[10] = WR; frameBlk[11] = 0;
     const t1 = performance.now();
     if (!gpuDown) { try { R.draw(frameNo++, playing, !perfEl.classList.contains("off")); } catch (e) { if (R.device && touchDevice) restartGPU(); else throw e; } }
-    if (grabPending && !gpuDown) { grabPending = false; grabDeathShot(cv, now); } // the picture for the information sheet
-    else if (playing && !gpuDown) keepShot(cv, now);                              // (a small copy every 250 ms, right after drawing)
+    if (grabPending && !gpuDown) { grabPending = false; grabDeathShot(cv); } // copied right after drawing, while the canvas holds it
+    if (poseUndo) { for (const [s, pc] of poseUndo) pcOf[s] = pc; deathPose = null; }
     ntup = 0;
     const t2 = performance.now();
     prepMs += t1 - t0; drawMs += t2 - t1; fpsN++;

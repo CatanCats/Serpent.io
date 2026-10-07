@@ -1048,6 +1048,18 @@ EXPORT("frame") void frame(float dt, float aim, i32 boost, i32 mode, float vw, f
   frameMs[0] = (float)(t1 - t0); frameMs[1] = (float)(nowMs() - t1);
 }
 
+/* The information sheet's picture of the moment of death: call right after the frame() in
+   which the player died. It prepares the snakes again with the player's snake drawn where it
+   crashed (its body stays as it was until it respawns), for one frame. */
+EXPORT("deathPose") void deathPose(void) {
+  Snake *k = &S[0];
+  if (k->alive || k->n <= 0) return;
+  k->alive = 1; snap[0].x = k->hx; snap[0].y = k->hy;
+  frameOut[1] = renderPrep(frameBlk[0], frameBlk[1], frameBlk[2], frameBlk[3], frameBlk[4]);
+  frameOut[2] = maxK; frameOut[3] = (i32)ntup;
+  k->alive = 0;
+}
+
 EXPORT("foodPtr") Food *foodPtr(void) { return VIS; }
 EXPORT("maxFood") i32 maxFood(void) { return MAXF; }
 EXPORT("worldRadius") float worldRadius(void) { return WR; }

@@ -211,7 +211,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   // this run's numbers, for the information sheet
   const run = { t0: 0, peak: 0, rankBest: 0, rankNow: 0, total: 0 }; let lastRun = null, grabPending = false;
   function start() {
-    Object.assign(run, { t0: performance.now(), peak: 0, rankBest: 0, rankNow: 0, total: 0 }); resetShots();
+    Object.assign(run, { t0: performance.now(), peak: 0, rankBest: 0, rankNow: 0, total: 0 });
     store.set("serpent.name", nameEl.value.trim());
     W.spawnPlayer(skinSel); // also moves the camera there and fills food around it
     state = "play"; document.body.classList.add("playing");
@@ -414,9 +414,9 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     const t2 = performance.now();
 
     const timing = !perfEl.classList.contains("off");
+    if (grabPending) W.deathPose(); // the moment of death: this one frame shows your snake where it crashed
     if (!gpuDown) { try { R.draw(frameNo++, playing, timing); } catch (e) { if (R.device && touchDevice) restartGPU(); else throw e; } }
-    if (grabPending && !gpuDown) { grabPending = false; grabDeathShot(cv, now); } // the picture for the information sheet
-    else if (playing && !gpuDown) keepShot(cv, now);                              // (a small copy every 250 ms, right after drawing)
+    if (grabPending && !gpuDown) { grabPending = false; grabDeathShot(cv); } // copied right after drawing, while the canvas holds it
     const t3 = performance.now();
 
     if ((hudT += dt) > 0.25) { hudT = 0; updateHud(); } // DOM: 4x per second

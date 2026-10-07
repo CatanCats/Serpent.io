@@ -45,6 +45,7 @@ extern "C" {
     fn sim_set_input(s: i32, aim: f32, boost: i32, late: i32);
     fn sim_set_jitter(s: i32, steps: i32);
     fn sim_set_lag(s: i32, steps: f32);
+    fn sim_death_pose(s: i32, out: *mut f32);
     fn sim_set_aspect(s: i32, a: f32);
     fn sim_set_menu_focus(on: i32, x: f32, y: f32, r: f32);
     fn sim_step();
@@ -109,7 +110,8 @@ impl Sim {
                                spawned, fades in); u16 slot alone = gone
                     3 BOARD u16 alive, u16 yourRank, u8 k, k x (u8 slot, u8 tier, u8 skin, u8 human, f32 mass)
                     4 NAME  u8 slot, u8 len, name
-                    5 DEATH u8 killer (255 = world edge), u16 kills, f32 mass
+                    5 DEATH u8 killer (255 = world edge), u16 kills, f32 mass,
+                          u32 tick, i16 x, i16 y (Q1): the head and step at the crash (the first hit), for the page's picture
                     6 MINI  u16 k, k x (u8 slot, u8 x, u8 y (0..255 across the world), u8 skin (0..127), u8 size)
                     7 FULL  (server full)
                     8 PONG  u8 id
@@ -452,7 +454,9 @@ impl Game {
             let p = self.sim.p(c.slot as usize);
             let kb = unsafe { sim_killed_by(c.slot) };
             let mut o = Out(Vec::new());
+            let mut pose = [0f32; 3]; unsafe { sim_death_pose(c.slot, pose.as_mut_ptr()) };
             o.u8(5); o.u8(if kb >= 0 { kb as u8 } else { 255 }); o.u16(p.kills.min(65535) as u16); o.f32(p.mass);
+            o.u32(pose[2] as u32); o.i16(q1(pose[0])); o.i16(q1(pose[1]));
             Self::send(c, o.0);
         }
         self.spec_t += 1. / 60.;

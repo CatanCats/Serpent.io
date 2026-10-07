@@ -592,6 +592,7 @@ static i32 hitTest(i32 s) { return hitAt(s, S[s].hx, S[s].hy, S[s].dcx, S[s].dcy
    trapper saw is what counts. Same front-of-head rule as hitAt; the player's head end
    (newest 6 points) doesn't count, head-ons are decided by hitAt. Bots only: between two
    players neither is favoured. Returns the trapping player, or -1. */
+static float poseX[MAXS], poseY[MAXS]; static u32 poseT[MAXS]; /* a player's head and step at the crash (the first hit, before any grace) */
 static i32 trapList[MAXS], nTrap; /* this step's living players with a known delay */
 static i32 trapHit(i32 s) {
   for (i32 m = 0; m < nTrap; m++) {
@@ -944,7 +945,7 @@ static void step(float dt) {
     i32 h = hitTest(s);
     if (!human[s] && h == -1 && nTrap) h = trapHit(s); /* ran through a trap as a player saw it */
     if (human[s] && h != -2) {
-      if (h >= 0 && !pendT[s]) { pendT[s] = 1; pendK[s] = h; }
+      if (h >= 0 && !pendT[s]) { pendT[s] = 1; pendK[s] = h; poseX[s] = S[s].hx; poseY[s] = S[s].hy; poseT[s] = tick; }
       if (pendT[s]) {
         /* replay with late inputs moved to when they should have arrived */
         if (rescue(s, pendT[s] + 13)) { pendT[s] = 0; rescued[s] = 1; anyRescue = 1; continue; } /* clear: lives */
@@ -953,6 +954,7 @@ static void step(float dt) {
         pendT[s] = 0;
       }
     }
+    if (human[s] && h == -2) { poseX[s] = S[s].hx; poseY[s] = S[s].hy; poseT[s] = tick; } /* the edge: no grace, the crash is now */
     if (h != -1) { deaths[nd++] = s; deaths[nd++] = h; }
   }
   /* A rescued player's snake moved: a snake that hit its old position is checked again. */
@@ -1027,6 +1029,8 @@ void sim_spawn_human(i32 s, i32 skin) {
   for (i32 f = 0; f < nfoc; f++) if (focS[f] == s) { countFood(f); maintainFood(f, 4000); }
   publish();
 }
+/* Where a player's head was, and the step, when it crashed: for the page's picture of the moment of death. */
+void sim_death_pose(i32 s, float *out) { if (s >= 0 && s < MAXS) { out[0] = poseX[s]; out[1] = poseY[s]; out[2] = (float)poseT[s]; } }
 void sim_set_lag(i32 s, float steps) { if (s >= 0 && s < MAXS) lagSteps[s] = steps < 0.f ? 0.f : steps > 24.f ? 24.f : steps; }
 void sim_set_jitter(i32 s, i32 steps) { if (s >= 0 && s < MAXS) graceSteps[s] = (float)(steps < 1 ? 1 : steps > 10 ? 10 : steps); }
 void sim_set_input(i32 s, float aim, i32 boost, i32 late) {
