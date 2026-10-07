@@ -121,6 +121,11 @@
   #perf { left: max(16px, env(safe-area-inset-left)); top: max(16px, env(safe-area-inset-top)); padding: 8px 12px; max-width: calc(100vw - 300px); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); border-radius: 10px; }
   #perf b { color: var(--text); font-weight: 500; }
   #perf.off { display: none; }
+  #perf { z-index: 60; } /* in front of the start page and the game-over card when on */
+  .overBtns { display: flex; gap: 10px; margin-top: 10px; }
+  .overBtns button { flex: 1; padding: 11px 10px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.06); color: var(--text);
+    font: 600 14px inherit; font-family: inherit; cursor: pointer; }
+  .overBtns button:hover { background: rgba(255,255,255,.12); }
 
   /* Menus */
   .screen { position: fixed; inset: 0; display: grid; place-items: center; padding: 16px; transition: opacity .35s, visibility .35s; }
@@ -198,6 +203,23 @@
   #chatTog.off + #chatSend { display: none; } /* chat off: no send button */
   body:not(.playing) #chat { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 30px); }
   body:not(.playing) #chatBar { bottom: max(16px, env(safe-area-inset-bottom)); }
+  /* in game: only the last 6 lines (the log keeps 100 for the start page) */
+  body.playing #chatLog > div:nth-last-child(n+7) { display: none; }
+  /* start page (and game over): the whole history, scrollable, nothing fades, the typing box always there */
+  body:not(.playing) #chat { pointer-events: auto; display: flex; flex-direction: column; max-height: 34vh; }
+  body:not(.playing) #chat.hidden { display: none; }
+  body:not(.playing) #chatLog { overflow-y: auto; min-height: 0; }
+  body:not(.playing) #chatLog > div:first-child { margin-top: auto; }
+  body:not(.playing) #chatLog div.old { opacity: 1; }
+  body:not(.playing) #chatIn { display: block; flex: none; }
+  @media (min-width: 980px) { /* wide screens: a big panel down the whole left side, beside the card */
+    body:not(.playing) #chat { top: max(16px, env(safe-area-inset-top)); bottom: calc(max(16px, env(safe-area-inset-bottom)) + 34px); max-height: none;
+      width: min(440px, calc(50vw - 250px)); padding: 14px; border-radius: 16px; background: rgba(8,12,22,.62); border: 1px solid var(--line); }
+    body:not(.playing) #chat::before { content: "Chat"; flex: none; margin-bottom: 10px; font-size: 12px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+    body:not(.playing) #chatLog { flex: 1; font-size: 15px; line-height: 1.4; gap: 4px; }
+    body:not(.playing) #chatLog div { padding: 4px 10px; background: rgba(255,255,255,.04); }
+    body:not(.playing) #chatIn { font-size: 15px; padding: 9px 11px; margin-top: 6px; }
+  }
 
   @media (max-width: 640px) {
     #chat { width: min(280px, calc(100vw - 32px)); bottom: calc(max(16px, env(safe-area-inset-bottom)) + 118px); }
@@ -261,7 +283,8 @@
       <div><b id="oBest">0</b><span>Best</span></div>
     </div>
     <button class="play" id="again">PLAY AGAIN</button>
-    <div class="keys"><kbd>Enter</kbd> to respawn · <kbd>Esc</kbd> menu</div>
+    <div class="overBtns"><button id="toStart">Start screen</button><button id="sheet" title="A picture with this run's numbers and the moment you died">⬇ Information sheet</button></div>
+    <div class="keys"><kbd>Enter</kbd> to respawn · <kbd>Esc</kbd> start screen</div>
   </div>
 </div>
 
@@ -269,6 +292,7 @@
 "use strict";
 /*__RENDER_GL__*/
 /*__RENDER_GPU__*/
+/*__SHEET__*/
 /*__APP__*/
 </script>
 </body>

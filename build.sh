@@ -18,8 +18,9 @@ WASM_B64="$(base64 < build/sim.wasm | tr -d '\n')"
 
 # inline <template> <out>: each placeholder line /*__NAME__*/ becomes that file's contents
 inline() {
-  awk -v gl=src/render-gl.js -v gpu=src/render-gpu.js -v app="$3" '
+  awk -v gl=src/render-gl.js -v gpu=src/render-gpu.js -v sheet=src/sheet.js -v app="$3" '
     function cat(f,   l) { while ((getline l < f) > 0) print l; close(f) }
+    /\/\*__SHEET__\*\//      { cat(sheet); next }
     /\/\*__RENDER_GL__\*\//  { cat(gl);  next }
     /\/\*__RENDER_GPU__\*\// { cat(gpu); next }
     /\/\*__APP__\*\//        { cat(app); next }

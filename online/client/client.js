@@ -491,15 +491,18 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const playerName = () => nameEl.value.trim() || "You";
   let state = "menu"; // menu | play | dead
 
+  // this run's numbers, for the information sheet
+  const run = { t0: 0, peak: 0, rankBest: 0, rankNow: 0, total: 0 }; let lastRun = null, grabPending = false;
   function start() {
     if (!connected) return;
+    Object.assign(run, { t0: performance.now(), peak: 0, rankBest: 0, rankNow: 0, total: 0 }); resetShots();
     store.set("serpent.name", nameEl.value.trim());
     join();
     state = "play"; document.body.classList.add("playing");
     $("menu").classList.add("hidden"); $("over").classList.add("hidden");
     nameEl.blur();
   }
-  function showMenu() { document.body.classList.remove("playing"); $("over").classList.add("hidden"); $("menu").classList.remove("hidden"); }
+  function showMenu() { document.body.classList.remove("playing"); $("over").classList.add("hidden"); $("menu").classList.remove("hidden"); requestAnimationFrame(() => { chatLog.scrollTop = chatLog.scrollHeight; }); }
   function toMenu() { if (state !== "menu") sendRaw(new Uint8Array([4])); state = "menu"; showMenu(); }
   function showOver(by) {
     $("by").innerHTML = by;
@@ -513,8 +516,13 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (isBest) { best = len; store.set("serpent.best.online", best); }
     $("oLen").textContent = len; $("oKills").textContent = k; $("oBest").textContent = best; $("oBest").classList.toggle("new", isBest);
     showOver(killer !== 255 ? `Crashed into <b>${esc(nameOf(killer))}</b>` : "You hit the edge of the world");
+    lastRun = { name: playerName(), mode: "Online", length: len, peak: Math.max(run.peak, len), best, kills: k, rankNow: run.rankNow, rankBest: run.rankBest,
+      total: run.total, killer: killer !== 255 ? nameOf(killer) : "The edge of the world", seconds: (performance.now() - run.t0) / 1000, colour: SKINS[skinSel][0] };
+    grabPending = true; // the next frame drawn is copied for the sheet
   }
   $("play").onclick = start; $("again").onclick = start;
+  $("toStart").onclick = toMenu;
+  $("sheet").onclick = () => { if (lastRun) downloadDeathSheet(lastRun); };
   $("play").disabled = true;
   nameEl.addEventListener("keydown", (e) => { if (e.key === "Enter") start(); e.stopPropagation(); });
 
@@ -570,8 +578,10 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (sys) el.className = "sys";
     else { const b = document.createElement("b"); b.textContent = name + ": "; el.append(b); } // text only: nothing in a message is read as HTML
     el.append(document.createTextNode(text));
+    const atEnd = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 40;
     chatLog.append(el);
-    while (chatLog.children.length > 6) chatLog.firstChild.remove(); // only the last few lines
+    while (chatLog.children.length > 100) chatLog.firstChild.remove(); // the start page shows them all (scrollable), the game the last 6
+    if (atEnd) chatLog.scrollTop = chatLog.scrollHeight;             // follow new lines unless scrolled back to read
     setTimeout(() => el.classList.add("old"), 10000);                 // then they fade in game (still shown while typing)
   }
   function openChat() { if (chatHidden) return; chatEl.classList.add("open"); chatIn.focus(); }
@@ -590,7 +600,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     chatWait = setTimeout(() => addChat("", "The server didn't answer: it may need updating to the version with chat.", true), 3000);
   }
   const submitChat = () => { const t = chatIn.value.trim(); if (t) sendChat(t); closeChat(); };
-  $("chatSend").onclick = () => { if (chatEl.classList.contains("open")) submitChat(); else openChat(); }; // ➤: write, then send
+  $("chatSend").onclick = () => { if (chatIn.value.trim()) submitChat(); else openChat(); }; // ➤: write, then send
   chatIn.addEventListener("focus", () => chatEl.classList.add("open"));
   chatIn.addEventListener("keydown", (e) => {
     e.stopPropagation(); // typing never steers or boosts
@@ -714,6 +724,8 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     }
     if (state !== "play" || me < 0) return;
     $("len").textContent = Math.floor(mass[me] * 10);
+    run.peak = Math.max(run.peak, Math.floor(mass[me] * 10)); run.rankNow = board.rank; run.total = board.alive;
+    if (board.rank > 0) run.rankBest = run.rankBest ? Math.min(run.rankBest, board.rank) : board.rank;
     $("rank").textContent = board.rank || "–";
     $("total").textContent = board.alive;
     $("kills").textContent = kills[me];
@@ -864,6 +876,8 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     frameBlk[8] = vw; frameBlk[9] = vh; frameBlk[10] = WR; frameBlk[11] = 0;
     const t1 = performance.now();
     if (!gpuDown) { try { R.draw(frameNo++, playing, !perfEl.classList.contains("off")); } catch (e) { if (R.device && touchDevice) restartGPU(); else throw e; } }
+    if (grabPending && !gpuDown) { grabPending = false; grabDeathShot(cv, now); } // the picture for the information sheet
+    else if (playing && !gpuDown) keepShot(cv, now);                              // (a small copy every 250 ms, right after drawing)
     ntup = 0;
     const t2 = performance.now();
     prepMs += t1 - t0; drawMs += t2 - t1; fpsN++;

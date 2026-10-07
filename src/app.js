@@ -208,7 +208,10 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
 
   let state = "menu"; // menu | play | dead
 
+  // this run's numbers, for the information sheet
+  const run = { t0: 0, peak: 0, rankBest: 0, rankNow: 0, total: 0 }; let lastRun = null, grabPending = false;
   function start() {
+    Object.assign(run, { t0: performance.now(), peak: 0, rankBest: 0, rankNow: 0, total: 0 }); resetShots();
     store.set("serpent.name", nameEl.value.trim());
     W.spawnPlayer(skinSel); // also moves the camera there and fills food around it
     state = "play"; document.body.classList.add("playing");
@@ -228,9 +231,14 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     $("oBest").classList.toggle("new", isBest);
     const killer = W.killer();
     $("by").innerHTML = killer > 0 ? `Crashed into <b>${names[killer]}</b>` : "You hit the edge of the world";
+    lastRun = { name: playerName(), mode: "Offline", length: len, peak: Math.max(run.peak, len), best, kills: k, rankNow: run.rankNow, rankBest: run.rankBest,
+      total: run.total, killer: killer > 0 ? names[killer] : "The edge of the world", seconds: (performance.now() - run.t0) / 1000, colour: SKINS[skinSel][0] };
+    grabPending = true; // the next frame drawn is copied for the sheet
     setTimeout(() => { if (state === "dead") { $("over").classList.remove("hidden"); document.body.classList.remove("playing"); } }, 900);
   }
   $("play").onclick = start; $("again").onclick = start;
+  $("toStart").onclick = toMenu;
+  $("sheet").onclick = () => { if (lastRun) downloadDeathSheet(lastRun); };
   nameEl.addEventListener("keydown", (e) => { if (e.key === "Enter") start(); e.stopPropagation(); });
 
   /* ---------------- Input ---------------- */
@@ -342,6 +350,8 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     }
     if (state !== "play") return;
     $("len").textContent = Math.floor(snap[3] * 10);
+    run.peak = Math.max(run.peak, Math.floor(snap[3] * 10)); run.rankNow = lb[1]; run.total = lb[0];
+    if (lb[1] > 0) run.rankBest = run.rankBest ? Math.min(run.rankBest, lb[1]) : lb[1];
     $("rank").textContent = lb[1];
     $("total").textContent = lb[0];
     $("kills").textContent = snap[7];
@@ -405,6 +415,8 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
 
     const timing = !perfEl.classList.contains("off");
     if (!gpuDown) { try { R.draw(frameNo++, playing, timing); } catch (e) { if (R.device && touchDevice) restartGPU(); else throw e; } }
+    if (grabPending && !gpuDown) { grabPending = false; grabDeathShot(cv, now); } // the picture for the information sheet
+    else if (playing && !gpuDown) keepShot(cv, now);                              // (a small copy every 250 ms, right after drawing)
     const t3 = performance.now();
 
     if ((hudT += dt) > 0.25) { hudT = 0; updateHud(); } // DOM: 4x per second
