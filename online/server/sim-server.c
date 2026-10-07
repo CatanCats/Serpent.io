@@ -131,6 +131,9 @@ static InRec inLog[MAXS][64]; static u32 inN[MAXS];
 /* Each player's state before each of the last 32 steps, for replays (see rescue). */
 typedef struct { float hx, hy, ang, dcx, dcy, aim; u32 pc, wantBoost, arrived, late; } HState; /* aim, wantBoost: the input in effect */
 static HState hist[MAXS][32];
+/* Every snake's head over the last 32 steps (after each move), for trap fairness below. */
+typedef struct { float hx, hy, dcx, dcy, r; u32 pc; } OldHead; /* r = 0: not alive then */
+static OldHead oldH[MAXS][32];
 static i32 killedBy[MAXS];       /* who killed each human (-1: the world edge) */
 static float aspect[MAXS];       /* each player's screen width/height: sets its view */
 static i32 NB = 60;              /* bots live in slots 1..NB */
@@ -581,20 +584,55 @@ static i32 rescue(i32 s, i32 W) {
   return 1;
 }
 static i32 hitTest(i32 s) { return hitAt(s, S[s].hx, S[s].hy, S[s].dcx, S[s].dcy); }
+
+/* Trap fairness (online). A player sees other snakes about lagSteps late but their own
+   snake where it is (predicted), so a trap closed on the player's screen is not closed on
+   the server yet and the bot slipped through it. So a bot also dies if its head as the
+   player saw it (lagSteps ago) was inside the player's body as it is now: what the
+   trapper saw is what counts. Same front-of-head rule as hitAt; the player's head end
+   (newest 6 points) doesn't count, head-ons are decided by hitAt. Bots only: between two
+   players neither is favoured. Returns the trapping player, or -1. */
+static i32 trapList[MAXS], nTrap; /* this step's living players with a known delay */
+static i32 trapHit(i32 s) {
+  for (i32 m = 0; m < nTrap; m++) {
+    i32 o = trapList[m];
+    u32 L = (u32)(lagSteps[o] + 0.5f);
+    const OldHead *p = &oldH[s][(tick - L) & 31u];
+    if (p->r <= 0.f || S[s].pc - p->pc >= (u32)RING) continue; /* not alive then, or another life */
+    Snake *q = &S[o];
+    float reach = (float)q->n * q->spacing + p->r + q->r + 60.f, ex = p->hx - q->hx, ey = p->hy - q->hy;
+    if (ex * ex + ey * ey > reach * reach) continue;
+    float R = p->r, a = maxf(R * 0.5f, R - q->r * 0.5f), fx = p->hx + p->dcx * a, fy = p->hy + p->dcy * a, t = q->r * 0.8f;
+    FOR_CELLS(fx, fy, t, c)
+      for (i32 i = gHead[c]; i >= 0; i = gNext[i]) {
+        if (i / RING != o) continue;
+        i32 j = i & RMASK;
+        if (((q->pc - 1u - (u32)j) & RMASK) < 6u) continue; /* its head end */
+        float dx = UQ(tr[o][j][0]) - fx, dy = UQ(tr[o][j][1]) - fy;
+        if (dx * dx + dy * dy < t * t) return o;
+      }
+  }
+  return -1;
+}
 /* Would snake s's head at (hx, hy), heading (hdx, hdy), hit something? */
 static i32 hitAt(i32 s, float hx, float hy, float hdx, float hdy) {
   Snake *k = &S[s];
   float lim = WR - k->r * 0.5f;
   if (hx * hx + hy * hy > lim * lim) return -2;
-  /* Only the FRONT of the head counts: the point half a head-radius ahead of its centre
-     must be well inside the other's body (within 80% of its radius of the body's centre
-     line). Brushing past a body with the side of the head, or the body behind it, is fine. */
-  float fx = hx + hdx * k->r * 0.5f, fy = hy + hdy * k->r * 0.5f;
-  FOR_CELLS(fx, fy, 40.f * 0.8f, c) /* 40 = largest radius */
+  /* Only the FRONT of the head counts: a point ahead of its centre must be well inside the
+     other's body (within 80% of its radius of the body's centre line). Brushing past a body
+     with the side of the head, or the body behind it, is fine. The point is half a head
+     radius ahead, but at least as far as this head's radius minus half the other's: a big
+     head hitting a thin body has to push its front edge right into it. (With half a radius
+     only, a big head could cover most of a small snake's width and turn away alive: it
+     looked like running through the small snake's trap.) */
+  float R = k->r, sx = hx + hdx * R * 0.75f, sy = hy + hdy * R * 0.75f; /* search around the middle of the possible front points */
+  FOR_CELLS(sx, sy, R * 0.25f + 40.f * 0.8f, c) /* 40 = largest radius */
     for (i32 i = gHead[c]; i >= 0; i = gNext[i]) {
       i32 o = i / RING;
       if (o == s) continue;
       i32 j = i & RMASK;
+      float a = maxf(R * 0.5f, R - S[o].r * 0.5f), fx = hx + hdx * a, fy = hy + hdy * a;
       float dx = UQ(tr[o][j][0]) - fx, dy = UQ(tr[o][j][1]) - fy, t = S[o].r * 0.8f;
       if (dx * dx + dy * dy >= t * t) continue;
       float th = (k->r + S[o].r) * 0.66f; /* heads this close touch each other (head-on) */
@@ -893,8 +931,10 @@ static void step(float dt) {
     if (k->near) moveSnake(s, dt);
     else if (((tick + (u32)s) & 3u) == 0) moveSnake(s, dt * 4.f); /* far away: quarter rate, same speed */
   }
+  for (i32 s = 0; s < NS; s++) { Snake *k = &S[s]; oldH[s][tick & 31u] = (OldHead){k->hx, k->hy, k->dcx, k->dcy, k->alive ? k->r : 0.f, k->pc}; }
 
   i32 nd = 0, anyRescue = 0; u8 rescued[MAXS] = {0};
+  nTrap = 0; for (i32 s = 0; s < NS; s++) if (human[s] && S[s].alive && lagSteps[s] >= 1.f) trapList[nTrap++] = s;
   for (i32 s = 0; s < NS; s++) {
     if (!S[s].alive || !S[s].near) continue;
     /* A player's input arrived late (a lag spike): apply it at the step it was meant for,
@@ -902,6 +942,7 @@ static void step(float dt) {
        saw on their screen instead of being pulled sideways later. */
     if (human[s] && hist[s][tick & 31u].late && !pendT[s] && rescue(s, 1)) { rescued[s] = 1; anyRescue = 1; }
     i32 h = hitTest(s);
+    if (!human[s] && h == -1 && nTrap) h = trapHit(s); /* ran through a trap as a player saw it */
     if (human[s] && h != -2) {
       if (h >= 0 && !pendT[s]) { pendT[s] = 1; pendK[s] = h; }
       if (pendT[s]) {

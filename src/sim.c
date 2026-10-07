@@ -511,15 +511,20 @@ static i32 hitTest(i32 s) {
   float hx = k->hx, hy = k->hy;
   float lim = WR - k->r * 0.5f;
   if (hx * hx + hy * hy > lim * lim) return -2;
-  /* Only the FRONT of the head counts: the point half a head-radius ahead of its centre
-     must be well inside the other's body (within 80% of its radius of the body's centre
-     line). Brushing past a body with the side of the head, or the body behind it, is fine. */
-  float fx = hx + k->dcx * k->r * 0.5f, fy = hy + k->dcy * k->r * 0.5f;
-  FOR_CELLS(fx, fy, 40.f * 0.8f, c) /* 40 = largest radius */
+  /* Only the FRONT of the head counts: a point ahead of its centre must be well inside the
+     other's body (within 80% of its radius of the body's centre line). Brushing past a body
+     with the side of the head, or the body behind it, is fine. The point is half a head
+     radius ahead, but at least as far as this head's radius minus half the other's: a big
+     head hitting a thin body has to push its front edge right into it. (With half a radius
+     only, a big head could cover most of a small snake's width and turn away alive: it
+     looked like running through the small snake's trap.) */
+  float R = k->r, sx = hx + k->dcx * R * 0.75f, sy = hy + k->dcy * R * 0.75f; /* search around the middle of the possible front points */
+  FOR_CELLS(sx, sy, R * 0.25f + 40.f * 0.8f, c) /* 40 = largest radius */
     for (i32 i = gHead[c]; i >= 0; i = gNext[i]) {
       i32 o = i / RING;
       if (o == s) continue;
       i32 j = i & RMASK;
+      float a = maxf(R * 0.5f, R - S[o].r * 0.5f), fx = hx + k->dcx * a, fy = hy + k->dcy * a;
       float dx = UQ(tr[o][j][0]) - fx, dy = UQ(tr[o][j][1]) - fy, t = S[o].r * 0.8f;
       if (dx * dx + dy * dy >= t * t) continue;
       /* Touching the other's head end (its newest points, about two radii): the heads

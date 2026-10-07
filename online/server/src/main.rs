@@ -92,7 +92,8 @@ impl Sim {
                     3 VIEW  u16 aspect*1000
                     4 LEAVE (back to the menu)
                     5 PING  u8 id   (answered at once with PONG, by the connection, not the game loop)
-                    6 DELAY u16 round trip in ms (the page's measurement; used to compensate collisions)
+                    6 DELAY u16 round trip in ms (the page's measurement; used to compensate collisions),
+                          u8 the page's smoothing delay in tenths of a step (optional; 4 steps if absent)
                     7 CHAT  u8 len, text (UTF-8, at most 80 characters; one message per 1.2 s),
                           then u8 len, name: used only before joining (the start page chats too)
  server -> client:  1 WELCOME u8 maxSnakes, u16 ring, f32 worldRadius, u8 bots, u8 players
@@ -117,7 +118,10 @@ impl Sim {
 /// How many steps behind the server a player's screen shows the other snakes: its round
 /// trip (your own snake is predicted ahead by half of it, the others arrive half of it
 /// late), plus the page's smoothing delay (INTERP = 4 steps) and half a snapshot interval.
-fn lag_steps(rtt_ms: u16) -> f32 { if rtt_ms == 0 { 0. } else { rtt_ms as f32 * 0.06 + 5. } }
+/// How many steps late a player sees other snakes: the round trip, the page's smoothing
+/// delay (sent with DELAY in tenths of a step; 4 from pages that don't send it) and half a
+/// snapshot interval.
+fn lag_steps(rtt_ms: u16, interp10: u8) -> f32 { if rtt_ms == 0 { 0. } else { rtt_ms as f32 * 0.06 + if interp10 > 0 { interp10 as f32 / 10. } else { 4. } + 1. } }
 
 /// World units to 16-bit fixed point (quarter units), the trail's own format.
 #[inline] fn q1(v: f32) -> i16 { (v * 2.).round().clamp(-32767., 32767.) as i16 } // half units, as the sim stores them
@@ -145,6 +149,7 @@ struct Client {
     pend: Vec<u8>,         // food changes in those sectors since the last snapshot
     npend: u32,
     rtt_ms: u16,           // its measured network round trip
+    interp10: u8,          // its page's smoothing delay, tenths of a step (0: not sent)
     chat_at: Option<Instant>, // its last chat message (rate limit)
     clk: i64, clk_lo: u16, clk_ok: bool, // the page's clock, unwrapped from its 16-bit stamps
     offs: std::collections::VecDeque<i64>, lates: std::collections::VecDeque<u8>, jitter: i32, late_max: i32, // (late_max: for the log)
@@ -197,7 +202,7 @@ impl Game {
             Ev::Open { id, tx } => {
                 let players = self.clients.values().filter(|c| c.slot >= 0).count().min(255) as u8;
                 let mut c = Client { tx, slot: -1, alive: false, aspect: 1.78, last: (0., 0., 900.), sent_pc: vec![0; self.sim.maxs], sent_from: vec![0; self.sim.maxs], sent_head: vec![(0, 0, 0); self.sim.maxs],
-                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, rtt_ms: 0, chat_at: None, clk: 0, clk_lo: 0, clk_ok: false, offs: Default::default(), lates: Default::default(), jitter: -1, late_max: 0, in_seq: 0, in_tick: 0, reset: false, cap: 1024, msgs: 0 };
+                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, rtt_ms: 0, interp10: 0, chat_at: None, clk: 0, clk_lo: 0, clk_ok: false, offs: Default::default(), lates: Default::default(), jitter: -1, late_max: 0, in_seq: 0, in_tick: 0, reset: false, cap: 1024, msgs: 0 };
                 let mut o = Out(Vec::new());
                 o.u8(1); o.u8(self.sim.maxs as u8); o.u16(self.sim.ring as u16); o.f32(self.sim.wr); o.u8(self.sim.bots as u8); o.u8(players);
                 Self::send(&mut c, o.0);
@@ -234,7 +239,7 @@ impl Game {
                     let s = c.slot as usize;
                     self.names[s] = clean_name(&d[5..5 + len]);
                     c.aspect = aspect;
-                    unsafe { sim_set_aspect(c.slot, aspect); sim_spawn_human(c.slot, d[1] as i32); sim_set_lag(c.slot, lag_steps(c.rtt_ms)); if c.jitter >= 0 { sim_set_jitter(c.slot, c.jitter); } }
+                    unsafe { sim_set_aspect(c.slot, aspect); sim_spawn_human(c.slot, d[1] as i32); sim_set_lag(c.slot, lag_steps(c.rtt_ms, c.interp10)); if c.jitter >= 0 { sim_set_jitter(c.slot, c.jitter); } }
                     c.alive = true; c.sent_pc.iter_mut().for_each(|v| *v = 0);
                     let m = self.name_msg(s);
                     self.clients.insert(id, c);
@@ -275,7 +280,8 @@ impl Game {
                 }
                 6 if d.len() >= 3 => {
                     c.rtt_ms = u16::from_le_bytes([d[1], d[2]]).min(1000);
-                    if c.slot >= 0 { unsafe { sim_set_lag(c.slot, lag_steps(c.rtt_ms)) }; }
+                    if d.len() >= 4 { c.interp10 = d[3].min(120); }
+                    if c.slot >= 0 { unsafe { sim_set_lag(c.slot, lag_steps(c.rtt_ms, c.interp10)) }; }
                 }
                 _ => {}
             }
