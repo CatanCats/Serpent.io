@@ -17,17 +17,17 @@ typedef unsigned char u8;
 #define EXPORT(n)
 #define PI 3.14159265f
 #define TAU 6.28318531f
-#define MAXS 128         /* snakes: bots in slots 1..NB, humans in every other slot */
+#define MAXS 160         /* snakes: bots in slots 1..NB, humans in every other slot (slot ids fit a byte; owner map 255 = several) */
 #define RING 512         /* trail ring per snake (power of two) */
 #define RMASK (RING - 1)
 #define MAXSEG (RING - 1)
 #define MAXF 32768       /* food pellets (around every player) */
-#define WR 8000.f        /* world radius */
+#define WR 16000.f        /* world radius */
 #define CELL 100.f       /* spatial hash cell size (>= max query radius) */
-#define GN 160           /* grid cells per side: 2*WR/CELL */
+#define GN 320           /* grid cells per side: 2*WR/CELL */
 #define GC (GN * GN)
 #define MC 32.f          /* owner-map cell */
-#define MN 512           /* owner-map cells per side: covers the whole world */
+#define MN 1024          /* owner-map cells per side: covers the whole world (2*WR/MC) */
 #define NODES (MAXS * RING) /* body grid: one fixed node per trail slot */
 #define REBUILD 32       /* steps between food tidy-ups */
 
@@ -72,6 +72,7 @@ typedef struct {
   float ang, tang, mass, r, spacing, dropT, dropMass, aiT, tx, ty, respawnT, huntT, hx, hy;
   float dcx, dcy; /* heading as a unit vector (no trig per step) */
   i32 n, alive, boost, wantBoost, skin, kills, target, tier, near, orbit;
+  i32 mid;   /* once big (MID_MASS), drawn to the middle: decided at spawn, a 50% chance */
   float rushT;
   u32 pc; /* trail points pushed so far (monotonic across lives) */
   u32 tail; /* oldest trail point linked into the body grid: [tail, pc) are linked */
@@ -79,7 +80,7 @@ typedef struct {
 } Snake;
 
 static Snake S[MAXS];
-/* trail, fixed point (Q2), interleaved x,y: a byte copy goes to the GPU */
+/* trail, fixed point (Q1), interleaved x,y: a byte copy goes to the GPU */
 static short tr[MAXS][RING][2];
 static i32 NS = 40;
 
@@ -195,9 +196,9 @@ static i32 cellOf(float x, float y) { return cellX(y) * GN + cellX(x); }
   for (i32 gy_ = cellX((y) - (R)), gy1_ = cellX((y) + (R)), gx0_ = cellX((x) - (R)), gx1_ = cellX((x) + (R)); gy_ <= gy1_; gy_++) \
     for (i32 gx_ = gx0_, c; gx_ <= gx1_ && (c = gy_ * GN + gx_, 1); gx_++)
 
-/* fixed point Q2: +-8191 units at 0.25 precision (sub-pixel at normal zoom) */
-static short fix(float v) { v *= 4.f; v += v >= 0 ? 0.5f : -0.5f; return (short)(v > 32767.f ? 32767.f : v < -32767.f ? -32767.f : v); }
-#define UQ(v) ((float)(v) * 0.25f)
+/* fixed point Q1: +-16383 units at 0.5 precision (about a pixel at normal zoom; the world is 16000 across) */
+static short fix(float v) { v *= 2.f; v += v >= 0 ? 0.5f : -0.5f; return (short)(v > 32767.f ? 32767.f : v < -32767.f ? -32767.f : v); }
+#define UQ(v) ((float)(v) * 0.5f)
 /* trail point j (0 = newest) */
 #define TX(s, j) UQ(tr[s][(S[s].pc - 1u - (u32)(j)) & RMASK][0])
 #define TY(s, j) UQ(tr[s][(S[s].pc - 1u - (u32)(j)) & RMASK][1])
@@ -208,15 +209,15 @@ static i32 segsFor(float m) { i32 n = 14 + (i32)(3.6f * sqrtf_(m)); return n > M
 
 /* ---------- spatial hash ---------- */
 /* Link trail point pc of snake s into the body grid and the danger map. Integer
-   maths straight on the 16-bit point (Q2: quarter units). */
+   maths straight on the 16-bit point (Q1: half units). */
 static void segLink(i32 s, u32 pc) {
   i32 node = s * RING + (i32)(pc & RMASK);
   i32 xq = tr[s][pc & RMASK][0], yq = tr[s][pc & RMASK][1];
-  i32 mx = (xq - (i32)omX0 * 4) >> 7, my = (yq - (i32)omY0 * 4) >> 7; /* danger-map cell: 32 units = 128 Q2 */
+  i32 mx = (xq - (i32)omX0 * 2) >> 6, my = (yq - (i32)omY0 * 2) >> 6; /* danger-map cell: 32 units = 64 Q1 */
   /* only points inside the window around the player matter: nothing far away is
      ever collision-tested (far snakes use the statistical model) */
   if ((u32)mx >= MN || (u32)my >= MN) { gCell[node] = -1; return; }
-  i32 gx = (xq + (i32)(WR * 4.f)) / (i32)(CELL * 4.f), gy = (yq + (i32)(WR * 4.f)) / (i32)(CELL * 4.f);
+  i32 gx = (xq + (i32)(WR * 2.f)) / (i32)(CELL * 2.f), gy = (yq + (i32)(WR * 2.f)) / (i32)(CELL * 2.f);
   gx = gx < 0 ? 0 : gx >= GN ? GN - 1 : gx; gy = gy < 0 ? 0 : gy >= GN ? GN - 1 : gy;
   i32 cell = gy * GN + gx, h = gHead[cell];
   gCell[node] = cell; gPrev[node] = -1; gNext[node] = h;
@@ -368,11 +369,21 @@ static void randomRing(float r0, float r1, float *x, float *y) {
   *x = cosf_(a) * d; *y = sinf_(a) * d;
 }
 /* The middle (the centre zone on the minimap, 35% of the world radius) belongs to big
-   snakes: only from MID_MASS (length 5000 on screen: length = mass x 10) are snakes drawn
-   to it. Nothing spawns in it. */
+   snakes: from MID_MASS (length 5000 on screen: length = mass x 10), half of them (a coin
+   toss at spawn, k->mid) are drawn to it. The rest, and all smaller snakes, wander with no
+   pull toward or away from it, so they can still pass through. Nothing spawns in it. */
 #define MID_MASS 500.f
-static void homePoint(float mass, float *x, float *y) {
-  if (mass >= MID_MASS) randomDisk(WR * 0.35f, x, y); else randomRing(WR * 0.3f, WR * 0.88f, x, y);
+static void homePoint(const Snake *k, float *x, float *y) {
+  if (k->mass >= MID_MASS && k->mid) { randomDisk(WR * 0.35f, x, y); return; }
+  /* Everyone else wanders: a point 1500-4000 away in a random direction, inside the world.
+     (Random points anywhere in the world pulled everyone inward: a new one is picked every
+     few seconds, long before it's reached, and from most places most of the world lies
+     toward the middle. Small snakes spent 48% of their time in it, 12% of the area.) */
+  for (i32 t = 0; t < 8; t++) {
+    float a = frand() * TAU, d = 1500.f + frand() * 2500.f, px = k->hx + cosf_(a) * d, py = k->hy + sinf_(a) * d;
+    if (px * px + py * py < WR * WR * 0.88f * 0.88f) { *x = px; *y = py; return; }
+  }
+  randomRing(WR * 0.3f, WR * 0.88f, x, y);
 }
 /* How far (x, y) is from the nearest other living snake: its head and every 8th body
    point (points are ~5-17 units apart). Exact over the whole world, unlike dangerAt,
@@ -423,7 +434,7 @@ static void spawnSnake(i32 s, float mass, i32 skin) {
   x = bx; y = by;
   k->ang = k->tang = ba; k->dcx = cosf_(k->ang); k->dcy = sinf_(k->ang);
   k->mass = mass; k->r = radiusFor(mass); k->spacing = k->r * 0.42f; k->n = segsFor(mass);
-  k->skin = skin; k->kills = 0; k->boost = k->wantBoost = 0;
+  k->skin = skin; k->kills = 0; k->boost = k->wantBoost = 0; k->mid = frand() < 0.5f;
   k->dropT = k->dropMass = 0; k->aiT = 0; k->huntT = 0; k->target = -1; k->near = 1; k->rushT = 0; k->orbit = 1;
   k->tx = x; k->ty = y; k->hx = x; k->hy = y;
   /* lay a full ring of trail behind the head; pc keeps counting so nodes from a
@@ -726,8 +737,8 @@ static void botThink(i32 s, float dt) {
         k->orbit = ((o->hx - hx) * o->dcy - (o->hy - hy) * o->dcx) > 0 ? 1 : -1;
       }
     }
-    if (k->target < 0 && k->rushT <= 0 && k->mass >= MID_MASS && hx * hx + hy * hy > WR * WR * 0.2f && frand() < 0.5f) {
-      homePoint(k->mass, &k->tx, &k->ty); /* big snakes drift back to the middle */
+    if (k->target < 0 && k->rushT <= 0 && k->mass >= MID_MASS && k->mid && hx * hx + hy * hy > WR * WR * 0.2f && frand() < 0.5f) {
+      homePoint(k, &k->tx, &k->ty); /* big snakes drift back to the middle */
       k->aiT = 1.5f;
     } else if (k->target < 0 && k->rushT <= 0) {
       /* best food by value / distance, favouring what is in front */
@@ -739,7 +750,7 @@ static void botThink(i32 s, float dt) {
           float score = FV(i) / (d + 60.f) * (1.6f + (dx * ca + dy * sa) / d);
           if (score > bestScore) { bestScore = score; k->tx = px; k->ty = py; }
         }
-      if (bestScore == 0) homePoint(k->mass, &k->tx, &k->ty);
+      if (bestScore == 0) homePoint(k, &k->tx, &k->ty);
     }
   }
 
@@ -805,7 +816,7 @@ static void farThink(i32 s, float dt) {
   k->wantBoost = 0; k->huntT = 0;
   float dx = k->tx - k->hx, dy = k->ty - k->hy;
   if ((k->aiT -= dt) <= 0 || dx * dx + dy * dy < 150.f * 150.f || k->hx * k->hx + k->hy * k->hy > WR * WR * 0.8f) {
-    homePoint(k->mass, &k->tx, &k->ty);
+    homePoint(k, &k->tx, &k->ty);
     k->aiT = 3.f + frand() * 5.f;
   }
   k->tang = atan2f_(k->ty - k->hy, k->tx - k->hx);

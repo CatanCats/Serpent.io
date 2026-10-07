@@ -113,12 +113,12 @@ function createGL(canvas, E) {
   const VS = `#version 300 es
   ${FRAME}
   ${PAL}
-  layout(location=0) in ivec2 aP; layout(location=1) in uvec4 aB; // x, y (Q2) | value, skin, born lo, born hi
+  layout(location=0) in ivec2 aP; layout(location=1) in uvec4 aB; // x, y (Q1) | value, skin, born lo, born hi
   out vec2 vL; out float vR; flat out uvec4 vI; flat out vec3 vC;
   // One instance per pellet, straight from memory. The list holds the pellets of the
   // cells in view; the rest of the margin is culled here.
   void main(){
-    vec2 p=vec2(aP)*.25, c0=p-uCamHalf.xy; float r=min(3.5+sqrt(float(aB.x)/16.)*2.6,15.);
+    vec2 p=vec2(aP)*.5, c0=p-uCamHalf.xy; float r=min(3.5+sqrt(float(aB.x)/16.)*2.6,15.);
     if(aB.x==0u || any(greaterThan(abs(c0),uCamHalf.zw+r*${FOOD_GLOW}+uPxTime.x*1.5))){ gl_Position=vec4(2,2,2,1); return; }
     vec2 q = vec2(float(gl_VertexID&1), float(gl_VertexID>>1))*2.-1.; // 4 corners: fewest vertices
     bool tiny = r/uPxTime.x < 1.6;                          // pellet under ~1.6 px: no halo
@@ -163,7 +163,7 @@ function createGL(canvas, E) {
   layout(location=2) in uvec4 aH2; // row, newest trail index, segments, skin|flags<<8
   out float vT, vV; out vec2 vDir; flat out uint vFl; flat out float vR, vNl; flat out vec3 vCA, vCB;
   const float CR=1./.42;
-  vec2 T(int k){ return vec2(texelFetch(uTrail, ivec2((int(aH2.y)-k)&${RING - 1}, int(aH2.x)), 0).rg)*.25; }
+  vec2 T(int k){ return vec2(texelFetch(uTrail, ivec2((int(aH2.y)-k)&${RING - 1}, int(aH2.x)), 0).rg)*.5; }
   vec2 fwd(){ return vec2(cos(aH1.z),sin(aH1.z)); }
   // Strip order: tail cap, body samples tail->head, head, head cap. All snakes share
   // one instanced draw sized for the longest, so spare vertices must be nearly free:
@@ -232,10 +232,10 @@ function createGL(canvas, E) {
     else if((vFl&4u)!=0u){ glow=exp(-pow(max(gd-.85,0.)/.3,2.))*(.45+.15*sin(uPxTime.y*2.5+vT*.3))*(1.-a); gc=vec3(1.,.78,.3); }
     if(a<=0. && glow<=.003) discard;
     vec3 c=(e0>0. ? shade(k0,l0,n0,f)*e0 : vec3(0)) + (e1>0. ? shade(k1,l1,n1,f)*e1 : vec3(0));
-    if((vFl&2u)==0u){ // other snakes (not yours): a thin red outline, so they stand out
-      float rim=smoothstep(.8-aa,.8+aa,av);
-      if((k0==0. && dot(l0,f)>0.) || (k0==vNl && dot(l0,f)<0.)) rim=max(rim,smoothstep(.8-aa,.8+aa,n0)); // round head front, tail end
-      c=mix(c,vec3(.94,.16,.2)*a,rim);
+    if((vFl&2u)==0u){ // other snakes (not yours): a faint thin red outline, so they stand out
+      float rim=smoothstep(.9-aa,.9+aa,av);
+      if((k0==0. && dot(l0,f)>0.) || (k0==vNl && dot(l0,f)<0.)) rim=max(rim,smoothstep(.9-aa,.9+aa,n0)); // round head front, tail end
+      c=mix(c,vec3(.85,.18,.22)*a,rim*.5);
     }
     if((vFl&4u)!=0u) c+=vec3(1.,.85,.4)*.18*a*(.5+.5*sin(vT*.8-uPxTime.y*3.)); // shimmering scales
     o=vec4(c+gc*glow, a);

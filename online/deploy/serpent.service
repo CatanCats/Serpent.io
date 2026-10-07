@@ -7,7 +7,7 @@ After=network-online.target
 [Service]
 User=serpent
 WorkingDirectory=/srv/apps/serpent
-Environment=PORT=8010 BIND=127.0.0.1 BOTS=60 WEB_ROOT=/srv/apps/serpent
+Environment=PORT=8010 BIND=127.0.0.1 BOTS=100 WEB_ROOT=/srv/apps/serpent
 ExecStart=/srv/apps/serpent/serpent-server
 Restart=always
 RestartSec=2

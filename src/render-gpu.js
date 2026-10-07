@@ -82,12 +82,12 @@ struct HexO { @builtin(position) pos: vec4f, @location(0) @interpolate(flat) col
 // ---------- food ----------
 struct FoodO { @builtin(position) pos: vec4f, @location(0) l: vec2f,
   @location(1) @interpolate(flat) r: f32, @location(2) @interpolate(flat) info: vec4u, @location(3) @interpolate(flat) col: vec3f };
-// One instance per pellet, straight from memory (x, y Q2 | value, skin, born lo, born hi).
+// One instance per pellet, straight from memory (x, y Q1 | value, skin, born lo, born hi).
 // The list holds the pellets of the cells in view; the rest of the margin is culled here.
 @vertex fn vsFood(@builtin(vertex_index) vi: u32,
                   @location(0) pq: vec2i, @location(1) b: vec4u) -> FoodO {
   var o: FoodO;
-  let p = vec2f(pq) * .25; let r = min(3.5 + sqrt(f32(b.x) / 16.) * 2.6, 15.);
+  let p = vec2f(pq) * .5; let r = min(3.5 + sqrt(f32(b.x) / 16.) * 2.6, 15.);
   let c0 = p - F.camHalf.xy;
   if (b.x == 0u || any(abs(c0) > F.camHalf.zw + r * ${FOOD_GLOW} + F.pxTime.x * 1.5)) { o.pos = vec4f(2., 2., 2., 1.); return o; }
   let q = quad(vi) * 2. - 1.;                               // 4 corners: fewest vertices
@@ -121,7 +121,7 @@ struct RibO { @builtin(position) pos: vec4f, @location(0) t: f32, @location(1) v
   @location(5) @interpolate(flat) r: f32, @location(6) @interpolate(flat) nl: f32, @location(7) @interpolate(flat) cb: vec3f };
 fn T(h2: vec4u, k: i32) -> vec2f {
   let v = trail[h2.x * ${RING}u + u32((i32(h2.y) - k) & RM)];
-  return vec2f(f32(bitcast<i32>(v << 16u) >> 16u), f32(bitcast<i32>(v) >> 16u)) * .25;
+  return vec2f(f32(bitcast<i32>(v << 16u) >> 16u), f32(bitcast<i32>(v) >> 16u)) * .5;
 }
 fn fwd(h1: vec4f) -> vec2f { return vec2f(cos(h1.z), sin(h1.z)); }
 // Strip order: tail cap, body samples tail->head, head, head cap. All snakes share
@@ -190,10 +190,10 @@ fn shade(k: f32, l: vec2f, nd: f32, f: vec2f, ca: vec3f, cb: vec3f, r: f32, newe
   var c = vec3f(0.);
   if (e0 > 0.) { c += shade(k0, l0, n0, f, i.ca, i.cb, i.r, i.fl >> 8u) * e0; }
   if (e1 > 0.) { c += shade(k1, l1, n1, f, i.ca, i.cb, i.r, i.fl >> 8u) * e1; }
-  if ((i.fl & 2u) == 0u) { // other snakes (not yours): a thin red outline, so they stand out
-    var rim = smoothstep(.8 - aa, .8 + aa, av);
-    if ((k0 == 0. && dot(l0, f) > 0.) || (k0 == i.nl && dot(l0, f) < 0.)) { rim = max(rim, smoothstep(.8 - aa, .8 + aa, n0)); } // round head front, tail end
-    c = mix(c, vec3f(.94, .16, .2) * a, rim);
+  if ((i.fl & 2u) == 0u) { // other snakes (not yours): a faint thin red outline, so they stand out
+    var rim = smoothstep(.9 - aa, .9 + aa, av);
+    if ((k0 == 0. && dot(l0, f) > 0.) || (k0 == i.nl && dot(l0, f) < 0.)) { rim = max(rim, smoothstep(.9 - aa, .9 + aa, n0)); } // round head front, tail end
+    c = mix(c, vec3f(.85, .18, .22) * a, rim * .5);
   }
   if ((i.fl & 4u) != 0u) { c += vec3f(1., .85, .4) * .18 * a * (.5 + .5 * sin(i.t * .8 - F.pxTime.y * 3.)); } // shimmering scales
   return vec4f(c + gc * glow, a);
@@ -266,6 +266,7 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
   const palBuf = buf(E.palette.byteLength, U.UNIFORM | U.COPY_DST);
   q.writeBuffer(palBuf, 0, E.palette);
   const trailBuf = buf(NS * RING * 4, U.STORAGE | U.COPY_DST);
+  q.writeBuffer(trailBuf, 0, E.mem, E.ptr.trail, NS * RING * 4); // all of it once: a renderer remade after a lost device starts in step
   // trail copy on the GPU: rows of on-screen snakes are kept in sync by WASM's upload list
   const plan = {}; // floor: clear colour, flat side, hex count (see floorPlan)
   const atlasTex = device.createTexture({ size: [E.AW, E.AH], format: "rgba8unorm", // drawn ~1:1 with the screen: no mips

@@ -10,7 +10,7 @@
 //!   channel; a client that can't keep up gets a full resync instead of a backlog.
 //! * The same process serves the game pages: `/` (online) and `/offline.html`.
 //!
-//! Run: `cargo run --release` (PORT=8080, BOTS=60, WEB_ROOT=../.. by default).
+//! Run: `cargo run --release` (PORT=8080, BOTS=100, WEB_ROOT=../.. by default).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -99,12 +99,12 @@ impl Sim {
                     2 SNAP  u32 tick, u8 you (255 none), u8 spectate, u8 flags (1 = reset), u16 your kills,
                           u8 last input seq received, u8 steps since it was received, u8 n, snakes, u16 m, food
                         snake: u8 slot, u8 flags (1 boost, 2 human, 4 full body, 8 absolute head, 16 size follows), then
-                          full body:  u8 skin, u8 tier, i16 x, i16 y (head, Q2), u16 mass*4, u16 count,
-                                      i16 x, i16 y (oldest point), count-1 x (i8 dx, i8 dy) (Q2 steps to the next point)
-                          otherwise:  i8 dx, i8 dy (head moved, Q2), or i16 x, i16 y with flag 8; u16 mass*4 with flag 16
+                          full body:  u8 skin, u8 tier, i16 x, i16 y (head, Q1), u16 mass*4, u16 count,
+                                      i16 x, i16 y (oldest point), count-1 x (i8 dx, i8 dy) (Q1 steps to the next point)
+                          otherwise:  i8 dx, i8 dy (head moved, Q1), or i16 x, i16 y with flag 8; u16 mass*4 with flag 16
                           Only the head and size are sent: the client lays the body points itself, the way the
                           simulation does (a point every `spacing` along the head's path).
-                        food:  u16 slot | 0x8000 = added/changed: i16 x, i16 y (Q2), u8 value, u8 skin (+128: just
+                        food:  u16 slot | 0x8000 = added/changed: i16 x, i16 y (Q1, half units), u8 value, u8 skin (+128: just
                                spawned, fades in); u16 slot alone = gone
                     3 BOARD u16 alive, u16 yourRank, u8 k, k x (u8 slot, u8 tier, u8 skin, u8 human, f32 mass)
                     4 NAME  u8 slot, u8 len, name
@@ -120,7 +120,7 @@ impl Sim {
 fn lag_steps(rtt_ms: u16) -> f32 { if rtt_ms == 0 { 0. } else { rtt_ms as f32 * 0.06 + 5. } }
 
 /// World units to 16-bit fixed point (quarter units), the trail's own format.
-#[inline] fn q2(v: f32) -> i16 { (v * 4.).round().clamp(-32767., 32767.) as i16 }
+#[inline] fn q1(v: f32) -> i16 { (v * 2.).round().clamp(-32767., 32767.) as i16 } // half units, as the sim stores them
 
 struct Out(Vec<u8>);
 impl Out {
@@ -140,7 +140,7 @@ struct Client {
     last: (f32, f32, f32), // last camera (x, y, half height) while alive
     sent_pc: Vec<u32>,     // per snake: trail points this client has up to (0 = it doesn't have the snake)
     sent_from: Vec<u32>,   // per snake: the oldest trail point it has
-    sent_head: Vec<(i16, i16, u16)>, // per snake: the head (Q2) and mass*4 it was last sent
+    sent_head: Vec<(i16, i16, u16)>, // per snake: the head (Q1) and mass*4 it was last sent
     rect: Rect,            // food sectors this client is subscribed to (its view)
     pend: Vec<u8>,         // food changes in those sectors since the last snapshot
     npend: u32,
@@ -323,7 +323,7 @@ fn shared_snakes(sim: &Sim, out: &mut Vec<SnakeOut>, live: &mut Vec<u8>) {
         let p = sim.p(s);
         if p.alive != 0 { live.push(s as u8); } // each snapshot looks at these only
         out.push(SnakeOut { hx: p.hx, hy: p.hy, reach: p.n as f32 * p.spacing + p.r * 2. + 50., pc: p.pc, n: p.n,
-                            qx: q2(p.hx), qy: q2(p.hy), m4: (p.mass * 4.).round().min(65535.) as u16,
+                            qx: q1(p.hx), qy: q1(p.hy), m4: (p.mass * 4.).round().min(65535.) as u16,
                             flags: p.boost as u8 | if p.human != 0 { 2 } else { 0 }, skin: p.skin as u8, tier: p.tier as u8 });
     }
 }
@@ -524,7 +524,7 @@ impl FoodIndex {
     #[inline] fn sec_x(x: f32, wr: f32) -> i32 { (((x + wr) / SEC) as i32).clamp(0, NSEC - 1) }
     #[inline] fn sector(w: u64, wr: f32) -> u16 {
         if (w >> 32) as u8 == 0 { return NONE; } // value 0: empty slot
-        let (x, y) = (w as u16 as i16 as f32 * 0.25, (w >> 16) as u16 as i16 as f32 * 0.25);
+        let (x, y) = (w as u16 as i16 as f32 * 0.5, (w >> 16) as u16 as i16 as f32 * 0.5);
         (Self::sec_x(y, wr) * NSEC + Self::sec_x(x, wr)) as u16
     }
     /// Client `id` now covers `new` instead of `old`: update the sector subscriber lists.
@@ -687,7 +687,7 @@ fn machine_info() -> String {
 #[tokio::main]
 async fn main() {
     let port: u16 = std::env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8080);
-    let bots: i32 = std::env::var("BOTS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    let bots: i32 = std::env::var("BOTS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
     let web_root = std::env::var("WEB_ROOT").unwrap_or_else(|_| "../..".into());
     let stats = Arc::new(Stats::default());
     let (etx, erx) = smpsc::channel();

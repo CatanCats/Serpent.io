@@ -37,7 +37,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const bin = Uint8Array.from(atob(WASM_BASE64), (c) => c.charCodeAt(0));
   const { instance } = await WebAssembly.instantiate(bin, { env: { now: () => performance.now() } });
   const W = instance.exports;
-  const BOTS = 60;
+  const BOTS = 100;
   W.init((Math.random() * 4294967295) >>> 0, BOTS);
   const WR = W.worldRadius();
 
@@ -110,7 +110,8 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     });
   }
   const toWebGL = () => { location.href = location.pathname + "?renderer=webgl"; };
-  let R = null;
+  let R = null, gpuDown = false, gpuRestarts = 0;
+  const touchDevice = matchMedia("(hover: none)").matches || navigator.maxTouchPoints > 0;
   if (want !== "webgl") {
     try { R = await createGPU(canvas, E); }
     catch (e) {
@@ -120,11 +121,32 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       R = null;
       if (canvas.getContext("webgpu")) canvas.replaceWith(canvas.cloneNode()); // a failed WebGPU attempt holds the canvas
     }
-    if (R) {
-      R.device.lost.then((info) => { if (info.reason !== "destroyed") gpuProblem("WebGPU stopped", `The graphics device was lost: ${info.message || "no reason given"}`).then(toWebGL); });
-      let shown = false; // a WebGPU error while playing: show the first one (the rest are usually the same)
-      R.device.addEventListener("uncapturederror", (ev) => { if (!shown) { shown = true; gpuProblem("WebGPU error", ev.error.message).then(toWebGL); } });
+    if (R) watchGPU(R);
+  }
+  // Phones and tablets drop the graphics device when you leave the page (another app, the
+  // home screen, a locked screen). There WebGPU is simply made again when you come back,
+  // with every snake's trail and name label sent anew; elsewhere a lost device is shown.
+  function watchGPU(r) {
+    r.device.lost.then((info) => {
+      if (info.reason === "destroyed" || R !== r) return;
+      if (touchDevice || document.hidden) restartGPU();
+      else gpuProblem("WebGPU stopped", `The graphics device was lost: ${info.message || "no reason given"}`).then(toWebGL);
+    });
+    let shown = false; // a WebGPU error while playing: show the first one (the rest are usually the same)
+    r.device.addEventListener("uncapturederror", (ev) => { if (!shown && R === r && !gpuDown) { shown = true; gpuProblem("WebGPU error", ev.error.message).then(toWebGL); } });
+  }
+  async function restartGPU() {
+    if (gpuDown) return;
+    gpuDown = true; // the main loop skips drawing meanwhile
+    if (document.hidden) await new Promise((ok) => { const f = () => { if (!document.hidden) { document.removeEventListener("visibilitychange", f); ok(); } }; document.addEventListener("visibilitychange", f); });
+    for (let i = 0; i < 4; i++) {
+      try {
+        const r = await createGPU(canvas, E);
+        R = r; watchGPU(r); resize(); slotKey.fill(""); gpuDown = false; gpuRestarts++;
+        return;
+      } catch (e) { console.warn("WebGPU restart failed:", e); await new Promise((ok) => setTimeout(ok, 400 * (i + 1))); }
     }
+    gpuProblem("WebGPU stopped", "The graphics device was lost and could not be started again.").then(toWebGL);
   }
   if (!R) R = createGL($("gl"), E);
   if (!R) { document.body.innerHTML = '<p style="padding:40px;font:18px system-ui;color:#fff">This game needs WebGPU or WebGL 2.</p>'; return; }
@@ -181,7 +203,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   pickSkin(skinSel);
   const nameEl = $("name"); nameEl.value = store.get("serpent.name") ?? "";
   let best = +(store.get("serpent.best") ?? 0);
-  const names = []; for (let i = 0; i < 64; i++) names.push(BOT_NAMES[(i * 7 + 3) % BOT_NAMES.length] + (i >= BOT_NAMES.length ? " II" : ""));
+  const names = []; for (let i = 0; i < NS; i++) names.push(BOT_NAMES[(i * 7 + 3) % BOT_NAMES.length] + ["", " II", " III", " IV"][Math.min(3, Math.floor(i / BOT_NAMES.length))]);
   const playerName = () => nameEl.value.trim() || "You";
 
   let state = "menu"; // menu | play | dead
@@ -259,7 +281,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const TIERS = ["ROOKIE", "CASUAL", "HUNTER", "ELITE", "LEGEND"];
   const TIER_COL = ["#6ee7b7", "#7dd3fc", "#fcd34d", "#fda4af", "#fbbf24"];
   const lbEl = $("lb");
-  // leaderboard size: − / + in its title, or drag the corner grip; remembered (phones start smaller).
+  // leaderboard text size: − / + in its title; remembered (phones start smaller).
   // On phones and touch screens the level shows as one coloured letter until the board is made full size.
   const boardEl = $("board"), smallScreen = matchMedia("(max-width: 640px), (hover: none)");
   let lbScale = parseFloat(store.get("serpent.lbscale"));
@@ -272,18 +294,36 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   };
   setLbScale(lbScale);
   smallScreen.addEventListener("change", () => setLbScale(lbScale));
-  for (const bt of document.querySelectorAll(".lbsz button")) {
+  for (const bt of document.querySelectorAll(".lbsz button[data-d]")) {
     bt.addEventListener("pointerdown", (e) => e.stopPropagation());
     bt.onclick = (e) => { setLbScale(lbScale + 0.1 * +bt.dataset.d, true); e.currentTarget.blur(); };
   }
-  const grip = $("lbGrip"); // bottom-left corner: the board is pinned top-right, so dragging down/left grows it
-  grip.addEventListener("pointerdown", (e) => {
-    e.preventDefault(); e.stopPropagation(); grip.setPointerCapture(e.pointerId);
-    const r = boardEl.getBoundingClientRect(), x0 = r.right, y0 = r.top, d0 = Math.hypot(x0 - e.clientX, e.clientY - y0), s0 = lbScale;
-    const move = (m) => setLbScale(s0 * Math.hypot(x0 - m.clientX, m.clientY - y0) / Math.max(20, d0));
-    const up = () => { grip.removeEventListener("pointermove", move); grip.removeEventListener("pointerup", up); grip.removeEventListener("pointercancel", up); setLbScale(lbScale, true); };
-    grip.addEventListener("pointermove", move); grip.addEventListener("pointerup", up); grip.addEventListener("pointercancel", up);
+  // Resize in any direction: the left edge sets the width, the bottom edge the height (rows
+  // past it are cut off), the bottom-left corner both. The board is pinned top-right, so
+  // dragging left/down grows it. × folds it to its title bar (▾ opens it). All remembered.
+  const lbOl = $("lb"), lbX = $("lbX");
+  let lbW = parseFloat(store.get("serpent.lbw")) || 0, lbH = parseFloat(store.get("serpent.lbh")) || 0; // 0: fit the content
+  const applyLbSize = () => {
+    boardEl.style.width = lbW ? lbW + "px" : ""; lbOl.style.maxHeight = lbH ? lbH + "px" : "";
+    boardEl.classList.toggle("sized", !!(lbW || lbH));
+  };
+  const setLbClosed = (c) => { boardEl.classList.toggle("closed", c); document.body.classList.toggle("lbOpen", !c); lbX.textContent = c ? "▾" : "×"; lbX.title = c ? "Show the leaderboard" : "Hide the leaderboard"; };
+  applyLbSize(); setLbClosed(store.get("serpent.lbclosed") === "1");
+  lbX.addEventListener("pointerdown", (e) => e.stopPropagation());
+  lbX.onclick = (e) => { const c = !boardEl.classList.contains("closed"); setLbClosed(c); store.set("serpent.lbclosed", c ? "1" : "0"); e.currentTarget.blur(); };
+  for (const h of boardEl.querySelectorAll("[data-rs]")) h.addEventListener("pointerdown", (e) => {
+    e.preventDefault(); e.stopPropagation(); h.setPointerCapture(e.pointerId);
+    const dir = h.dataset.rs, x0 = e.clientX, y0 = e.clientY, w0 = boardEl.offsetWidth, h0 = lbOl.offsetHeight;
+    const move = (m) => { // screen pixels → the board's own (it may be scaled)
+      if (dir.includes("w")) lbW = Math.round(Math.max(150, Math.min(640, w0 + (x0 - m.clientX) / lbScale)));
+      if (dir.includes("s")) lbH = Math.round(Math.max(20, Math.min(lbOl.scrollHeight, h0 + (m.clientY - y0) / lbScale)));
+      applyLbSize();
+    };
+    const up = () => { h.removeEventListener("pointermove", move); h.removeEventListener("pointerup", up); h.removeEventListener("pointercancel", up); store.set("serpent.lbw", lbW); store.set("serpent.lbh", lbH); };
+    h.addEventListener("pointermove", move); h.addEventListener("pointerup", up); h.addEventListener("pointercancel", up);
   });
+  // a double click on any edge goes back to fitting the content
+  for (const h of boardEl.querySelectorAll("[data-rs]")) h.addEventListener("dblclick", () => { lbW = lbH = 0; applyLbSize(); store.set("serpent.lbw", 0); store.set("serpent.lbh", 0); });
   const esc = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
   let lastMass = 10, lastLb = "";
   function updateHud() {
@@ -364,7 +404,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     const t2 = performance.now();
 
     const timing = !perfEl.classList.contains("off");
-    R.draw(frameNo++, playing, timing);
+    if (!gpuDown) { try { R.draw(frameNo++, playing, timing); } catch (e) { if (R.device && touchDevice) restartGPU(); else throw e; } }
     const t3 = performance.now();
 
     if ((hudT += dt) > 0.25) { hudT = 0; updateHud(); } // DOM: 4x per second
@@ -394,6 +434,6 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     }
   }, 2500);
   W.snapshot(); updateHud();
-  window.__serpent = { W, snap, names, renderer: () => R.name, device: R.device }; // debugging / automated tests
+  window.__serpent = { W, snap, names, renderer: () => R.name, get device() { return R.device; } }; // debugging / automated tests
   requestAnimationFrame((t) => { last = t; frame(t); });
 })();
