@@ -205,6 +205,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
      how many steps ago; the prediction at that same moment is compared with the server's
      head, and the difference is corrected gently (the server stays in charge). */
   const PREDICT = new URLSearchParams(location.search).get("predict") !== "0"; // ?predict=0: off (for comparison)
+  const LAGTEST = new URLSearchParams(location.search).get("lagtest") === "1"; // ?lagtest=1: fake stalls (testing)
   const pred = { on: false, x: 0, y: 0, a: 0, hist: [] }; // hist: {t, x, y}, newest last
   const wrapA = (a) => { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; };
   function predStart(x, y, a) { pred.on = true; pred.x = x; pred.y = y; pred.a = a; pred.dx = Math.cos(a); pred.dy = Math.sin(a); pred.acc = 0; pred.m = mass[me]; pred.hist.length = 0; }
@@ -262,20 +263,25 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   let estTick = -1, lastSnapAt = 0, bytesIn = 0;
   /* Adaptive smoothing delay (a jitter buffer, as in most action games). Other snakes are
      drawn between snapshots, a little in the past; the delay only has to cover one snapshot
-     interval (2 steps), how late snapshots arrive, and a step of margin. On a steady connection
-     that is ~3.1 steps instead of a fixed 4 (others drawn ~22 ms fresher, measured), on a
-     jittery one it grows so nothing stalls.
-     Arrivals are timed against the fastest one in the last 3 s (the network's best case). */
+     interval, how late snapshots *usually* arrive, and a step of margin.
+     Measured Brisbane -> Kansas City (TCP over the Pacific): 95% of snapshots arrive within
+     ~9 ms of the fastest, but a lost packet stalls everything for 100-300 ms a few times a
+     minute. Sizing the delay for those stalls (the old 98% of the last 1.5 s, shrinking at
+     half a step a second) kept it at ~120 ms all the time, and the stalls still froze snakes.
+     Now: 95% of the last 10 s, at most 6 steps, back down within a couple of seconds; a stall
+     is bridged by carrying snakes on along their course (see interp) instead of waiting.
+     Arrivals are timed when the browser received them (msgAt), against the fastest. */
+  const ARR_N = 600, INTERP_MAX = 6, EXTRA_MAX = 10; // window (10 s of snapshots), steps
   const arrOff = [], gaps = []; let arrLo = 0, interpGoal = INTERP, interpT = INTERP, interpSent = INTERP, rtS = -1, lastRt = 0, snapInt = 2, lastSnapTick = -1;
   function noteArrival(t) {
-    arrOff.push(performance.now() - t * (1000 / 60)); if (arrOff.length > 90) arrOff.shift();
+    arrOff.push((msgAt || performance.now()) - t * (1000 / 60)); if (arrOff.length > ARR_N) arrOff.shift();
     if (lastSnapTick >= 0 && t > lastSnapTick && t - lastSnapTick < 8) { gaps.push(t - lastSnapTick); if (gaps.length > 30) gaps.shift(); }
     lastSnapTick = t;
     if (gaps.length >= 5) snapInt = [...gaps].sort((a, b) => a - b)[gaps.length >> 1]; // steps between snapshots (1 or 2)
     if (arrOff.length < 10) return;
-    arrLo = Math.min(...arrOff);
+    let lo = Infinity; for (const o of arrOff) if (o < lo) lo = o; arrLo = lo;
     const late = arrOff.map((o) => (o - arrLo) * 0.06).sort((a, b) => a - b); // steps late, each
-    interpGoal = Math.min(10, Math.max(snapInt + 1, snapInt + late[Math.floor(late.length * 0.98)] + 1)); // +1: margin (less ran past the data now and then)
+    interpGoal = Math.min(INTERP_MAX, Math.max(snapInt + 1, snapInt + late[Math.floor(late.length * 0.95)] + 1)); // +1: margin
   }
 
   function clearWorld() {
@@ -367,7 +373,15 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     try { ws = new WebSocket(serverURL); } catch { setStatus("Can't reach the server", "bad"); return; }
     ws.binaryType = "arraybuffer";
     ws.onopen = () => { connected = true; retry = 0; $("play").disabled = false; sendView(); startPings(); if (state !== "menu") join(); };
-    ws.onmessage = (e) => { bytesIn += e.data.byteLength; msgAt = e.timeStamp || performance.now(); onMessage(new DataView(e.data)); };
+    const take = (data, at) => { bytesIn += data.byteLength; msgAt = at; onMessage(new DataView(data)); };
+    let held = null; // ?lagtest=1: every 4 s, hold everything for 200 ms (what a lost packet does to TCP)
+    ws.onmessage = (e) => {
+      if (LAGTEST && (held || performance.now() % 4000 < 200)) {
+        if (!held) { held = []; setTimeout(() => { const q = held; held = null; for (const d of q) take(d, performance.now()); }, 200); }
+        held.push(e.data); return;
+      }
+      take(e.data, e.timeStamp || performance.now());
+    };
     ws.onclose = () => {
       connected = false; clearInterval(pingTimer); $("play").disabled = true; clearWorld(); me = -1;
       if (state === "play") { state = "dead"; showOver("Lost connection to the server"); }
@@ -707,18 +721,47 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
 
   /* ---------------- per-frame: interpolate, cull, fill the GPU block ---------------- */
   const hx = new Float32Array(NS), hy = new Float32Array(NS), ha = new Float32Array(NS), shown = new Uint8Array(NS);
-  function interp(rt) {
+  // Stall bridging: when the drawn moment runs past the newest snapshot (a lost packet held
+  // the connection up), a snake carries on at its last speed and heading for up to EXTRA_MAX
+  // steps instead of freezing. When the real positions arrive, the difference from where it
+  // was drawn is blended away over ~0.1 s instead of jumping. (rx, ry: the unblended position.)
+  const rx = new Float32Array(NS), ry = new Float32Array(NS), vx = new Float32Array(NS), vy = new Float32Array(NS);
+  const offX = new Float32Array(NS), offY = new Float32Array(NS), wasEx = new Uint8Array(NS), seenR = new Uint8Array(NS);
+  let interpRt = -1;
+  function interp(rt, dt) {
+    let dSteps = interpRt < 0 ? 0 : rt - interpRt; interpRt = rt;
+    if (dSteps < 0 || dSteps > 30) { dSteps = 0; seenR.fill(0); wasEx.fill(0); } // the drawn clock was reset: start over
+    const decay = Math.exp(-dt * 25);
     for (let s = 0; s < NS; s++) {
       const h = hist[s];
       shown[s] = alive[s] && h.length ? 1 : 0;
-      if (!shown[s]) continue;
-      let a = h[0], b = h[0];
-      if (rt >= h[h.length - 1].t) a = b = h[h.length - 1];
-      else for (let i = 0; i < h.length - 1; i++) if (h[i + 1].t > rt) { a = h[i]; b = h[i + 1]; break; }
-      const f = b.t > a.t ? Math.min(1, Math.max(0, (rt - a.t) / (b.t - a.t))) : 1;
-      hx[s] = a.x + (b.x - a.x) * f; hy[s] = a.y + (b.y - a.y) * f;
-      let da = b.a - a.a; if (da > Math.PI) da -= 2 * Math.PI; if (da < -Math.PI) da += 2 * Math.PI;
-      ha[s] = a.a + da * f;
+      if (!shown[s]) { seenR[s] = 0; offX[s] = offY[s] = 0; wasEx[s] = 0; continue; }
+      const L = h[h.length - 1];
+      let x, y, ex = 0;
+      if (rt >= L.t) {
+        x = L.x; y = L.y; ha[s] = L.a;
+        const P = h.length > 1 ? h[0] : null; // the oldest kept: snakes far from players move every few steps, so the last two can be equal
+        if (P && L.t > P.t) {
+          const ux = (L.x - P.x) / (L.t - P.t), uy = (L.y - P.y) / (L.t - P.t);
+          if (ux * ux + uy * uy < 100) { ex = Math.min(rt - L.t, EXTRA_MAX); x += ux * ex; y += uy * ex; } // not across a respawn jump
+        }
+      } else {
+        let a = h[0], b = h[0];
+        for (let i = 0; i < h.length - 1; i++) if (h[i + 1].t > rt) { a = h[i]; b = h[i + 1]; break; }
+        const f = b.t > a.t ? Math.min(1, Math.max(0, (rt - a.t) / (b.t - a.t))) : 1;
+        x = a.x + (b.x - a.x) * f; y = a.y + (b.y - a.y) * f;
+        let da = b.a - a.a; if (da > Math.PI) da -= 2 * Math.PI; if (da < -Math.PI) da += 2 * Math.PI;
+        ha[s] = a.a + da * f;
+      }
+      if (seenR[s] && wasEx[s]) {
+        // where it would be had nothing new arrived, against where it really is: blend the gap
+        const gx = rx[s] + vx[s] * dSteps - x, gy = ry[s] + vy[s] * dSteps - y;
+        if (gx * gx + gy * gy < 60 * 60) { offX[s] += gx; offY[s] += gy; }
+      }
+      offX[s] *= decay; offY[s] *= decay;
+      if (seenR[s] && dSteps > 0) { vx[s] = (x - rx[s]) / dSteps; vy[s] = (y - ry[s]) / dSteps; }
+      rx[s] = x; ry[s] = y; seenR[s] = 1; wasEx[s] = ex > 0 ? 1 : 0;
+      hx[s] = x + offX[s]; hy[s] = y + offY[s];
     }
   }
   const TXY = (s, j) => { const i = (s * RING + ((pcOf[s] - 1 - j) >>> 0 & RMASK)) * 2; return [trail[i] * 0.5, trail[i + 1] * 0.5]; };
@@ -786,7 +829,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (estTick >= 0) estTick += dt * 60;
     let rt = estTick - INTERP;
     if (arrOff.length >= 10) { // the adaptive delay (see noteArrival); the drawn clock warps by at most 10%, never jumps
-      interpT += Math.max(-dt * 0.5, Math.min(dt * 6, interpGoal - interpT)); // shrink slowly, grow fast
+      interpT += Math.max(-dt * 2, Math.min(dt * 6, interpGoal - interpT)); // shrink in a couple of seconds, grow fast
       const target = (now - arrLo) * 0.06 - interpT;
       if (rtS < 0 || Math.abs(target - rtS) > 20) rtS = target;
       else rtS += dt * 60 * (1 + Math.max(-0.1, Math.min(0.1, (target - rtS) * 0.3)));
@@ -802,7 +845,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       }
       predStep(now, dt);
     }
-    lastRt = rt; interp(rt);
+    lastRt = rt; interp(rt, dt);
     if (pred.on) { const [px, py] = predShown(); hx[me] = px; hy[me] = py; ha[me] = pred.a; shown[me] = 1; layTrail(me, pred.x, pred.y); }
     // camera, exactly like offline
     let tx = camX, ty = camY, tH = camH;
