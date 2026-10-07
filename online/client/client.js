@@ -444,7 +444,10 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       }
       case 4: { const s = d.getUint8(1), len = d.getUint8(2); pnames[s] = new TextDecoder().decode(new Uint8Array(d.buffer, d.byteOffset + 3, len)); human[s] = len ? 1 : human[s]; slotKey[s] = ""; break; }
       case 5: // newer servers add the crash's step and head (Q1): the picture is drawn as at that moment
-        deathPose = d.byteLength >= 16 && me >= 0 ? { s: me, t: d.getUint32(8, true), x: d.getInt16(12, true) * 0.5, y: d.getInt16(14, true) * 0.5 } : null;
+        // the picture: what this screen showed when your head touched (taken on the spot), else
+        // the server's crash step (newer servers add its step and head, Q1)
+        deathPose = localShot && performance.now() - localShot.t < 1500 ? null :
+          d.byteLength >= 16 && me >= 0 ? { s: me, t: d.getUint32(8, true), x: d.getInt16(12, true) * 0.5, y: d.getInt16(14, true) * 0.5 } : null;
         onDeath(d.getUint8(1), d.getUint16(2, true), d.getFloat32(4, true)); break;
       case 6: {
         miniList.length = 0;
@@ -497,7 +500,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const run = { t0: 0, peak: 0, rankBest: 0, rankNow: 0, total: 0 }; let lastRun = null, grabPending = false;
   function start() {
     if (!connected) return;
-    Object.assign(run, { t0: performance.now(), peak: 0, rankBest: 0, rankNow: 0, total: 0 });
+    Object.assign(run, { t0: performance.now(), peak: 0, rankBest: 0, rankNow: 0, total: 0 }); localShot = null; touching = false;
     store.set("serpent.name", nameEl.value.trim());
     join();
     state = "play"; document.body.classList.add("playing");
@@ -514,7 +517,25 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   /* The moment of death for the information sheet: every snake as at the server's crash step
      (no smoothing), each body cut back to that head (its newer points were laid after: your
      own ones by the prediction, ahead of the server). Undone after the one frame drawn so. */
-  let deathPose = null;
+  let deathPose = null, localShot = null, touching = false, touchShot = false;
+  // Your head as drawn on this screen against the bodies as drawn (and the edge), with the
+  // server's front-of-head rule. When a contact starts, that frame is copied for the sheet.
+  function localHit() {
+    const s = me, R = radius(mass[s]), x = hx[s], y = hy[s];
+    if (x * x + y * y > (WR - R * 0.5) ** 2) return true;
+    const dx = Math.cos(ha[s]), dy = Math.sin(ha[s]);
+    for (let o = 0; o < NS; o++) {
+      if (o === s || !shown[o]) continue;
+      const r = radius(mass[o]), n = segN[o], ex = hx[o] - x, ey = hy[o] - y, reach = n * r * 0.42 + R + r + 40;
+      if (ex * ex + ey * ey > reach * reach) continue;
+      const a = Math.max(R * 0.5, R - r * 0.5), fx = x + dx * a, fy = y + dy * a, t2 = (r * 0.8) ** 2, base = o * RING, pc = pcOf[o];
+      for (let j = 0; j < n; j++) {
+        const i = (base + ((pc - 1 - j) >>> 0 & RMASK)) * 2, qx = trail[i] * 0.5 - fx, qy = trail[i + 1] * 0.5 - fy;
+        if (qx * qx + qy * qy < t2) return true;
+      }
+    }
+    return false;
+  }
   function poseAt(p) {
     const undo = [];
     for (let s = 0; s < NS; s++) {
@@ -542,9 +563,10 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (isBest) { best = len; store.set("serpent.best.online", best); }
     $("oLen").textContent = len; $("oKills").textContent = k; $("oBest").textContent = best; $("oBest").classList.toggle("new", isBest);
     showOver(killer !== 255 ? `Crashed into <b>${esc(nameOf(killer))}</b>` : "You hit the edge of the world");
+    if (localShot && performance.now() - localShot.t < 1500) deathShot.img = localShot.img; // already taken: no new copy
     lastRun = { name: playerName(), mode: "Online", length: len, peak: Math.max(run.peak, len), best, kills: k, rankNow: run.rankNow, rankBest: run.rankBest,
       total: run.total, killer: killer !== 255 ? nameOf(killer) : "The edge of the world", seconds: (performance.now() - run.t0) / 1000, colour: SKINS[skinSel][0] };
-    grabPending = true; // the next frame drawn is copied for the sheet
+    grabPending = !(localShot && performance.now() - localShot.t < 1500); // else the next frame drawn is copied
   }
   $("play").onclick = start; $("again").onclick = start;
   $("toStart").onclick = toMenu;
@@ -895,6 +917,11 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     camX += (tx - camX) * kp; camY += (ty - camY) * kp; camH += (tH - camH) * kz;
     const hh = camH, hw = camH * vw / vh, px = hh * 2 / vh;
     const poseUndo = grabPending && deathPose ? poseAt(deathPose) : null; // the moment of death (one frame)
+    if (playing && me >= 0 && shown[me]) { // a contact starting on this screen: copy this frame for the sheet
+      const hit = localHit();
+      if (hit && !touching && (!localShot || now - localShot.t > 300)) touchShot = true;
+      touching = hit;
+    }
     renderPrep(camX, camY, hw, hh, px);
     miniPrep(camX, camY, hw, hh);
     frameOut[0] = foodHigh; frameOut[3] = ntup;
@@ -904,6 +931,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     const t1 = performance.now();
     if (!gpuDown) { try { R.draw(frameNo++, playing, !perfEl.classList.contains("off")); } catch (e) { if (R.device && touchDevice) restartGPU(); else throw e; } }
     if (grabPending && !gpuDown) { grabPending = false; grabDeathShot(cv); } // copied right after drawing, while the canvas holds it
+    if (touchShot) { touchShot = false; if (!gpuDown) { const img = copyCanvas(cv); if (img) localShot = { img, t: performance.now() }; } }
     if (poseUndo) { for (const [s, pc] of poseUndo) pcOf[s] = pc; deathPose = null; }
     ntup = 0;
     const t2 = performance.now();

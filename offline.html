@@ -1077,22 +1077,25 @@ fn over(a: hv4, b: hv4) -> hv4 { return a + b * (hf(1.) - a.a); }
 }
 /* ============================================================================
    Death information sheet (both pages; inlined by build.sh).
-   On the frame where a death is noticed the page draws the moment of death once more
-   (offline: the sim's deathPose(); online: everyone as at the server's crash step, from the
-   DEATH message) and copies that frame right after drawing it, while the canvas still holds
-   it (WebGPU and WebGL keep a frame until the end of the task that drew it), scaled to at
-   most 960 px wide. Nothing is copied while you play. "Download information sheet" then
+   The picture is the moment of death as it looked on this screen, copied on the spot right
+   after that frame was drawn, while the canvas still holds it (WebGPU and WebGL keep a frame
+   until the end of the task that drew it), scaled to at most 960 px wide. Offline: the frame
+   where the death happens, drawn once more with the snake in (the sim's deathPose()). Online:
+   the frame where your head, as drawn, first touches a body or the edge (the page checks that
+   itself); if it never saw one, the server's crash step from the DEATH message. Nothing else
+   is copied while you play. "Download information sheet" then
    draws a PNG card with the run's numbers and that picture on a 2D canvas: nothing is sent
    anywhere.
    ========================================================================== */
 const deathShot = { img: null };
-function grabDeathShot(cv) {
+function copyCanvas(cv) {
   try {
     const w = Math.min(960, cv.width), h = Math.max(1, Math.round(cv.height * w / cv.width));
     const c = document.createElement("canvas"); c.width = w; c.height = h;
-    c.getContext("2d").drawImage(cv, 0, 0, w, h); deathShot.img = c;
-  } catch (e) { deathShot.img = null; }
+    c.getContext("2d").drawImage(cv, 0, 0, w, h); return c;
+  } catch (e) { return null; }
 }
+function grabDeathShot(cv) { deathShot.img = copyCanvas(cv); }
 // d: { name, mode, length, peak, best, kills, rankNow, rankBest, total, killer, seconds, colour }
 function downloadDeathSheet(d) {
   const W = 1000, pad = 40, pic = deathShot.img;
