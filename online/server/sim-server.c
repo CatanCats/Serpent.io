@@ -1040,11 +1040,11 @@ void sim_spawn_human(i32 s, i32 skin) {
 /* Where a player's head was, and the step, when it crashed: for the page's picture of the moment of death. */
 void sim_death_pose(i32 s, float *out) { if (s >= 0 && s < MAXS) { out[0] = poseX[s]; out[1] = poseY[s]; out[2] = (float)poseT[s]; } }
 void sim_set_lag(i32 s, float steps) { if (s >= 0 && s < MAXS) lagSteps[s] = steps < 0.f ? 0.f : steps > 24.f ? 24.f : steps; }
-void sim_set_jitter(i32 s, i32 steps) { if (s >= 0 && s < MAXS) graceSteps[s] = (float)(steps < 1 ? 1 : steps > 10 ? 10 : steps); }
+void sim_set_jitter(i32 s, i32 steps) { if (s >= 0 && s < MAXS) graceSteps[s] = (float)(steps < 1 ? 1 : steps > 26 ? 26 : steps); }
 void sim_set_input(i32 s, float aim, i32 boost, i32 late) {
   if (s < 0 || s >= MAXS || !human[s] || !S[s].alive) return;
   S[s].tang = wrapa(aim); S[s].wantBoost = boost != 0;
-  late = late < 0 ? 0 : late > 12 ? 12 : late;
+  late = late < 0 ? 0 : late > 24 ? 24 : late; /* a time-aligned page's inputs are a one-way delay late */
   inLog[s][inN[s] & 63u] = (InRec){tick + 1u, S[s].pc, late, S[s].tang, (u32)S[s].wantBoost}; inN[s]++;
   inArrived[s] = 1; if (late > inLate[s]) inLate[s] = late;
 }

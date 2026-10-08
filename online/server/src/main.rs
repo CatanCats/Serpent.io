@@ -89,13 +89,19 @@ impl Sim {
 /* ---------------- protocol (little-endian; mirrored in online/client/client.js) ----------------
  client -> server:  1 JOIN  u8 skin, u16 aspect*1000, u8 len, name   (also respawns)
                     2 INPUT u16 aim (-pi..pi), u8 boost, u8 seq (counts up; echoed back for the client's prediction),
-                          u16 when it was made (the page's clock, ms): how late each input arrives, see on_input
+                          u16 when it was made (the page's clock, ms): how late each input arrives, see on_input,
+                          u16 the server step it was made at (low 16 bits; optional): a time-aligned page
+                          (see DELAY) draws its snake at the server's present, so the input takes effect at
+                          that step (replayed, as splix.io does with turns): at most the player's one-way
+                          delay + 4 steps back, and never more than 24
                     3 VIEW  u16 aspect*1000
                     4 LEAVE (back to the menu)
                     5 PING  u8 id   (answered at once with PONG, by the connection, not the game loop)
                     6 DELAY u16 round trip in ms (the page's measurement; used to compensate collisions),
                           u8 the page's smoothing delay in tenths of a step (optional; 4 steps if absent),
-                          u8 how far ahead the page draws other snakes, tenths of a step (optional; 0 if absent)
+                          u8 how far ahead the page draws other snakes, tenths of a step (optional; 0 if absent),
+                          u8 1 = time-aligned (optional): the page draws every snake, its own too, at the
+                          server's present and stamps its inputs with that step: no delay allowance at all
                     7 CHAT  u16 len, text (UTF-8, at most 160 characters / 480 bytes; one message per 1.2 s),
                           then u8 len, name: used only before joining (the start page chats too)
  server -> client:  1 WELCOME u8 maxSnakes, u16 ring, f32 worldRadius, u8 bots, u8 players
@@ -161,6 +167,7 @@ struct Client {
     rtt_ms: u16,           // its measured network round trip
     interp10: u8,          // its page's smoothing delay, tenths of a step (0: not sent)
     ahead10: u8,           // how far ahead its page draws other snakes, tenths of a step
+    aligned: bool,         // its page draws everything at the server's present (DELAY's 6th byte)
     chat_at: Option<Instant>, // its last chat message (rate limit)
     clk: i64, clk_lo: u16, clk_ok: bool, // the page's clock, unwrapped from its 16-bit stamps
     offs: std::collections::VecDeque<i64>, lates: std::collections::VecDeque<u8>, jitter: i32, late_max: i32, // (late_max: for the log)
@@ -213,7 +220,7 @@ impl Game {
             Ev::Open { id, tx } => {
                 let players = self.clients.values().filter(|c| c.slot >= 0).count().min(255) as u8;
                 let mut c = Client { tx, slot: -1, alive: false, aspect: 1.78, last: (0., 0., 900.), sent_pc: vec![0; self.sim.maxs], sent_from: vec![0; self.sim.maxs], sent_head: vec![(0, 0, 0); self.sim.maxs],
-                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, rtt_ms: 0, interp10: 0, ahead10: 0, chat_at: None, clk: 0, clk_lo: 0, clk_ok: false, offs: Default::default(), lates: Default::default(), jitter: -1, late_max: 0, in_seq: 0, in_tick: 0, reset: false, cap: 1024, msgs: 0 };
+                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, rtt_ms: 0, interp10: 0, ahead10: 0, aligned: false, chat_at: None, clk: 0, clk_lo: 0, clk_ok: false, offs: Default::default(), lates: Default::default(), jitter: -1, late_max: 0, in_seq: 0, in_tick: 0, reset: false, cap: 1024, msgs: 0 };
                 let mut o = Out(Vec::new());
                 o.u8(1); o.u8(self.sim.maxs as u8); o.u16(self.sim.ring as u16); o.f32(self.sim.wr); o.u8(self.sim.bots as u8); o.u8(players);
                 Self::send(&mut c, o.0);
@@ -250,7 +257,7 @@ impl Game {
                     let s = c.slot as usize;
                     self.names[s] = clean_name(&d[5..5 + len]);
                     c.aspect = aspect;
-                    unsafe { sim_set_aspect(c.slot, aspect); sim_spawn_human(c.slot, d[1] as i32); sim_set_lag(c.slot, lag_steps(c.rtt_ms, c.interp10, c.ahead10)); if c.jitter >= 0 { sim_set_jitter(c.slot, c.jitter); } }
+                    unsafe { sim_set_aspect(c.slot, aspect); sim_spawn_human(c.slot, d[1] as i32); sim_set_lag(c.slot, if c.aligned { 0. } else { lag_steps(c.rtt_ms, c.interp10, c.ahead10) }); if c.jitter >= 0 { sim_set_jitter(c.slot, c.jitter); } }
                     c.alive = true; c.sent_pc.iter_mut().for_each(|v| *v = 0);
                     let m = self.name_msg(s);
                     self.clients.insert(id, c);
@@ -259,7 +266,8 @@ impl Game {
                 }
                 2 if d.len() >= 4 && c.slot >= 0 => {
                     let aim = u16::from_le_bytes([d[1], d[2]]) as f32 / 65535. * std::f32::consts::TAU - std::f32::consts::PI;
-                    let late = if d.len() >= 7 { self.input_late(&mut c, u16::from_le_bytes([d[5], d[6]]), at) } else { 0 };
+                    let late = if d.len() >= 9 && c.aligned { Self::input_meant(&mut c, u16::from_le_bytes([d[7], d[8]])) }
+                               else if d.len() >= 7 { self.input_late(&mut c, u16::from_le_bytes([d[5], d[6]]), at) } else { 0 };
                     unsafe { sim_set_input(c.slot, aim, d[3] as i32, late) };
                     if d.len() >= 5 { c.in_seq = d[4]; c.in_tick = unsafe { sim_tick() }; } // applied by the next step
                 }
@@ -293,7 +301,8 @@ impl Game {
                     c.rtt_ms = u16::from_le_bytes([d[1], d[2]]).min(1000);
                     if d.len() >= 4 { c.interp10 = d[3].min(120); }
                     c.ahead10 = if d.len() >= 5 { d[4].min(240) } else { 0 };
-                    if c.slot >= 0 { unsafe { sim_set_lag(c.slot, lag_steps(c.rtt_ms, c.interp10, c.ahead10)) }; }
+                    c.aligned = d.len() >= 6 && d[5] == 1;
+                    if c.slot >= 0 { unsafe { sim_set_lag(c.slot, if c.aligned { 0. } else { lag_steps(c.rtt_ms, c.interp10, c.ahead10) }) }; }
                 }
                 _ => {}
             }
@@ -306,6 +315,24 @@ impl Game {
     /// connection come out at 0, so there is nothing to make up for; a lag spike shows up here.
     /// Also keeps the player's usual lateness (90th percentile) up to date: how long the server
     /// waits, after a hit, for an input still on its way.
+    /// A time-aligned page (as splix.io): the input was made with the page showing server step
+    /// `meant` (low 16 bits), so it takes effect there: this many steps back from the step it
+    /// would apply at now. At most the player's one-way delay + 4 steps (its own measured round
+    /// trip), never more than 24: nobody can steer further into the past. The usual lateness
+    /// (90th percentile + 1) is also how long a crash waits for inputs still on their way.
+    fn input_meant(c: &mut Client, meant: u16) -> i32 {
+        let now = unsafe { sim_tick() }.wrapping_add(1);
+        let back = (now as u16).wrapping_sub(meant) as i16 as i32;
+        let allowed = ((c.rtt_ms as f32 * 0.03).ceil() as i32 + 4).min(24);
+        let late = back.clamp(0, allowed);
+        c.late_max = c.late_max.max(late);
+        c.lates.push_back(late as u8); if c.lates.len() > 180 { c.lates.pop_front(); }
+        let mut v: Vec<u8> = c.lates.iter().copied().collect(); v.sort_unstable();
+        let jitter = (v[(v.len() * 9) / 10] as i32 + 1).min(25);
+        if jitter != c.jitter && c.slot >= 0 { c.jitter = jitter; unsafe { sim_set_jitter(c.slot, jitter) }; }
+        late
+    }
+
     fn input_late(&self, c: &mut Client, made: u16, at: Instant) -> i32 {
         c.clk = if c.clk_ok { c.clk + made.wrapping_sub(c.clk_lo) as i16 as i64 } else { made as i64 };
         c.clk_lo = made; c.clk_ok = true;
