@@ -67,7 +67,7 @@ jobs:
           sudo cp "$D/serpent-server" "$D/serpent-server.prev"
           sudo install -m 755 target/release/serpent-server "$D/serpent-server"
           sudo install -m 644 /tmp/serpent-pages/index.html /tmp/serpent-pages/offline.html "$D/"
-          sudo sed -i 's/BOTS=[0-9]*/BOTS=100/' /etc/systemd/system/serpent.service && sudo systemctl daemon-reload   # the bigger world has more snakes
+          sudo sed -i 's/BOTS=[0-9]*/BOTS=60/' /etc/systemd/system/serpent.service && sudo systemctl daemon-reload   # the online world (8000 radius) has 60 bots
           sudo systemctl restart serpent
           for i in 1 2 3 4 5 6 7 8 9 10; do sleep 1; if curl -fsS http://127.0.0.1:8010/status; then echo; break; fi; done
           if ! curl -fsS http://127.0.0.1:8010/status | grep -q "\"version\":\"$VER\""; then

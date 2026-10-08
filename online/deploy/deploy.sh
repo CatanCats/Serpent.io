@@ -37,7 +37,7 @@ install -d -o root -g root /srv/apps/serpent
 [ -f /srv/apps/serpent/serpent-server ] && cp /srv/apps/serpent/serpent-server /srv/apps/serpent/serpent-server.prev # for rollback
 install -m 755 /tmp/serpent-server /srv/apps/serpent/serpent-server
 install -m 644 /tmp/index.html /tmp/offline.html /srv/apps/serpent/
-sed "s/^Environment=PORT=.*/Environment=PORT=$PORT BIND=127.0.0.1 BOTS=100 WEB_ROOT=\/srv\/apps\/serpent/" /tmp/serpent.service > /etc/systemd/system/serpent.service
+sed "s/^Environment=PORT=.*/Environment=PORT=$PORT BIND=127.0.0.1 BOTS=60 WEB_ROOT=\/srv\/apps\/serpent/" /tmp/serpent.service > /etc/systemd/system/serpent.service
 systemctl daemon-reload && systemctl enable --quiet serpent && systemctl restart serpent
 sleep 1; curl -fsS "http://127.0.0.1:$PORT/status"; echo
 BAK="/etc/caddy/Caddyfile.bak.$(date +%s)"; cp /etc/caddy/Caddyfile "$BAK"

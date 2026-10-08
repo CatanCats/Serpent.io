@@ -22,12 +22,12 @@ typedef unsigned char u8;
 #define RMASK (RING - 1)
 #define MAXSEG (RING - 1)
 #define MAXF 32768       /* food pellets (around every player) */
-#define WR 16000.f        /* world radius */
+#define WR 8000.f         /* world radius (online: the smaller world again, as before the 16000 one; offline keeps 16000) */
 #define CELL 100.f       /* spatial hash cell size (>= max query radius) */
-#define GN 320           /* grid cells per side: 2*WR/CELL */
+#define GN 160           /* grid cells per side: 2*WR/CELL */
 #define GC (GN * GN)
 #define MC 32.f          /* owner-map cell */
-#define MN 1024          /* owner-map cells per side: covers the whole world (2*WR/MC) */
+#define MN 512           /* owner-map cells per side: covers the whole world (2*WR/MC) */
 #define NODES (MAXS * RING) /* body grid: one fixed node per trail slot */
 #define REBUILD 32       /* steps between food tidy-ups */
 
