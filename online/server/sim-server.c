@@ -72,7 +72,7 @@ typedef struct {
   float ang, tang, mass, r, spacing, dropT, dropMass, aiT, tx, ty, respawnT, huntT, hx, hy;
   float dcx, dcy; /* heading as a unit vector (no trig per step) */
   i32 n, alive, boost, wantBoost, skin, kills, target, tier, near, orbit;
-  i32 mid;   /* once big (MID_MASS), drawn to the middle: decided at spawn, a 50% chance */
+  i32 mid;   /* once big (MID_MASS), drawn to the middle: decided at spawn, a 70% chance */
   float rushT;
   u32 pc; /* trail points pushed so far (monotonic across lives) */
   u32 tail; /* oldest trail point linked into the body grid: [tail, pc) are linked */
@@ -372,7 +372,7 @@ static void randomRing(float r0, float r1, float *x, float *y) {
   *x = cosf_(a) * d; *y = sinf_(a) * d;
 }
 /* The middle (the centre zone on the minimap, 35% of the world radius) belongs to big
-   snakes: from MID_MASS (length 5000 on screen: length = mass x 10), half of them (a coin
+   snakes: from MID_MASS (length 5000 on screen: length = mass x 10), 7 in 10 of them (a
    toss at spawn, k->mid) are drawn to it. The rest, and all smaller snakes, wander with no
    pull toward or away from it, so they can still pass through. Nothing spawns in it. */
 #define MID_MASS 500.f
@@ -437,7 +437,7 @@ static void spawnSnake(i32 s, float mass, i32 skin) {
   x = bx; y = by;
   k->ang = k->tang = ba; k->dcx = cosf_(k->ang); k->dcy = sinf_(k->ang);
   k->mass = mass; k->r = radiusFor(mass); k->spacing = k->r * 0.42f; k->n = segsFor(mass);
-  k->skin = skin; k->kills = 0; k->boost = k->wantBoost = 0; k->mid = frand() < 0.5f;
+  k->skin = skin; k->kills = 0; k->boost = k->wantBoost = 0; k->mid = frand() < 0.7f;
   k->dropT = k->dropMass = 0; k->aiT = 0; k->huntT = 0; k->target = -1; k->near = 1; k->rushT = 0; k->orbit = 1;
   k->tx = x; k->ty = y; k->hx = x; k->hy = y;
   /* lay a full ring of trail behind the head; pc keeps counting so nodes from a
