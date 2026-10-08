@@ -401,9 +401,9 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     rttMs = Math.min(...rtts); // the fastest recent round trip: the true delay plus as little extra as possible (never too high)
     if (rtts.length >= 3 && Math.abs(rttMs - rttSent) > 8) sendDelay();
   }
-  function sendDelay() { // round trip, and the smoothing delay in tenths of a step: together, how late we see others
-    const b = new Uint8Array(4); b[0] = 6; new DataView(b.buffer).setUint16(1, Math.min(1000, Math.round(rttMs)), true); b[3] = Math.round(interpT * 10);
-    sendRaw(b); rttSent = rttMs; interpSent = interpT;
+  function sendDelay() { // round trip, the smoothing delay, and how far ahead others are drawn (tenths of a step): together, how late we see others
+    const b = new Uint8Array(5); b[0] = 6; new DataView(b.buffer).setUint16(1, Math.min(1000, Math.round(rttMs)), true); b[3] = Math.round(interpT * 10); b[4] = Math.round(aheadNow * 10);
+    sendRaw(b); rttSent = rttMs; interpSent = interpT; aheadSent = aheadNow;
   }
   function startPings() {
     rtts.length = 0; rttSent = -1; clearInterval(pingTimer);
@@ -788,17 +788,73 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const rx = new Float32Array(NS), ry = new Float32Array(NS), vx = new Float32Array(NS), vy = new Float32Array(NS);
   const offX = new Float32Array(NS), offY = new Float32Array(NS), wasEx = new Uint8Array(NS), seenR = new Uint8Array(NS);
   let interpRt = -1;
+  /* Dead reckoning (as splix.io does): while you play, your own snake is predicted, so it is
+     drawn a round trip ahead of the snapshots, and other snakes were drawn a round trip plus
+     the smoothing delay in the past: ~270 ms apart from Brisbane, several body widths. Now
+     other snakes are carried forward to your snake's moment from their speed and turning
+     (measured on live play, 284 ms ahead: median error 11 units instead of 55), their bodies
+     drawn along the predicted path, and the server told to stop allowing for that delay in
+     your collisions (DELAY's 5th byte). ?ahead=0 turns it off. */
+  const AHEAD_ON = new URLSearchParams(location.search).get("ahead") !== "0", AHEAD_MAX = 24;
+  let aheadNow = 0, aheadSent = 0;
+  const vext = []; // [snake, real pcOf] for the drawn-only body points, undone after drawing
+  const pathX = new Float32Array(AHEAD_MAX + EXTRA_MAX + 4), pathY = new Float32Array(AHEAD_MAX + EXTRA_MAX + 4);
+  function headAt(h, t) { // the head at step t, between the kept snapshots
+    if (t <= h[0].t) return h[0];
+    for (let i = h.length - 1; i > 0; i--) if (h[i - 1].t <= t) { const a = h[i - 1], b = h[i], f = b.t > a.t ? (t - a.t) / (b.t - a.t) : 1; return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f }; }
+    return h[0];
+  }
+  // Carry snake s on from its newest head L for H steps at its speed, turning as it was:
+  // fills pathX/Y (0 = L) and returns the number of points; the heading ends in predA.
+  let predA = 0;
+  function reckon(s, h, L, H) {
+    const K = 8, p1 = headAt(h, L.t - K), p2 = headAt(h, L.t - 2 * K); // 8 steps: whole moves of far snakes (they move every 4)
+    let ux = (L.x - p1.x) / K, uy = (L.y - p1.y) / K;
+    const sp = Math.hypot(ux, uy);
+    pathX[0] = L.x; pathY[0] = L.y; predA = L.a;
+    if (sp > 10 || sp < 0.3) return 1; // a respawn jump, or standing still: don't guess
+    let a = Math.atan2(uy, ux), w = 0;
+    const vx2 = p1.x - p2.x, vy2 = p1.y - p2.y;
+    if (L.t - h[0].t >= 2 * K && vx2 * vx2 + vy2 * vy2 > 0.01) {
+      w = a - Math.atan2(vy2, vx2); if (w > Math.PI) w -= 2 * Math.PI; if (w < -Math.PI) w += 2 * Math.PI;
+      const wmax = 5.2 / (1 + (radius(mass[s]) - 12) * 0.045) / 60; // its top turning speed per step (as the simulation)
+      w = Math.max(-wmax, Math.min(wmax, w / K));
+    }
+    let x = L.x, y = L.y, n = 1;
+    for (let i = 1; H > 0; i++) { const st = Math.min(1, H); a += w * st; x += Math.cos(a) * sp * st; y += Math.sin(a) * sp * st; H -= st; pathX[n] = x; pathY[n] = y; n++; }
+    predA = a; return n;
+  }
+  // Drawn-only body points from the real body's newest point along the predicted path,
+  // written just past it in the ring (real points overwrite them as they arrive).
+  function extendBody(s, n) {
+    const sp = radius(mass[s]) * 0.42, pc = pcOf[s];
+    let j = (s * RING + ((pc - 1) & RMASK)) * 2, cx = trail[j] * 0.5, cy = trail[j + 1] * 0.5, cnt = 0;
+    for (let i = 0; i < n && cnt < 64; i++) {
+      let dx = pathX[i] - cx, dy = pathY[i] - cy, d = Math.hypot(dx, dy);
+      while (d >= sp && cnt < 64) {
+        cx += dx / d * sp; cy += dy / d * sp; dx = pathX[i] - cx; dy = pathY[i] - cy; d -= sp;
+        j = (s * RING + ((pc + cnt) & RMASK)) * 2; trail[j] = fixq(cx); trail[j + 1] = fixq(cy); cnt++;
+      }
+    }
+    if (cnt) { uploadRun(s, pc & RMASK, cnt); vext.push([s, pc]); pcOf[s] = (pc + cnt) >>> 0; }
+  }
   function interp(rt, dt) {
     let dSteps = interpRt < 0 ? 0 : rt - interpRt; interpRt = rt;
     if (dSteps < 0 || dSteps > 30) { dSteps = 0; seenR.fill(0); wasEx.fill(0); } // the drawn clock was reset: start over
     const decay = Math.exp(-dt * 25);
+    aheadNow = AHEAD_ON && pred.on ? Math.min(AHEAD_MAX, rttMs * 0.06 + interpT) : 0;
     for (let s = 0; s < NS; s++) {
       const h = hist[s];
       shown[s] = alive[s] && h.length ? 1 : 0;
       if (!shown[s]) { seenR[s] = 0; offX[s] = offY[s] = 0; wasEx[s] = 0; continue; }
       const L = h[h.length - 1];
       let x, y, ex = 0;
-      if (rt >= L.t) {
+      const ahead = s === me ? 0 : aheadNow;
+      if (ahead > 0 && rt + ahead > L.t) { // carried forward to your snake's moment (see reckon)
+        const n = reckon(s, h, L, Math.min(rt + ahead - L.t, AHEAD_MAX + EXTRA_MAX));
+        x = pathX[n - 1]; y = pathY[n - 1]; ha[s] = predA; ex = n > 1 ? 1 : 0;
+        if (n > 1) extendBody(s, n);
+      } else if (rt >= L.t) {
         x = L.x; y = L.y; ha[s] = L.a;
         const P = h.length > 1 ? h[0] : null; // the oldest kept: snakes far from players move every few steps, so the last two can be equal
         if (P && L.t > P.t) {
@@ -906,6 +962,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       predStep(now, dt);
     }
     lastRt = rt; interp(rt, dt);
+    if (rtts.length >= 3 && Math.abs(aheadNow - aheadSent) > 0.5) sendDelay();
     if (pred.on) { const [px, py] = predShown(); hx[me] = px; hy[me] = py; ha[me] = pred.a; shown[me] = 1; layTrail(me, pred.x, pred.y); }
     // camera, exactly like offline
     let tx = camX, ty = camY, tH = camH;
@@ -933,6 +990,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (grabPending && !gpuDown) { grabPending = false; grabDeathShot(cv); } // copied right after drawing, while the canvas holds it
     if (touchShot) { touchShot = false; if (!gpuDown) { const img = copyCanvas(cv); if (img) localShot = { img, t: performance.now() }; } }
     if (poseUndo) { for (const [s, pc] of poseUndo) pcOf[s] = pc; deathPose = null; }
+    for (let i = vext.length - 1; i >= 0; i--) pcOf[vext[i][0]] = vext[i][1]; vext.length = 0; // drop the drawn-only body points (see extendBody)
     ntup = 0;
     const t2 = performance.now();
     prepMs += t1 - t0; drawMs += t2 - t1; fpsN++;
@@ -950,7 +1008,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   resize();
   connect();
   window.__serpent = { renderer: () => R.name, get device() { return R.device; }, state: () => ({ connected, me, state, foodHigh, alive: [...alive].reduce((a, b) => a + b, 0) }),
-                      dbg: () => ({ me, hx, hy, ha, shown, trail, pcOf, segN, mass, RING, interpT, estTick, newest: Math.max(...hist.map((h) => h.length ? h[h.length - 1].t : 0)), rt: lastRt }), // drawn state, for tests
+                      dbg: () => ({ me, hx, hy, ha, shown, trail, pcOf, segN, mass, RING, interpT, estTick, hist, ahead: aheadNow, newest: Math.max(...hist.map((h) => h.length ? h[h.length - 1].t : 0)), rt: lastRt }), // drawn state, for tests
                       head: () => (me >= 0 ? { x: hx[me], y: hy[me], a: ha[me], pred: pred.on, err: pred.err } : null) };
   requestAnimationFrame((t) => { last = t; frame(t); });
 })();
