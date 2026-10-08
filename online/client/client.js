@@ -559,7 +559,6 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         else for (let i = 0; i < h.length - 1; i++) if (h[i + 1].t > p.t) { a = h[i]; b = h[i + 1]; break; }
         const f = b.t > a.t ? Math.min(1, Math.max(0, (p.t - a.t) / (b.t - a.t))) : 1;
         x = a.x + (b.x - a.x) * f; y = a.y + (b.y - a.y) * f;
-        if (b.t > a.t) { evx = (b.x - a.x) / (b.t - a.t); evy = (b.y - a.y) / (b.t - a.t); }
       }
       let bj = 0, bd = 1e18;
       for (let j = 0; j < Math.min(60, segN[s]); j++) { const [qx, qy] = TXY(s, j), d = (qx - x) ** 2 + (qy - y) ** 2; if (d < bd) { bd = d; bj = j; } }
@@ -806,6 +805,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const rx = new Float32Array(NS), ry = new Float32Array(NS), vx = new Float32Array(NS), vy = new Float32Array(NS);
   const offX = new Float32Array(NS), offY = new Float32Array(NS), wasEx = new Uint8Array(NS), seenR = new Uint8Array(NS);
   const tauP = new Float64Array(NS); // the moment each snake was drawn at last frame
+  const haS = new Float32Array(NS), haSok = new Uint8Array(NS); // the drawn heading of a predicted snake (smoothed)
   let interpRt = -1;
   /* Dead reckoning (as splix.io does): while you play, your own snake is predicted, so it is
      drawn a round trip ahead of the snapshots, and other snakes were drawn a round trip plus
@@ -887,20 +887,22 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   function interp(rt, dt) {
     let dSteps = interpRt < 0 ? 0 : rt - interpRt; interpRt = rt;
     if (dSteps < 0 || dSteps > 30) { dSteps = 0; seenR.fill(0); wasEx.fill(0); } // the drawn clock was reset: start over
-    const decay = Math.exp(-dt * 12); // corrections blend in over ~80 ms
+    // Corrections blend in over ~80 ms along the snake, ~250 ms sideways: bots re-aim every couple
+    // of steps, and each re-aim moves the prediction a little sideways; blended as fast as along,
+    // that showed as a constant left-right shuffle (sideways is what the eye catches)
+    const decay = Math.exp(-dt * 12), decayLat = Math.exp(-dt * 4);
     aheadNow = AHEAD_ON && pred.on ? Math.min(AHEAD_MAX, srvNow - rt) : 0; // others to the server present, like your snake
     for (let s = 0; s < NS; s++) {
       const h = hist[s];
       shown[s] = alive[s] && h.length ? 1 : 0;
-      if (!shown[s]) { seenR[s] = 0; offX[s] = offY[s] = 0; wasEx[s] = 0; fT[s] = -1; continue; }
+      if (!shown[s]) { seenR[s] = 0; offX[s] = offY[s] = 0; wasEx[s] = 0; fT[s] = -1; haSok[s] = 0; continue; }
       const L = h[h.length - 1];
-      let x, y, ex = 0, tau = rt, evx = 0, evy = 0; // tau: the moment drawn; ev: its velocity there (per step)
+      let x, y, ex = 0, tau = rt, evx = 0, evy = 0, predicted = false; // tau: the moment drawn; ev: its velocity there (per step)
       const ahead = s === me ? 0 : aheadNow;
       if (ahead > 0 && rt + ahead > L.t) { // carried forward to your snake's moment (see reckon)
         const n = reckon(s, h, L, Math.min(rt + ahead - L.t, AHEAD_MAX + EXTRA_MAX));
-        x = pathX[n - 1]; y = pathY[n - 1]; ha[s] = predA; ex = n > 1 ? 1 : 0; tau = rt + ahead;
+        x = pathX[n - 1]; y = pathY[n - 1]; ha[s] = predA; ex = n > 1 ? 1 : 0; tau = rt + ahead; predicted = n > 1;
         evx = Math.cos(predA) * predSp; evy = Math.sin(predA) * predSp;
-        if (n > 1) extendBody(s, n);
       } else if (rt >= L.t) {
         x = L.x; y = L.y; ha[s] = L.a;
         const P = h.length > 1 ? h[0] : null; // the oldest kept: snakes far from players move every few steps, so the last two can be equal
@@ -913,6 +915,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         for (let i = 0; i < h.length - 1; i++) if (h[i + 1].t > rt) { a = h[i]; b = h[i + 1]; break; }
         const f = b.t > a.t ? Math.min(1, Math.max(0, (rt - a.t) / (b.t - a.t))) : 1;
         x = a.x + (b.x - a.x) * f; y = a.y + (b.y - a.y) * f;
+        if (b.t > a.t) { evx = (b.x - a.x) / (b.t - a.t); evy = (b.y - a.y) / (b.t - a.t); }
         let da = b.a - a.a; if (da > Math.PI) da -= 2 * Math.PI; if (da < -Math.PI) da += 2 * Math.PI;
         ha[s] = a.a + da * f;
       }
@@ -923,10 +926,32 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         const dT = tau - tauP[s], gx = rx[s] + vx[s] * dT - x, gy = ry[s] + vy[s] * dT - y;
         if (gx * gx + gy * gy < 150 * 150) { offX[s] += gx; offY[s] += gy; } // (a bigger gap is a respawn or a lost track: jump)
       }
-      offX[s] *= decay; offY[s] *= decay;
+      { const c = Math.cos(ha[s]), sn = Math.sin(ha[s]), op = (offX[s] * c + offY[s] * sn) * decay, ol = (offY[s] * c - offX[s] * sn) * decayLat; offX[s] = op * c - ol * sn; offY[s] = op * sn + ol * c; }
       vx[s] = evx; vy[s] = evy; tauP[s] = tau;
       rx[s] = x; ry[s] = y; seenR[s] = 1; wasEx[s] = ex > 0 ? 1 : 0;
       hx[s] = x + offX[s]; hy[s] = y + offY[s];
+      if (predicted) {
+        // The predicted heading swings whenever the snake re-aims (bots do every couple of steps):
+        // the head was drawn snapping up to ~30 degrees in a frame. Follow it, never faster than
+        // twice the snake's top turning speed.
+        if (!haSok[s]) haS[s] = ha[s];
+        else {
+          const maxT = 2 * 5.2 / (1 + (radius(mass[s]) - 12) * 0.045) * dt;
+          haS[s] = wrapA(haS[s] + Math.max(-maxT, Math.min(maxT, wrapA(ha[s] - haS[s]) * (1 - Math.exp(-dt * 15)))));
+        }
+        haSok[s] = 1; ha[s] = haS[s];
+        // The drawn-only front of the body: a smooth curve from the real body's newest point to the
+        // drawn head, leaving it along the drawn heading. (Laid along each new prediction, it bent
+        // left and right with every re-aim.)
+        const j = (s * RING + ((pcOf[s] - 1) & RMASK)) * 2, x0 = trail[j] * 0.5, y0 = trail[j + 1] * 0.5;
+        const dx = hx[s] - x0, dy = hy[s] - y0, D = Math.hypot(dx, dy), cx = Math.cos(ha[s]), cy = Math.sin(ha[s]);
+        if (D > 1) {
+          const bx = dx * cx + dy * cy > 0 ? hx[s] - cx * D * 0.5 : (x0 + hx[s]) / 2, by = dx * cx + dy * cy > 0 ? hy[s] - cy * D * 0.5 : (y0 + hy[s]) / 2; // control point (else straight)
+          const m = Math.min(pathX.length - 1, Math.max(2, Math.ceil(D / 4)));
+          for (let i = 0; i <= m; i++) { const t = i / m, u = 1 - t; pathX[i] = u * u * x0 + 2 * u * t * bx + t * t * hx[s]; pathY[i] = u * u * y0 + 2 * u * t * by + t * t * hy[s]; }
+          extendBody(s, m + 1);
+        }
+      } else haSok[s] = 0;
     }
   }
   const TXY = (s, j) => { const i = (s * RING + ((pcOf[s] - 1 - j) >>> 0 & RMASK)) * 2; return [trail[i] * 0.5, trail[i + 1] * 0.5]; };
