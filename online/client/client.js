@@ -308,7 +308,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       boost[s] = fl & 1; human[s] = fl & 2 ? 1 : 0;
       let x, y;
       if (fl & 4) { // the whole body: when it comes into view (or after a resync)
-        skin[s] = d.getUint8(o) % 12; tier[s] = d.getUint8(o + 1);
+        skin[s] = d.getUint8(o) & 127; tier[s] = d.getUint8(o + 1); // 0..11 presets, 12..127 the colour picker's shades
         x = d.getInt16(o + 2, true) * 0.5; y = d.getInt16(o + 4, true) * 0.5; mass[s] = d.getUint16(o + 6, true) / 4;
         const cnt = d.getUint16(o + 8, true); o += 10;
         const base = (pcOf[s] + RING) >>> 0; // a fresh stretch of the ring
