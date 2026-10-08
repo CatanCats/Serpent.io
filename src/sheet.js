@@ -34,6 +34,9 @@ function downloadDeathSheet(d) {
     ["Killed by", d.killer],
     ["Mode", d.mode],
   ];
+  // online, for checking deaths against the screen: where the picture came from, and the connection
+  if (d.picture) cells.push(["Picture", d.picture]);
+  if (d.net) cells.push(["Connection", d.net]);
   const cols = 3, cw = (pw - (cols - 1) * 14) / cols, chh = 84, rows = Math.ceil(cells.length / cols);
   const H = 170 + rows * (chh + 14) + (pic ? ph + 60 : 0) + 50;
   const c = document.createElement("canvas"); c.width = W; c.height = H;

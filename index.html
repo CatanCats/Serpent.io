@@ -1167,6 +1167,9 @@ function downloadDeathSheet(d) {
     ["Killed by", d.killer],
     ["Mode", d.mode],
   ];
+  // online, for checking deaths against the screen: where the picture came from, and the connection
+  if (d.picture) cells.push(["Picture", d.picture]);
+  if (d.net) cells.push(["Connection", d.net]);
   const cols = 3, cw = (pw - (cols - 1) * 14) / cols, chh = 84, rows = Math.ceil(cells.length / cols);
   const H = 170 + rows * (chh + 14) + (pic ? ph + 60 : 0) + 50;
   const c = document.createElement("canvas"); c.width = W; c.height = H;
@@ -1543,7 +1546,11 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         else layTrail(s, x, y);
       }
       segN[s] = segsFor(mass[s]); alive[s] = 1; seen[s] = 1;
-      const h = hist[s]; h.push({ t: tick, x, y, a: angOf[s] }); if (h.length > 24) h.shift(); // 24: back to a crash before a grace wait
+      // Snakes far from every player move only every 4th step, 4 steps at once: a snapshot where
+      // the head didn't move is no new point, or it was drawn stop, stop, stop, jump. Between
+      // the points where it moved it now glides (and carries on at that speed after the last).
+      const h = hist[s], lh = h[h.length - 1];
+      if (s === me || !lh || lh.x !== x || lh.y !== y) { h.push({ t: tick, x, y, a: angOf[s] }); if (h.length > 24) h.shift(); } // 24: back to a crash before a grace wait
     }
     for (let s = 0; s < NS; s++) if (!seen[s] && alive[s]) { alive[s] = 0; hist[s].length = 0; }
     const m = d.getUint16(o, true); o += 2;
@@ -1755,6 +1762,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         else for (let i = 0; i < h.length - 1; i++) if (h[i + 1].t > p.t) { a = h[i]; b = h[i + 1]; break; }
         const f = b.t > a.t ? Math.min(1, Math.max(0, (p.t - a.t) / (b.t - a.t))) : 1;
         x = a.x + (b.x - a.x) * f; y = a.y + (b.y - a.y) * f;
+        if (b.t > a.t) { evx = (b.x - a.x) / (b.t - a.t); evy = (b.y - a.y) / (b.t - a.t); }
       }
       let bj = 0, bd = 1e18;
       for (let j = 0; j < Math.min(60, segN[s]); j++) { const [qx, qy] = TXY(s, j), d = (qx - x) ** 2 + (qy - y) ** 2; if (d < bd) { bd = d; bj = j; } }
@@ -1773,7 +1781,10 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     showOver(killer !== 255 ? `Crashed into <b>${esc(nameOf(killer))}</b>` : "You hit the edge of the world");
     if (localShot && performance.now() - localShot.t < 1500) deathShot.img = localShot.img; // already taken: no new copy
     lastRun = { name: playerName(), mode: "Online", length: len, peak: Math.max(run.peak, len), best, kills: k, rankNow: run.rankNow, rankBest: run.rankBest,
-      total: run.total, killer: killer !== 255 ? nameOf(killer) : "The edge of the world", seconds: (performance.now() - run.t0) / 1000, colour: SKINS[skinSel][0] };
+      total: run.total, killer: killer !== 255 ? nameOf(killer) : "The edge of the world", seconds: (performance.now() - run.t0) / 1000, colour: SKINS[skinSel][0],
+      // for checking deaths: "Server's crash" means this screen never showed your head touching anything
+      picture: localShot && performance.now() - localShot.t < 1500 ? "Your screen" : deathPose ? "Server's crash" : "After the crash",
+      net: `Ping ${Math.round(rttMs)} ms · ahead ${Math.round(aheadNow * 1000 / 60)} ms` };
     grabPending = !(localShot && performance.now() - localShot.t < 1500); // else the next frame drawn is copied
   }
   $("play").onclick = start; $("again").onclick = start;
@@ -1995,6 +2006,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   // was drawn is blended away over ~0.1 s instead of jumping. (rx, ry: the unblended position.)
   const rx = new Float32Array(NS), ry = new Float32Array(NS), vx = new Float32Array(NS), vy = new Float32Array(NS);
   const offX = new Float32Array(NS), offY = new Float32Array(NS), wasEx = new Uint8Array(NS), seenR = new Uint8Array(NS);
+  const tauP = new Float64Array(NS); // the moment each snake was drawn at last frame
   let interpRt = -1;
   /* Dead reckoning (as splix.io does): while you play, your own snake is predicted, so it is
      drawn a round trip ahead of the snapshots, and other snakes were drawn a round trip plus
@@ -2014,21 +2026,34 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   }
   // Carry snake s on from its newest head L for H steps at its speed, turning as it was:
   // fills pathX/Y (0 = L) and returns the number of points; the heading ends in predA.
-  let predA = 0;
+  let predA = 0, predSp = 0;
+  // Velocity and turning, averaged over the last few snapshots (fU, fW; fT: the snapshot step
+  // they were last updated at). Heads come rounded to half a unit, so one snapshot's turning
+  // is noisy, and 15+ steps ahead that noise swung the drawn head from frame to frame.
+  const fUx = new Float32Array(NS), fUy = new Float32Array(NS), fW = new Float32Array(NS), fT = new Float64Array(NS).fill(-1);
   function reckon(s, h, L, H) {
     const K = 8, p1 = headAt(h, L.t - K), p2 = headAt(h, L.t - 2 * K); // 8 steps: whole moves of far snakes (they move every 4)
     let ux = (L.x - p1.x) / K, uy = (L.y - p1.y) / K;
-    const sp = Math.hypot(ux, uy);
     pathX[0] = L.x; pathY[0] = L.y; predA = L.a;
-    if (sp > 10 || sp < 0.3) return 1; // a respawn jump, or standing still: don't guess
-    let a = Math.atan2(uy, ux), w = 0;
+    if (ux * ux + uy * uy > 100 || ux * ux + uy * uy < 0.09) { fT[s] = -1; return 1; } // a respawn jump, or standing still: don't guess
+    let w = 0;
     const vx2 = p1.x - p2.x, vy2 = p1.y - p2.y;
     if (L.t - h[0].t >= 2 * K && vx2 * vx2 + vy2 * vy2 > 0.01) {
-      w = a - Math.atan2(vy2, vx2); if (w > Math.PI) w -= 2 * Math.PI; if (w < -Math.PI) w += 2 * Math.PI;
+      w = Math.atan2(uy, ux) - Math.atan2(vy2, vx2); if (w > Math.PI) w -= 2 * Math.PI; if (w < -Math.PI) w += 2 * Math.PI;
       const wmax = 5.2 / (1 + (radius(mass[s]) - 12) * 0.045) / 60; // its top turning speed per step (as the simulation)
       w = Math.max(-wmax, Math.min(wmax, w / K));
     }
-    let x = L.x, y = L.y, n = 1;
+    if (fT[s] !== L.t) { // a new snapshot: fold it into the averages (40% new)
+      if (fT[s] < 0 || L.t - fT[s] > 30) { fUx[s] = ux; fUy[s] = uy; fW[s] = w; }
+      else { fUx[s] += (ux - fUx[s]) * 0.4; fUy[s] += (uy - fUy[s]) * 0.4; fW[s] += (w - fW[s]) * 0.4; }
+      fT[s] = L.t;
+    }
+    ux = fUx[s]; uy = fUy[s]; w = fW[s];
+    // the speed is known exactly (as moveSnake): measured, it lagged every boost start and stop,
+    // and 15+ steps ahead that threw the head ~60 units at once
+    const sp = (boost[s] ? 430 : 195) / 60;
+    predSp = sp;
+    let a = Math.atan2(uy, ux), x = L.x, y = L.y, n = 1;
     for (let i = 1; H > 0; i++) { const st = Math.min(1, H); a += w * st; x += Math.cos(a) * sp * st; y += Math.sin(a) * sp * st; H -= st; pathX[n] = x; pathY[n] = y; n++; }
     predA = a; return n;
   }
@@ -2049,25 +2074,26 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   function interp(rt, dt) {
     let dSteps = interpRt < 0 ? 0 : rt - interpRt; interpRt = rt;
     if (dSteps < 0 || dSteps > 30) { dSteps = 0; seenR.fill(0); wasEx.fill(0); } // the drawn clock was reset: start over
-    const decay = Math.exp(-dt * 25);
+    const decay = Math.exp(-dt * 12); // corrections blend in over ~80 ms
     aheadNow = AHEAD_ON && pred.on ? Math.min(AHEAD_MAX, rttMs * 0.06 + interpT) : 0;
     for (let s = 0; s < NS; s++) {
       const h = hist[s];
       shown[s] = alive[s] && h.length ? 1 : 0;
-      if (!shown[s]) { seenR[s] = 0; offX[s] = offY[s] = 0; wasEx[s] = 0; continue; }
+      if (!shown[s]) { seenR[s] = 0; offX[s] = offY[s] = 0; wasEx[s] = 0; fT[s] = -1; continue; }
       const L = h[h.length - 1];
-      let x, y, ex = 0;
+      let x, y, ex = 0, tau = rt, evx = 0, evy = 0; // tau: the moment drawn; ev: its velocity there (per step)
       const ahead = s === me ? 0 : aheadNow;
       if (ahead > 0 && rt + ahead > L.t) { // carried forward to your snake's moment (see reckon)
         const n = reckon(s, h, L, Math.min(rt + ahead - L.t, AHEAD_MAX + EXTRA_MAX));
-        x = pathX[n - 1]; y = pathY[n - 1]; ha[s] = predA; ex = n > 1 ? 1 : 0;
+        x = pathX[n - 1]; y = pathY[n - 1]; ha[s] = predA; ex = n > 1 ? 1 : 0; tau = rt + ahead;
+        evx = Math.cos(predA) * predSp; evy = Math.sin(predA) * predSp;
         if (n > 1) extendBody(s, n);
       } else if (rt >= L.t) {
         x = L.x; y = L.y; ha[s] = L.a;
         const P = h.length > 1 ? h[0] : null; // the oldest kept: snakes far from players move every few steps, so the last two can be equal
         if (P && L.t > P.t) {
           const ux = (L.x - P.x) / (L.t - P.t), uy = (L.y - P.y) / (L.t - P.t);
-          if (ux * ux + uy * uy < 100) { ex = Math.min(rt - L.t, EXTRA_MAX); x += ux * ex; y += uy * ex; } // not across a respawn jump
+          if (ux * ux + uy * uy < 100) { ex = Math.min(rt - L.t, EXTRA_MAX); x += ux * ex; y += uy * ex; evx = ux; evy = uy; } // not across a respawn jump
         }
       } else {
         let a = h[0], b = h[0];
@@ -2078,12 +2104,14 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         ha[s] = a.a + da * f;
       }
       if (seenR[s] && wasEx[s]) {
-        // where it would be had nothing new arrived, against where it really is: blend the gap
-        const gx = rx[s] + vx[s] * dSteps - x, gy = ry[s] + vy[s] * dSteps - y;
-        if (gx * gx + gy * gy < 60 * 60) { offX[s] += gx; offY[s] += gy; }
+        // where it would be had nothing new arrived (last frame's position carried on at last frame's
+        // velocity: the model's, never one measured across a correction, which undid half of it a
+        // frame later and wobbled), against where it is now: blend the gap
+        const dT = tau - tauP[s], gx = rx[s] + vx[s] * dT - x, gy = ry[s] + vy[s] * dT - y;
+        if (gx * gx + gy * gy < 150 * 150) { offX[s] += gx; offY[s] += gy; } // (a bigger gap is a respawn or a lost track: jump)
       }
       offX[s] *= decay; offY[s] *= decay;
-      if (seenR[s] && dSteps > 0) { vx[s] = (x - rx[s]) / dSteps; vy[s] = (y - ry[s]) / dSteps; }
+      vx[s] = evx; vy[s] = evy; tauP[s] = tau;
       rx[s] = x; ry[s] = y; seenR[s] = 1; wasEx[s] = ex > 0 ? 1 : 0;
       hx[s] = x + offX[s]; hy[s] = y + offY[s];
     }
@@ -2216,7 +2244,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   resize();
   connect();
   window.__serpent = { renderer: () => R.name, get device() { return R.device; }, state: () => ({ connected, me, state, foodHigh, alive: [...alive].reduce((a, b) => a + b, 0) }),
-                      dbg: () => ({ me, hx, hy, ha, shown, trail, pcOf, segN, mass, RING, interpT, estTick, hist, ahead: aheadNow, touching, newest: Math.max(...hist.map((h) => h.length ? h[h.length - 1].t : 0)), rt: lastRt }), // drawn state, for tests
+                      dbg: () => ({ me, hx, hy, ha, shown, trail, pcOf, segN, mass, RING, interpT, estTick, hist, ahead: aheadNow, touching, board, mini: miniList, WR, newest: Math.max(...hist.map((h) => h.length ? h[h.length - 1].t : 0)), rt: lastRt }), // drawn state, for tests
                       head: () => (me >= 0 ? { x: hx[me], y: hy[me], a: ha[me], pred: pred.on, err: pred.err } : null) };
   requestAnimationFrame((t) => { last = t; frame(t); });
 })();

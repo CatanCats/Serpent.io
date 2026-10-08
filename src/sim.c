@@ -91,7 +91,7 @@ typedef struct {
   float ang, tang, mass, r, spacing, dropT, dropMass, aiT, tx, ty, respawnT, huntT, hx, hy;
   float dcx, dcy; /* heading as a unit vector (no trig per step) */
   i32 n, alive, boost, wantBoost, skin, kills, target, tier, near, orbit, seen; /* seen: drawn last frame */
-  i32 mid;   /* once big (MID_MASS), drawn to the middle: decided at spawn, a 70% chance */
+  i32 mid;   /* drawn to the middle (see midBound): decided at spawn, likelier the higher its level */
   float rushT;
   u32 pc; /* trail points pushed so far (monotonic across lives) */
   u32 tail; /* oldest trail point linked into the body grid: [tail, pc) are linked */
@@ -364,12 +364,18 @@ static void randomRing(float r0, float r1, float *x, float *y) {
   *x = cosf_(a) * d; *y = sinf_(a) * d;
 }
 /* The middle (the centre zone on the minimap, 35% of the world radius) belongs to big
-   snakes: from MID_MASS (length 5000 on screen: length = mass x 10), 7 in 10 of them (a
-   toss at spawn, k->mid) are drawn to it. The rest, and all smaller snakes, wander with no
-   pull toward or away from it, so they can still pass through. Nothing spawns in it. */
+   snakes: from MID_MASS (length 5000 on screen: length = mass x 10), some of them (a
+   toss at spawn, k->mid; likelier the higher the level, MID_CHANCE) are drawn to it.
+   Elites and legends are drawn to it at any size, and those start in it: outside the
+   middle they are a rare sight, as their rarity suggests. The rest, and all smaller snakes, wander with no
+   pull toward or away from it, so they can still pass through. Nothing else spawns in it. */
 #define MID_MASS 500.f
+/* chance a bot is drawn to the middle, by level: rookie, casual, hunter, elite, legend */
+static const float MID_CHANCE[5] = {0.15f, 0.35f, 0.6f, 0.93f, 0.98f};
+/* drawn to the middle now: big enough, or an elite or legend at any size */
+static i32 midBound(const Snake *k) { return k->mid && (k->mass >= MID_MASS || k->tier >= 3); }
 static void homePoint(const Snake *k, float *x, float *y) {
-  if (k->mass >= MID_MASS && k->mid) { randomDisk(WR * 0.35f, x, y); return; }
+  if (midBound(k)) { randomDisk(WR * 0.35f, x, y); return; }
   /* Everyone else wanders: a point 1500-4000 away in a random direction, inside the world.
      (Random points anywhere in the world pulled everyone inward: a new one is picked every
      few seconds, long before it's reached, and from most places most of the world lies
@@ -416,10 +422,12 @@ static float spawnFit(i32 self, float x, float y, float cx, float cy, float len)
 
 static void spawnSnake(i32 s, float mass, i32 skin) {
   i32 bot = s != 0;
+  i32 mid = bot && frand() < MID_CHANCE[S[s].tier]; /* (spawnBot sets the level first) */
   Snake *k = &S[s];
   float x = 0, y = 0, bx = 0, by = 0, bc = -1.f, ba = 0.f, len = (float)segsFor(mass) * radiusFor(mass) * 0.42f;
   for (i32 t = 0; t < 40; t++) { /* the first spot at least SPAWN_GAP from everyone, else the roomiest tried */
     if (!bot) randomRing(WR * 0.72f, WR * 0.86f, &x, &y); /* player: outer rim */
+    else if (mid && S[s].tier >= 3) randomRing(WR * 0.08f, WR * 0.33f, &x, &y); /* elites and legends bound for the middle start in it */
     else randomRing(WR * 0.4f, WR * 0.88f, &x, &y);     /* bots: anywhere but the middle */
     float dx = x - focX, dy = y - focY;
     if (bot && t < 30 && dx * dx + dy * dy < (focR + 300.f) * (focR + 300.f)) continue; /* never pop in on screen */
@@ -430,7 +438,7 @@ static void spawnSnake(i32 s, float mass, i32 skin) {
   x = bx; y = by;
   k->ang = k->tang = ba; k->dcx = cosf_(k->ang); k->dcy = sinf_(k->ang);
   k->mass = mass; k->r = radiusFor(mass); k->spacing = k->r * 0.42f; k->n = segsFor(mass);
-  k->skin = skin; k->kills = 0; k->boost = k->wantBoost = 0; k->mid = frand() < 0.7f;
+  k->skin = skin; k->kills = 0; k->boost = k->wantBoost = 0; k->mid = mid;
   k->dropT = k->dropMass = 0; k->aiT = 0; k->huntT = 0; k->target = -1; k->near = 1; k->rushT = 0; k->orbit = 1;
   k->tx = x; k->ty = y; k->hx = x; k->hy = y;
   /* lay a full ring of trail behind the head; pc keeps counting so nodes from a
@@ -654,7 +662,7 @@ static void botThink(i32 s, float dt) {
         k->orbit = ((o->hx - hx) * o->dcy - (o->hy - hy) * o->dcx) > 0 ? 1 : -1;
       }
     }
-    if (k->target < 0 && k->rushT <= 0 && k->mass >= MID_MASS && k->mid && hx * hx + hy * hy > WR * WR * 0.2f && frand() < 0.5f) {
+    if (k->target < 0 && k->rushT <= 0 && midBound(k) && hx * hx + hy * hy > WR * WR * (tier >= 3 ? 0.11f : 0.2f) && (tier >= 3 || frand() < 0.5f)) {
       homePoint(k, &k->tx, &k->ty); /* big snakes drift back to the middle */
       k->aiT = 1.5f;
     } else if (k->target < 0 && k->rushT <= 0) {
