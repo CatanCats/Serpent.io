@@ -35,7 +35,7 @@ compile_error!("the trail is sent as raw little-endian bytes");
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct Pub { hx: f32, hy: f32, ang: f32, mass: f32, r: f32, spacing: f32, pc: u32, n: u32, alive: u32, skin: u32, tier: u32, boost: u32, kills: u32, human: u32 }
+struct Pub { hx: f32, hy: f32, ang: f32, mass: f32, r: f32, spacing: f32, pc: u32, n: u32, alive: u32, skin: u32, tier: u32, boost: u32, kills: u32, human: u32, tang: f32 } // = sim-server.c Pub
 
 extern "C" {
     fn sim_init(seed: u32, bots: i32);
@@ -100,7 +100,7 @@ impl Sim {
                     6 DELAY u16 round trip in ms (the page's measurement; used to compensate collisions),
                           u8 the page's smoothing delay in tenths of a step (optional; 4 steps if absent),
                           u8 how far ahead the page draws other snakes, tenths of a step (optional; 0 if absent),
-                          u8 1 = time-aligned (optional): the page draws every snake, its own too, at the
+                          u8 1 = time-aligned, 2 = time-aligned and reads SNAP flag 32 (optional): the page draws every snake, its own too, at the
                           server's present and stamps its inputs with that step: no delay allowance at all
                     7 CHAT  u16 len, text (UTF-8, at most 160 characters / 480 bytes; one message per 1.2 s),
                           then u8 len, name: used only before joining (the start page chats too)
@@ -111,6 +111,9 @@ impl Sim {
                           full body:  u8 skin, u8 tier, i16 x, i16 y (head, Q1), u16 mass*4, u16 count,
                                       i16 x, i16 y (oldest point), count-1 x (i8 dx, i8 dy) (Q1 steps to the next point)
                           otherwise:  i8 dx, i8 dy (head moved, Q1), or i16 x, i16 y with flag 8; u16 mass*4 with flag 16
+                          then, flag 32 (time-aligned pages only): u8 heading, u8 steering target (angles in 256ths
+                          of a turn, from -pi), sent when either changed: the page carries the snake on with the
+                          simulation's own turning rule, as splix.io sends directions rather than guessing them
                           Only the head and size are sent: the client lays the body points itself, the way the
                           simulation does (a point every `spacing` along the head's path).
                         food:  u16 slot | 0x8000 = added/changed: i16 x, i16 y (Q1, half units), u8 value, u8 skin (+128: just
@@ -161,6 +164,7 @@ struct Client {
     sent_pc: Vec<u32>,     // per snake: trail points this client has up to (0 = it doesn't have the snake)
     sent_from: Vec<u32>,   // per snake: the oldest trail point it has
     sent_head: Vec<(i16, i16, u16)>, // per snake: the head (Q1) and mass*4 it was last sent
+    sent_aim: Vec<(u8, u8)>, // per snake: the heading and steering target it was last sent (flag 32)
     rect: Rect,            // food sectors this client is subscribed to (its view)
     pend: Vec<u8>,         // food changes in those sectors since the last snapshot
     npend: u32,
@@ -168,6 +172,7 @@ struct Client {
     interp10: u8,          // its page's smoothing delay, tenths of a step (0: not sent)
     ahead10: u8,           // how far ahead its page draws other snakes, tenths of a step
     aligned: bool,         // its page draws everything at the server's present (DELAY's 6th byte)
+    aims: bool,            // its page reads flag 32 in snapshots (DELAY 6th byte = 2)
     chat_at: Option<Instant>, // its last chat message (rate limit)
     clk: i64, clk_lo: u16, clk_ok: bool, // the page's clock, unwrapped from its 16-bit stamps
     offs: std::collections::VecDeque<i64>, lates: std::collections::VecDeque<u8>, jitter: i32, late_max: i32, // (late_max: for the log)
@@ -219,8 +224,8 @@ impl Game {
         match ev {
             Ev::Open { id, tx } => {
                 let players = self.clients.values().filter(|c| c.slot >= 0).count().min(255) as u8;
-                let mut c = Client { tx, slot: -1, alive: false, aspect: 1.78, last: (0., 0., 900.), sent_pc: vec![0; self.sim.maxs], sent_from: vec![0; self.sim.maxs], sent_head: vec![(0, 0, 0); self.sim.maxs],
-                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, rtt_ms: 0, interp10: 0, ahead10: 0, aligned: false, chat_at: None, clk: 0, clk_lo: 0, clk_ok: false, offs: Default::default(), lates: Default::default(), jitter: -1, late_max: 0, in_seq: 0, in_tick: 0, reset: false, cap: 1024, msgs: 0 };
+                let mut c = Client { tx, slot: -1, alive: false, aspect: 1.78, last: (0., 0., 900.), sent_pc: vec![0; self.sim.maxs], sent_from: vec![0; self.sim.maxs], sent_head: vec![(0, 0, 0); self.sim.maxs], sent_aim: vec![(0, 0); self.sim.maxs],
+                                     rect: Rect::EMPTY, pend: Vec::new(), npend: 0, rtt_ms: 0, interp10: 0, ahead10: 0, aligned: false, aims: false, chat_at: None, clk: 0, clk_lo: 0, clk_ok: false, offs: Default::default(), lates: Default::default(), jitter: -1, late_max: 0, in_seq: 0, in_tick: 0, reset: false, cap: 1024, msgs: 0 };
                 let mut o = Out(Vec::new());
                 o.u8(1); o.u8(self.sim.maxs as u8); o.u16(self.sim.ring as u16); o.f32(self.sim.wr); o.u8(self.sim.bots as u8); o.u8(players);
                 Self::send(&mut c, o.0);
@@ -301,7 +306,8 @@ impl Game {
                     c.rtt_ms = u16::from_le_bytes([d[1], d[2]]).min(1000);
                     if d.len() >= 4 { c.interp10 = d[3].min(120); }
                     c.ahead10 = if d.len() >= 5 { d[4].min(240) } else { 0 };
-                    c.aligned = d.len() >= 6 && d[5] == 1;
+                    c.aligned = d.len() >= 6 && d[5] >= 1;
+                    c.aims = d.len() >= 6 && d[5] >= 2; // 2: it also reads flag 32 (heading and steering target)
                     if c.slot >= 0 { unsafe { sim_set_lag(c.slot, if c.aligned { 0. } else { lag_steps(c.rtt_ms, c.interp10, c.ahead10) }) }; }
                 }
                 _ => {}
@@ -361,7 +367,9 @@ impl Game {
 }
 
 /// Per snake, what every client's snapshot shares this update: computed once.
-struct SnakeOut { hx: f32, hy: f32, reach: f32, pc: u32, n: u32, qx: i16, qy: i16, m4: u16, flags: u8, skin: u8, tier: u8 }
+struct SnakeOut { hx: f32, hy: f32, reach: f32, pc: u32, n: u32, qx: i16, qy: i16, m4: u16, flags: u8, skin: u8, tier: u8, aim: (u8, u8) }
+/// An angle (-pi..pi) in 256ths of a turn.
+fn a8(a: f32) -> u8 { (((a + std::f32::consts::PI) / std::f32::consts::TAU * 256.).round() as i32 & 255) as u8 }
 fn shared_snakes(sim: &Sim, out: &mut Vec<SnakeOut>, live: &mut Vec<u8>) {
     out.clear(); live.clear();
     for s in 0..sim.maxs {
@@ -369,7 +377,7 @@ fn shared_snakes(sim: &Sim, out: &mut Vec<SnakeOut>, live: &mut Vec<u8>) {
         if p.alive != 0 { live.push(s as u8); } // each snapshot looks at these only
         out.push(SnakeOut { hx: p.hx, hy: p.hy, reach: p.n as f32 * p.spacing + p.r * 2. + 50., pc: p.pc, n: p.n,
                             qx: q1(p.hx), qy: q1(p.hy), m4: (p.mass * 4.).round().min(65535.) as u16,
-                            flags: p.boost as u8 | if p.human != 0 { 2 } else { 0 }, skin: p.skin as u8, tier: p.tier as u8 });
+                            flags: p.boost as u8 | if p.human != 0 { 2 } else { 0 }, skin: p.skin as u8, tier: p.tier as u8, aim: (a8(p.ang), a8(p.tang)) });
     }
 }
 
@@ -415,7 +423,7 @@ fn snapshot(sim: &Sim, food: &FoodIndex, snakes: &[SnakeOut], live: &[u8], spect
             if prev == 0 || p.pc.wrapping_sub(prev) > p.n + 2 || p.pc.wrapping_sub(c.sent_from[s]) < p.n + 2 {
                 let count = (p.n + 34).min(sim.ring as u32) as usize; // + margin: the client draws from ~70 ms back
                 c.sent_from[s] = p.pc.wrapping_sub(count as u32);
-                o.u8(s as u8); o.u8(p.flags | 4); o.u8(p.skin); o.u8(p.tier); o.i16(p.qx); o.i16(p.qy); o.u16(p.m4); o.u16(count as u16);
+                o.u8(s as u8); o.u8(p.flags | 4 | if c.aims { 32 } else { 0 }); o.u8(p.skin); o.u8(p.tier); o.i16(p.qx); o.i16(p.qy); o.u16(p.m4); o.u16(count as u16);
                 let a = (p.pc.wrapping_sub(count as u32) as usize) & (sim.ring - 1);
                 let pt = |k: usize| { let b = sim.trail_bytes(s, (a + k) & (sim.ring - 1), 1); (i16::from_le_bytes([b[0], b[1]]), i16::from_le_bytes([b[2], b[3]])) };
                 let (mut lx, mut ly) = pt(0); o.i16(lx); o.i16(ly);
@@ -425,14 +433,17 @@ fn snapshot(sim: &Sim, food: &FoodIndex, snakes: &[SnakeOut], live: &[u8], spect
                     o.u8(dx as i8 as u8); o.u8(dy as i8 as u8);
                     lx = lx.wrapping_add(dx); ly = ly.wrapping_add(dy);
                 }
+                if c.aims { o.u8(p.aim.0); o.u8(p.aim.1); c.sent_aim[s] = p.aim; }
                 c.sent_head[s] = (p.qx, p.qy, p.m4);
             } else { // only the head and size
                 let (sx, sy, sm) = c.sent_head[s];
                 let (dx, dy) = (p.qx as i32 - sx as i32, p.qy as i32 - sy as i32);
                 let small = dx.abs() <= 127 && dy.abs() <= 127;
-                o.u8(s as u8); o.u8(p.flags | if small { 0 } else { 8 } | if p.m4 != sm { 16 } else { 0 });
+                let aim = c.aims && p.aim != c.sent_aim[s];
+                o.u8(s as u8); o.u8(p.flags | if small { 0 } else { 8 } | if p.m4 != sm { 16 } else { 0 } | if aim { 32 } else { 0 });
                 if small { o.u8(dx as i8 as u8); o.u8(dy as i8 as u8); } else { o.i16(p.qx); o.i16(p.qy); }
                 if p.m4 != sm { o.u16(p.m4); }
+                if aim { o.u8(p.aim.0); o.u8(p.aim.1); c.sent_aim[s] = p.aim; }
                 c.sent_head[s] = (p.qx, p.qy, p.m4);
             }
             c.sent_pc[s] = p.pc; n += 1;

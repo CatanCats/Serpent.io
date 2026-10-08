@@ -1393,6 +1393,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const radius = (m) => Math.min(10 + Math.sqrt(m) * 0.45, 40);
   const segsFor = (m) => Math.min(14 + Math.floor(3.6 * Math.sqrt(m)), RING - 1);
   const angOf = new Float32Array(NS);
+  const aimH = new Float32Array(NS), aimT = new Float32Array(NS), aimOk = new Uint8Array(NS); // heading and steering target from the server (flag 32)
   const fixq = (v) => { v *= 2; return Math.max(-32767, Math.min(32767, Math.trunc(v + (v >= 0 ? 0.5 : -0.5)))); }; // as sim.c fix()
   function uploadRun(s, a0, cnt) { const first = Math.min(cnt, RING - a0); upload(s, a0, first); if (first < cnt) upload(s, 0, cnt - first); }
   // Lay body points toward the new head, one every `spacing`, exactly the way the
@@ -1547,12 +1548,16 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         }
         else layTrail(s, x, y);
       }
+      // flag 32: its heading and where it's steering, when either changed (sent to time-aligned pages)
+      if (fl & 32) { aimH[s] = d.getUint8(o) / 256 * 2 * Math.PI - Math.PI; aimT[s] = d.getUint8(o + 1) / 256 * 2 * Math.PI - Math.PI; aimOk[s] = 1; o += 2; }
+      else if (fl & 4) aimOk[s] = 0; // a new body without them: an older server
       segN[s] = segsFor(mass[s]); alive[s] = 1; seen[s] = 1;
       // Snakes far from every player move only every 4th step, 4 steps at once: a snapshot where
       // the head didn't move is no new point, or it was drawn stop, stop, stop, jump. Between
       // the points where it moved it now glides (and carries on at that speed after the last).
       const h = hist[s], lh = h[h.length - 1];
-      if (s === me || !lh || lh.x !== x || lh.y !== y) { h.push({ t: tick, x, y, a: angOf[s] }); if (h.length > 24) h.shift(); } // 24: back to a crash before a grace wait
+      if (s === me || !lh || lh.x !== x || lh.y !== y) { h.push({ t: tick, x, y, a: angOf[s], ha: aimOk[s] ? aimH[s] : NaN, ta: aimT[s] }); if (h.length > 24) h.shift(); } // 24: back to a crash before a grace wait
+      else if (aimOk[s]) { lh.ha = aimH[s]; lh.ta = aimT[s]; } // turned where it stands: keep the newest aim
     }
     for (let s = 0; s < NS; s++) if (!seen[s] && alive[s]) { alive[s] = 0; hist[s].length = 0; }
     const m = d.getUint16(o, true); o += 2;
@@ -1619,7 +1624,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     if (rtts.length >= 3 && Math.abs(rttMs - rttSent) > 8) sendDelay();
   }
   function sendDelay() { // round trip, the smoothing delay, and how far ahead others are drawn (tenths of a step): together, how late we see others
-    const b = new Uint8Array(6); b[0] = 6; new DataView(b.buffer).setUint16(1, Math.min(1000, Math.round(rttMs)), true); b[3] = Math.round(interpT * 10); b[4] = Math.round(aheadNow * 10); b[5] = PREDICT ? 1 : 0; // 1: time-aligned (everything drawn at the server present)
+    const b = new Uint8Array(6); b[0] = 6; new DataView(b.buffer).setUint16(1, Math.min(1000, Math.round(rttMs)), true); b[3] = Math.round(interpT * 10); b[4] = Math.round(aheadNow * 10); b[5] = PREDICT ? 2 : 0; // 1: time-aligned (everything drawn at the server present); 2: and reads flag 32
     sendRaw(b); rttSent = rttMs; interpSent = interpT; aheadSent = aheadNow;
   }
   function startPings() {
@@ -2035,6 +2040,20 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   // is noisy, and 15+ steps ahead that noise swung the drawn head from frame to frame.
   const fUx = new Float32Array(NS), fUy = new Float32Array(NS), fW = new Float32Array(NS), fT = new Float64Array(NS).fill(-1);
   function reckon(s, h, L, H) {
+    if (!Number.isNaN(L.ha) && L.ha !== undefined) {
+      // The server sent its heading and where it's steering (as splix.io sends directions):
+      // carry it on with the simulation's own rule (moveSnake: turn toward the target at its
+      // top turning speed, then move at its exact speed). Wrong only if it changes its mind.
+      const sp = (boost[s] ? 430 : 195) / 60, turn = 5.2 / (1 + (radius(mass[s]) - 12) * 0.045) / 60;
+      let a = L.ha, x = L.x, y = L.y, n = 1;
+      pathX[0] = x; pathY[0] = y;
+      for (; H > 0; n++) {
+        const st = Math.min(1, H); H -= st;
+        let da = wrapA(L.ta - a); da = Math.max(-turn * st, Math.min(turn * st, da)); a = wrapA(a + da);
+        x += Math.cos(a) * sp * st; y += Math.sin(a) * sp * st; pathX[n] = x; pathY[n] = y;
+      }
+      predA = a; predSp = sp; fT[s] = -1; return n;
+    }
     const K = 8, p1 = headAt(h, L.t - K), p2 = headAt(h, L.t - 2 * K); // 8 steps: whole moves of far snakes (they move every 4)
     let ux = (L.x - p1.x) / K, uy = (L.y - p1.y) / K;
     pathX[0] = L.x; pathY[0] = L.y; predA = L.a;

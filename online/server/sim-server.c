@@ -896,14 +896,14 @@ static void maintainFood(i32 f, i32 budget) {
 }
 
 /* ---------- state for server.js: one flat record per slot, written after every step ---------- */
-typedef struct { float hx, hy, ang, mass, r, spacing; u32 pc, n, alive, skin, tier, boost, kills, human; } Pub;
+typedef struct { float hx, hy, ang, mass, r, spacing; u32 pc, n, alive, skin, tier, boost, kills, human; float tang; } Pub; /* tang: where it is steering (pages carry snakes on with it) */
 static Pub pub[MAXS];
 static void publish(void) {
   for (i32 s = 0; s < NS; s++) {
     Snake *k = &S[s]; Pub *p = &pub[s];
     p->alive = (u32)k->alive; p->human = human[s];
     if (!k->alive) continue;
-    p->hx = k->hx; p->hy = k->hy; p->ang = k->ang; p->mass = k->mass; p->r = k->r; p->spacing = k->spacing;
+    p->hx = k->hx; p->hy = k->hy; p->ang = k->ang; p->mass = k->mass; p->r = k->r; p->spacing = k->spacing; p->tang = k->tang;
     p->pc = k->pc; p->n = (u32)k->n; p->skin = (u32)k->skin; p->tier = (u32)k->tier; p->boost = (u32)k->boost; p->kills = (u32)k->kills;
   }
 }
