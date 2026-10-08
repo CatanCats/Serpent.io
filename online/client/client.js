@@ -1008,7 +1008,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   resize();
   connect();
   window.__serpent = { renderer: () => R.name, get device() { return R.device; }, state: () => ({ connected, me, state, foodHigh, alive: [...alive].reduce((a, b) => a + b, 0) }),
-                      dbg: () => ({ me, hx, hy, ha, shown, trail, pcOf, segN, mass, RING, interpT, estTick, hist, ahead: aheadNow, newest: Math.max(...hist.map((h) => h.length ? h[h.length - 1].t : 0)), rt: lastRt }), // drawn state, for tests
+                      dbg: () => ({ me, hx, hy, ha, shown, trail, pcOf, segN, mass, RING, interpT, estTick, hist, ahead: aheadNow, touching, newest: Math.max(...hist.map((h) => h.length ? h[h.length - 1].t : 0)), rt: lastRt }), // drawn state, for tests
                       head: () => (me >= 0 ? { x: hx[me], y: hy[me], a: ha[me], pred: pred.on, err: pred.err } : null) };
   requestAnimationFrame((t) => { last = t; frame(t); });
 })();
