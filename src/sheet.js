@@ -43,7 +43,7 @@ function downloadDeathSheet(d) {
   const g = c.getContext("2d"), font = "system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
   g.fillStyle = "#070a12"; g.fillRect(0, 0, W, H);
   const grad = g.createLinearGradient(pad, 0, pad + 300, 0); grad.addColorStop(0, "#34d399"); grad.addColorStop(1, "#38bdf8");
-  g.fillStyle = grad; g.font = `800 44px ${font}`; g.textBaseline = "alphabetic"; g.fillText("serpent.io", pad, 74);
+  g.fillStyle = grad; g.font = `800 44px ${font}`; g.textBaseline = "alphabetic"; g.fillText("ouro", pad, 74);
   g.fillStyle = "#93a0bd"; g.font = `500 18px ${font}`;
   g.fillText(`Run report · ${new Date().toLocaleString()}`, pad, 104);
   g.fillStyle = d.colour || "#34d399"; g.beginPath(); g.arc(pad + 9, 137, 9, 0, Math.PI * 2); g.fill();
@@ -67,11 +67,11 @@ function downloadDeathSheet(d) {
     g.strokeStyle = "rgba(255,255,255,.12)"; g.beginPath(); g.roundRect(pad, y + 34, pw, ph, 14); g.stroke();
     y += ph + 60;
   }
-  g.fillStyle = "#5d6a86"; g.font = `500 13px ${font}`; g.fillText("Play at br8t.com/slither.io", pad, H - 22);
+  g.fillStyle = "#5d6a86"; g.font = `500 13px ${font}`; g.fillText("Play at br8t.com/ouro", pad, H - 22);
   c.toBlob((b) => {
     if (!b) return;
     const a = document.createElement("a"), stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
-    a.href = URL.createObjectURL(b); a.download = `serpent-run-${stamp}.png`;
+    a.href = URL.createObjectURL(b); a.download = `ouro-run-${stamp}.png`;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
   }, "image/png");

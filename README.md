@@ -1,8 +1,8 @@
-# serpent.io: an open-source slither.io-style snake game for the browser
+# Ouro (formerly serpent.io): an open-source slither.io-style snake game for the browser
 
-**▶ Play online now: [br8t.com/slither.io](https://br8t.com/slither.io/)**. It's live, free, and you play with other people and bots, in the browser, on desktop or mobile.
+**▶ Play online now: [br8t.com/ouro](https://br8t.com/ouro/)**. It's live, free, and you play with other people and bots, in the browser, on desktop or mobile.
 
-Serpent.io is a fast, free, open-source io game in the style of slither.io. You can also play it offline: [offline.html](https://catancats.github.io/Serpent.io/offline.html) runs entirely on your device, as a single self-contained file (download it to play without internet).
+Ouro (formerly Serpent.io) is a fast, free, open-source io game in the style of slither.io. You can also play it offline: [offline.html](https://catancats.github.io/Serpent.io/offline.html) runs entirely on your device, as a single self-contained file (download it to play without internet).
 
 - **AI bots at five levels:** Rookie, Casual, Hunter, Elite and Legend.
 - **A minimap** showing where the other snakes are.

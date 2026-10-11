@@ -3,32 +3,32 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#070a12">
-<!-- the online game lives at br8t.com/slither.io: send visitors of the GitHub Pages copy there (offline.html stays) -->
-<script>if (location.hostname.endsWith("github.io")) location.replace("https://br8t.com/slither.io/" + location.search + location.hash);</script>
-<title>Serpent.io – play now: free open-source slither.io-style snake game</title>
-<meta name="description" content="Play Serpent.io now at br8t.com/slither.io: a free, open-source slither.io-style snake game in your browser. Play online with other people and 60 AI snakes in five difficulty tiers. Super efficient: WebAssembly and WebGPU, runs smoothly even on old laptops and phones. No download, no sign-up.">
+<!-- the online game lives at br8t.com/ouro: send visitors of the GitHub Pages copy there (offline.html stays) -->
+<script>if (location.hostname.endsWith("github.io")) location.replace("https://br8t.com/ouro/" + location.search + location.hash);</script>
+<title>Ouro – play now: free open-source slither.io-style snake game</title>
+<meta name="description" content="Play Ouro now at br8t.com/ouro: a free, open-source slither.io-style snake game in your browser. Play online with other people and 60 AI snakes in five difficulty tiers. Super efficient: WebAssembly and WebGPU, runs smoothly even on old laptops and phones. No download, no sign-up.">
 <meta name="keywords" content="snake game, slither.io, slither io, slither.io clone, slither io unblocked, open source slither.io, io game, multiplayer snake, browser game, html5 game, free online game, snake io, webgpu game, webassembly game, lightweight game">
 <meta name="author" content="CatanCats">
 <meta name="robots" content="index, follow, max-image-preview:large">
-<link rel="canonical" href="https://br8t.com/slither.io/">
-<meta name="application-name" content="Serpent.io">
-<meta name="apple-mobile-web-app-title" content="Serpent.io">
+<link rel="canonical" href="https://br8t.com/ouro/">
+<meta name="application-name" content="Ouro">
+<meta name="apple-mobile-web-app-title" content="Ouro">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <!-- link previews (Discord, WhatsApp, X, Facebook...) -->
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://br8t.com/slither.io/">
-<meta property="og:title" content="Serpent.io – open-source slither.io-style snake game, play now">
+<meta property="og:url" content="https://br8t.com/ouro/">
+<meta property="og:title" content="Ouro – open-source slither.io-style snake game, play now">
 <meta property="og:description" content="Eat, grow and cut off other players and 60 AI snakes, from Rookie to Legend. Free, open source, instant in your browser, and light enough for any device.">
-<meta property="og:site_name" content="Serpent.io">
+<meta property="og:site_name" content="Ouro">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Serpent.io – open-source slither.io-style snake game, play now">
+<meta name="twitter:title" content="Ouro – open-source slither.io-style snake game, play now">
 <meta name="twitter:description" content="Eat, grow and cut off other players and 60 AI snakes, from Rookie to Legend. Free, open source, instant in your browser, and light enough for any device.">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23070a12'/%3E%3Cpath d='M14 44c0-10 12-10 18-16s4-14-6-14' stroke='%2334d399' stroke-width='9' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='26' cy='14' r='3' fill='%23070a12'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='11' fill='%23070a12'/%3E%3Cpath d='M24 8a16 16 0 1 1-13.9 8' fill='none' stroke='%2334d399' stroke-width='7' stroke-linecap='round'/%3E%3Ccircle cx='14.8' cy='10.9' r='5.8' fill='%2338bdf8'/%3E%3C/svg%3E">
 <!-- structured data: lets search engines show it as a game -->
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"VideoGame","name":"Serpent.io","alternateName":"Serpent.io slither.io-style snake game",
- "url":"https://br8t.com/slither.io/",
+{"@context":"https://schema.org","@type":"VideoGame","name":"Ouro","alternateName":["Ouro at br8t.com","Serpent.io"],
+ "url":"https://br8t.com/ouro/",
  "description":"A free, open-source slither.io-style snake game that runs in any browser. Play online with other people and 60 AI snakes in five difficulty tiers, or offline on your own device. A WebAssembly simulation and WebGPU rendering (WebGL 2 as backup) keep it fast and light on CPU, GPU and memory.",
  "genre":["Arcade","IO game","Snake"],"gamePlatform":["Web browser","PC","Mobile"],"applicationCategory":"GameApplication",
  "operatingSystem":"Any","playMode":["MultiPlayer","SinglePlayer"],"isAccessibleForFree":true,"inLanguage":"en",
@@ -97,6 +97,7 @@
   .lbE[data-rs="w"] { left: -5px; top: 34px; bottom: 16px; width: 12px; cursor: ew-resize; }
   .lbE[data-rs="s"] { bottom: -5px; left: 16px; right: 10px; height: 12px; cursor: ns-resize; }
   #board ol { overflow: hidden; }
+  #board:not(.closed) { padding-bottom: 2px; } /* the list runs to the bottom edge (the resize corner sits on top of it): no empty strip under the names */
   #board.sized li .nm { overflow: hidden; text-overflow: ellipsis; } /* made narrower by hand: long names end in … */
   #board.sized { min-width: 0; }
   /* × folds it to the title bar */
@@ -234,6 +235,21 @@
     #stats .big { font-size: 28px; }
     #perf { display: none; }
   }
+  /* Ouro look. All of it static (no animation, no blur, nothing drawn per frame), so it costs nothing while playing. */
+  .brand { display: flex; align-items: center; justify-content: center; gap: 14px; }
+  .brand svg { width: clamp(52px, 13vw, 70px); height: clamp(52px, 13vw, 70px); flex: none; filter: drop-shadow(0 6px 16px rgba(56,189,248,.28)); }
+  .brand .logo { text-align: left; }
+  .brand .at { margin-top: 7px; text-align: left; font-size: 11px; font-weight: 600; letter-spacing: .34em; text-transform: uppercase; color: var(--dim); }
+  .glass { box-shadow: 0 10px 40px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.06); }
+  .card { position: relative; background-image: linear-gradient(180deg, rgba(56,189,248,.07), rgba(56,189,248,0) 38%); }
+  .card::before { content: ""; position: absolute; left: 22%; right: 22%; top: -1px; height: 1px; background: linear-gradient(90deg, transparent, #38bdf8, #34d399, transparent); }
+  .screen { background: radial-gradient(ellipse at 50% 45%, rgba(7,10,18,.05), rgba(7,10,18,.55) 75%); }
+  #board h3 { color: #a5b1c9; }
+  #board li:nth-child(-n+3) .n { font-weight: 800; }
+  #board li:nth-child(1) .n { color: #fbbf24; }
+  #board li:nth-child(2) .n { color: #cbd5e1; }
+  #board li:nth-child(3) .n { color: #f59e0b; opacity: .8; }
+  .over h2 { background: linear-gradient(100deg, #fb7185, #f59e0b); -webkit-background-clip: text; background-clip: text; color: transparent; }
 </style>
 </head>
 <body>
@@ -252,14 +268,15 @@
 
 <div id="menu" class="screen">
   <div class="card glass">
-    <div class="logo">serpent<span>.io</span></div>
+    <div class="brand"><svg viewBox="0 0 48 48" aria-hidden="true"><defs><linearGradient id="og" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#34d399"/><stop offset=".55" stop-color="#38bdf8"/><stop offset="1" stop-color="#a78bfa"/></linearGradient></defs><path d="M24 7a17 17 0 1 1-14.7 8.5" fill="none" stroke="url(#og)" stroke-width="7" stroke-linecap="round"/><circle cx="14.2" cy="10.1" r="6.2" fill="#34d399"/><circle cx="16.3" cy="8.6" r="1.7" fill="#070a12"/></svg><div><div class="logo">ouro</div><div class="at">at br8t.com</div></div></div>
+
     <p class="tag">Online · eat, grow, cut them off.</p>
     <input id="name" maxlength="16" placeholder="Your nickname" autocomplete="off" spellcheck="false">
     <div class="skins" id="skins" role="group" aria-label="Skin"></div>
     <button class="play" id="play">PLAY ONLINE</button>
     <div class="net" id="net">Connecting…</div>
     <a class="mode" href="offline.html">Play offline instead (runs on this device) →</a>
-    <a class="mode dl" href="offline.html" download="serpent-offline.html" title="One file: open it in a browser to play without internet">⬇ Download the offline game</a>
+    <a class="mode dl" href="offline.html" download="ouro-offline.html" title="One file: open it in a browser to play without internet">⬇ Download the offline game</a>
     <div class="keys"><kbd>Mouse</kbd> steer · <kbd>Click</kbd>/<kbd>Space</kbd> boost<br><kbd>←</kbd><kbd>→</kbd> steer with keys · Touch: drag to steer, 2 fingers boost · <kbd>P</kbd> perf · <kbd>Enter</kbd> chat</div>
     <div class="rsw" id="qsw" role="group" aria-label="Quality">
       <span>Quality</span>

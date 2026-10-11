@@ -467,7 +467,7 @@ static void killSnake(i32 s, i32 killer) {
   k->alive = 0;
   unlinkBody(s);
   if (k->near) {
-    float per = k->mass * 0.85f / (float)(k->n / 2 + 1), j = k->r * 0.6f;
+    float per = k->mass * 0.55f / (float)(k->n / 2 + 1), j = k->r * 0.6f;
     for (i32 i = 0; i < k->n; i += 2)
       spawnFood(TX(s, i) + (frand() - 0.5f) * j, TY(s, i) + (frand() - 0.5f) * j, per * (0.6f + frand() * 0.8f), k->skin);
     deathX = TX(s, k->n / 3); deathY = TY(s, k->n / 3); deathTick = tick;
@@ -495,7 +495,7 @@ static void moveSnake(i32 s, float dt) {
   k->hy += k->dcy * speed * dt;
 
   if (k->boost) {
-    float lose = (6.f + k->mass * 0.006f) * dt;
+    float lose = (3.f + k->mass * 0.003f) * dt; /* half what it was */
     k->mass -= lose; k->dropMass += lose; k->dropT += dt;
     if (k->dropT > 0.1f) {
       spawnFood(TX(s, k->n - 1), TY(s, k->n - 1), k->dropMass * 0.8f, k->skin);

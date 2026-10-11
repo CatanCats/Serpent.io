@@ -1,5 +1,5 @@
 "use strict";
-/* Serpent.io ONLINE client. Based on src/app.js (offline), but the world comes
+/* Ouro (formerly Serpent.io) ONLINE client. Based on src/app.js (offline), but the world comes
    from the server (online/server): this page only draws it, with the same two
    renderers as the offline game (src/render-gpu.js, src/render-gl.js, unchanged).
 
@@ -162,7 +162,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const miniEl = $("mini");
   function resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, QUAL[quality] || 2);  // always full sharpness: never lowered automatically
-    vw = Math.round(innerWidth * dpr); vh = Math.round(innerHeight * dpr);
+    vw = Math.max(1, Math.round(innerWidth * dpr)); vh = Math.max(1, Math.round(innerHeight * dpr)); // at least 1: a page opened in a background tab has no size yet, and a 0x0 canvas made WebGPU fail to start
     if (cv.width !== vw || cv.height !== vh) { cv.width = vw; cv.height = vh; }
     R.resize(vw, vh);
     const r = miniEl.getBoundingClientRect();
@@ -214,7 +214,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const pendIn = []; // inputs the server hasn't confirmed yet: [seq, the step they take effect at]
   let srvNow = 0;    // the server's present, in steps (this frame)
   const wrapA = (a) => { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; };
-  function predStart(x, y, a, tk) { pred.on = true; pred.x = x; pred.y = y; pred.a = a; pred.dx = Math.cos(a); pred.dy = Math.sin(a); pred.tick = tk; pred.m = mass[me]; pred.hist.length = 0; pendIn.length = 0; }
+  function predStart(x, y, a, tk) { pred.on = true; pred.x = x; pred.y = y; pred.a = a; pred.dx = Math.cos(a); pred.dy = Math.sin(a); pred.tick = tk; pred.m = mass[me]; pred.hist.length = 0; pendIn.length = 0; pred.corr = false; }
   // One server step with exactly the simulation's maths (moveSnake): rotate the heading by
   // at most the turn rate, then move. Run up to the server's present each frame.
   const STEP = 1 / 60;
@@ -234,7 +234,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       // boosting needs mass over 14 and uses it up (as moveSnake): predict that too, or the
       // boost would run on here after the server has stopped it, and the snake jump back
       const boosting = lastBoostSent > 0 && pred.m > 14;
-      if (boosting) pred.m -= (6 + pred.m * 0.006) * STEP;
+      if (boosting) pred.m -= (3 + pred.m * 0.003) * STEP;
       const v = (boosting ? 430 : 195) * STEP;
       pred.x += pred.dx * v; pred.y += pred.dy * v;
       pred.hist.push({ tk: pred.tick, x: pred.x, y: pred.y }); if (pred.hist.length > 240) pred.hist.shift();
@@ -254,9 +254,18 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     const ex = sx - h[i].x, ey = sy - h[i].y;
     pred.err = Math.hypot(ex, ey);
     if (window.__predLog) window.__predLog.push({ t: performance.now(), err: pred.err, tick, behind: pred.tick - tick, boost: lastBoostSent, mass: mass[me], aimGap: wrapA(sentAim - pred.a), hist: h.length });
-    // 30% of the gap per 2 steps (whatever the snapshot rate): smooth, settles in ~0.2 s. A big
-    // gap (the server refused a replay, e.g. it would have crashed) is closed at once.
-    const k = ex * ex + ey * ey > 60 * 60 ? 1 : 1 - Math.pow(0.7, snapInt / 2), kx = ex * k, ky = ey * k;
+    // Only noted here; predApply closes it once per frame. Applied per snapshot, the burst that
+    // follows a network stall (a dozen at once) corrected a dozen times in one frame: a jump.
+    pred.cx = ex; pred.cy = ey; pred.ci = tick; pred.corr = true;
+  }
+  // 30% of the gap per 2 steps (by time, not by snapshots): smooth, settles in ~0.2 s. A big gap
+  // (the server refused a replay, e.g. it would have crashed) is closed at once.
+  function predApply(dt) {
+    if (!pred.corr) return;
+    pred.corr = false;
+    const h = pred.hist, i = h.length ? pred.ci - h[0].tk : -1;
+    if (i < 0 || i >= h.length) return;
+    const ex = pred.cx, ey = pred.cy, k = ex * ex + ey * ey > 60 * 60 ? 1 : 1 - Math.exp(-dt * 10.7), kx = ex * k, ky = ey * k;
     pred.x += kx; pred.y += ky; for (let j = i; j < h.length; j++) { h[j].x += kx; h[j].y += ky; }
   }
   // food: server slot -> local slot (local slots stay dense so the GPU draws few)
@@ -329,7 +338,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         if (fl & 8) { x = d.getInt16(o, true) * 0.5; y = d.getInt16(o + 2, true) * 0.5; o += 4; }
         else { x = (last ? last.x : 0) + d.getInt8(o) * 0.5; y = (last ? last.y : 0) + d.getInt8(o + 1) * 0.5; o += 2; }
         if (fl & 16) { mass[s] = d.getUint16(o, true) / 4; o += 2;
-          if (s === me && pred.on) pred.m = mass[s] - (lastBoostSent > 0 && mass[s] > 14 ? (6 + mass[s] * 0.006) * Math.max(0, srvNow - tick) / 60 : 0); } // (that server mass is from step `tick`)
+          if (s === me && pred.on) pred.m = mass[s] - (lastBoostSent > 0 && mass[s] > 14 ? (3 + mass[s] * 0.003) * Math.max(0, srvNow - tick) / 60 : 0); } // (that server mass is from step `tick`)
         if (last && (x !== last.x || y !== last.y)) angOf[s] = Math.atan2(y - last.y, x - last.x);
         if (s === me && pred.on) {
           if (!(fl & 1) && lastBoostSent > 0 && ((ackSeq - boostSeq) & 255) < 128 && pred.m > 14) pred.m = 14; // it has our boost press but isn't boosting: too small
@@ -742,16 +751,14 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
     bt.addEventListener("pointerdown", (e) => e.stopPropagation());
     bt.onclick = (e) => { setLbScale(lbScale + 0.1 * +bt.dataset.d, true); e.currentTarget.blur(); };
   }
-  // Resize in any direction: the left edge sets the width, the bottom edge how many rows show
-  // (whole rows only: a pixel height cut the last row in half), the bottom-left corner both. The board is pinned top-right, so
+  // Resize in any direction: the left edge sets the width, the bottom edge the height (rows
+  // past it are cut off), the bottom-left corner both. The board is pinned top-right, so
   // dragging left/down grows it. × folds it to its title bar (▾ opens it). All remembered.
   const lbOl = $("lb"), lbX = $("lbX");
-  let lbW = parseFloat(store.get("serpent.lbw")) || 0, lbRows = parseInt(store.get("serpent.lbrows")) || 0; // 0: fit the content
-  if (!lbRows && parseFloat(store.get("serpent.lbh")) > 0) lbRows = Math.max(1, Math.round(parseFloat(store.get("serpent.lbh")) / 22)); // an old pixel height
-  const lbRowH = () => (lbOl.firstElementChild ? lbOl.firstElementChild.offsetHeight : 0) || 20;
+  let lbW = parseFloat(store.get("serpent.lbw")) || 0, lbH = parseFloat(store.get("serpent.lbh")) || 0; // 0: fit the content
   const applyLbSize = () => {
-    boardEl.style.width = lbW ? lbW + "px" : ""; lbOl.style.maxHeight = lbRows ? lbRows * lbRowH() + "px" : "";
-    boardEl.classList.toggle("sized", !!(lbW || lbRows));
+    boardEl.style.width = lbW ? lbW + "px" : ""; lbOl.style.maxHeight = lbH ? lbH + "px" : "";
+    boardEl.classList.toggle("sized", !!(lbW || lbH));
   };
   const setLbClosed = (c) => { boardEl.classList.toggle("closed", c); document.body.classList.toggle("lbOpen", !c); lbX.textContent = c ? "▾" : "×"; lbX.title = c ? "Show the leaderboard" : "Hide the leaderboard"; };
   applyLbSize(); setLbClosed(store.get("serpent.lbclosed") === "1");
@@ -759,17 +766,17 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   lbX.onclick = (e) => { const c = !boardEl.classList.contains("closed"); setLbClosed(c); store.set("serpent.lbclosed", c ? "1" : "0"); e.currentTarget.blur(); };
   for (const h of boardEl.querySelectorAll("[data-rs]")) h.addEventListener("pointerdown", (e) => {
     e.preventDefault(); e.stopPropagation(); h.setPointerCapture(e.pointerId);
-    const dir = h.dataset.rs, x0 = e.clientX, y0 = e.clientY, w0 = boardEl.offsetWidth, h0 = lbOl.offsetHeight, rh = lbRowH(), all = lbOl.children.length || 10;
+    const dir = h.dataset.rs, x0 = e.clientX, y0 = e.clientY, w0 = boardEl.offsetWidth, h0 = lbOl.offsetHeight;
     const move = (m) => { // screen pixels → the board's own (it may be scaled)
       if (dir.includes("w")) lbW = Math.round(Math.max(150, Math.min(640, w0 + (x0 - m.clientX) / lbScale)));
-      if (dir.includes("s")) { const r = Math.round((h0 + (m.clientY - y0) / lbScale) / rh); lbRows = r >= all ? 0 : Math.max(1, r); } // all rows: fit
+      if (dir.includes("s")) lbH = Math.round(Math.max(20, Math.min(lbOl.scrollHeight, h0 + (m.clientY - y0) / lbScale)));
       applyLbSize();
     };
-    const up = () => { h.removeEventListener("pointermove", move); h.removeEventListener("pointerup", up); h.removeEventListener("pointercancel", up); store.set("serpent.lbw", lbW); store.set("serpent.lbrows", lbRows); store.set("serpent.lbh", 0); };
+    const up = () => { h.removeEventListener("pointermove", move); h.removeEventListener("pointerup", up); h.removeEventListener("pointercancel", up); store.set("serpent.lbw", lbW); store.set("serpent.lbh", lbH); };
     h.addEventListener("pointermove", move); h.addEventListener("pointerup", up); h.addEventListener("pointercancel", up);
   });
   // a double click on any edge goes back to fitting the content
-  for (const h of boardEl.querySelectorAll("[data-rs]")) h.addEventListener("dblclick", () => { lbW = lbRows = 0; applyLbSize(); store.set("serpent.lbw", 0); store.set("serpent.lbrows", 0); store.set("serpent.lbh", 0); });
+  for (const h of boardEl.querySelectorAll("[data-rs]")) h.addEventListener("dblclick", () => { lbW = lbH = 0; applyLbSize(); store.set("serpent.lbw", 0); store.set("serpent.lbh", 0); });
   let lastLb = "";
   function updateHud() {
     let html = "";
@@ -777,7 +784,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       const tag = s === me ? `<span class="tg you" data-l="YOU" data-s="Y"></span>` : hu ? `<span class="tg pl" data-l="PLAYER" data-s="P"></span>` : `<span class="tg t${t}" title="${TIERS[t]}" data-l="${TIERS[t]}" data-s="${TIERS[t][0]}"></span>`;
       html += `<li class="${s === me ? "me" : ""}"><span class="n">${i + 1}</span><span class="dot" style="background:${SKINS[sk & 127][0]}"></span><span class="nm">${esc(s === me ? playerName() : hu ? pnames[s] || "Player" : botName(s))}</span>${tag}<span class="sc">${Math.floor(m * 10)}</span></li>`;
     });
-    if (html !== lastLb) { lbEl.innerHTML = html; lastLb = html; if (lbRows) applyLbSize(); } // rows may have changed height
+    if (html !== lastLb) { lbEl.innerHTML = html; lastLb = html; }
     for (let s = 0; s < NS; s++) {
       if (!alive[s]) continue;
       const key = human[s] ? "p:" + (s === me ? playerName() : pnames[s]) : "t" + tier[s];
@@ -969,17 +976,25 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
       if (!any && (x < x0 - reach || x > x1 + reach || y < y0 - reach || y > y1 + reach)) continue;
       for (let i = 0; i < n && !any; i += 16) { const [tx, ty] = TXY(s, i), g = sp * 15; any = tx > x0 - g && tx < x1 + g && ty > y0 - g && ty < y1 + g; } // every 16th point, margin 15 spacings
       if (!any) continue;
-      // the interpolated head is behind the newest points: attach to the newest one it is ahead of
-      const ca = Math.cos(ha[s]), sa = Math.sin(ha[s]);
+      // the head can be behind the newest points: attach to the newest one it is past, judged along
+      // the body there (from the point before it). Judged by the head's facing, a sharp turn or
+      // U-turn counted the points just behind as ahead, skipped up to 40, and the head was drawn
+      // cut off from its body.
       let j0 = 0;
-      for (; j0 < 40; j0++) { const [tx, ty] = TXY(s, j0); if ((x - tx) * ca + (y - ty) * sa >= 0) break; }
+      for (; j0 < 40; j0++) { const [tx, ty] = TXY(s, j0), [ux, uy] = TXY(s, j0 + 1); if ((x - tx) * (tx - ux) + (y - ty) * (ty - uy) >= 0) break; }
+      if (j0 === 40) j0 = 0;
       const [tx, ty] = TXY(s, j0), dx = x - tx, dy = y - ty;
       const spx = sp / px, stride = spx < 1.2 ? 4 : spx < 2.5 ? 2 : 1, nn = n;
       const K = Math.floor((nn - 1 + stride - 1) / stride);
       if (K > maxK) maxK = K;
       const b = nvis++ * 12;
+      // The head faces its heading, but never more than 0.6 rad (35 degrees) off the body just behind
+      // it: further off, the ribbon between them twisted (a bow-tie) and part of the head went missing.
+      const [t2x, t2y] = TXY(s, j0 + 2), bx = tx - t2x, by = ty - t2y;
+      let hA = ha[s];
+      if (bx * bx + by * by > 0.01) { const bA = Math.atan2(by, bx); hA = bA + Math.max(-0.6, Math.min(0.6, wrapA(ha[s] - bA))); }
       hdrF[b] = x; hdrF[b + 1] = y; hdrF[b + 2] = 1 - Math.min(Math.hypot(dx, dy) / sp, 1); hdrF[b + 3] = r;
-      hdrF[b + 4] = sp; hdrF[b + 5] = stride; hdrF[b + 6] = ha[s]; hdrF[b + 7] = W;
+      hdrF[b + 4] = sp; hdrF[b + 5] = stride; hdrF[b + 6] = hA; hdrF[b + 7] = W;
       hdrU[b + 8] = s; hdrU[b + 9] = (pcOf[s] - 1 - j0) >>> 0 & RMASK; hdrU[b + 10] = nn;
       hdrU[b + 11] = skin[s] | ((boost[s] | (s === me ? 2 : 0) | (legend ? 4 : 0)) << 8);
     }
@@ -1034,7 +1049,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
         const l = hist[me][hist[me].length - 1];
         predStart(l.x, l.y, l.a, l.t);
       }
-      predStep();
+      predApply(dt); predStep();
     }
     lastRt = rt; interp(rt, dt);
     if (rtts.length >= 3 && Math.abs(aheadNow - aheadSent) > 0.5) sendDelay();
@@ -1083,7 +1098,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   resize();
   connect();
   window.__serpent = { renderer: () => R.name, get device() { return R.device; }, state: () => ({ connected, me, state, foodHigh, alive: [...alive].reduce((a, b) => a + b, 0) }),
-                      dbg: () => ({ me, hx, hy, ha, shown, trail, pcOf, segN, mass, RING, interpT, estTick, hist, ahead: aheadNow, touching, board, mini: miniList, WR, newest: Math.max(...hist.map((h) => h.length ? h[h.length - 1].t : 0)), rt: lastRt }), // drawn state, for tests
+                      dbg: () => ({ me, hx, hy, ha, shown, trail, hdrF, hdrU, frameOut, pcOf, segN, mass, RING, interpT, estTick, hist, ahead: aheadNow, touching, board, mini: miniList, WR, newest: Math.max(...hist.map((h) => h.length ? h[h.length - 1].t : 0)), rt: lastRt }), // drawn state, for tests
                       head: () => (me >= 0 ? { x: hx[me], y: hy[me], a: ha[me], pred: pred.on, err: pred.err } : null) };
   requestAnimationFrame((t) => { last = t; frame(t); });
 })();

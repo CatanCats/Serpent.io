@@ -461,7 +461,7 @@ static void killSnake(i32 s, i32 killer) {
   k->alive = 0;
   unlinkBody(s);
   if (k->near) {
-    float per = k->mass * 0.85f / (float)(k->n / 2 + 1), j = k->r * 0.6f;
+    float per = k->mass * 0.55f / (float)(k->n / 2 + 1), j = k->r * 0.6f;
     for (i32 i = 0; i < k->n; i += 2)
       spawnFood(TX(s, i) + (frand() - 0.5f) * j, TY(s, i) + (frand() - 0.5f) * j, per * (0.6f + frand() * 0.8f), k->skin);
     deathX = TX(s, k->n / 3); deathY = TY(s, k->n / 3); deathTick = tick;
@@ -489,7 +489,7 @@ static void moveSnake(i32 s, float dt) {
   k->hy += k->dcy * speed * dt;
 
   if (k->boost) {
-    float lose = (6.f + k->mass * 0.006f) * dt;
+    float lose = (3.f + k->mass * 0.003f) * dt; /* half what it was */
     k->mass -= lose; k->dropMass += lose; k->dropT += dt;
     if (k->dropT > 0.1f) {
       spawnFood(TX(s, k->n - 1), TY(s, k->n - 1), k->dropMass * 0.8f, k->skin);
@@ -947,8 +947,12 @@ static i32 renderPrep(float cx, float cy, float hw, float hh, float px) {
     i32 K = (n - 1 + stride - 1) / stride;
     if (K > maxK) maxK = K;
     Head *h = &hdr[nvis++];
+    /* the head faces its heading, but at most 0.6 rad off the body just behind it: further off, the
+       ribbon between them twisted (a bow-tie) and part of the head went missing */
     h->hx = hx; h->hy = hy; h->u = 1.f - minf(sqrtf_(dx * dx + dy * dy) / k->spacing, 1.f); h->r = k->r; h->spacing = k->spacing; h->stride = (float)stride;
-    h->ang = k->ang; h->W = W; h->row = (u32)s; h->newest = (k->pc - 1u - j0) & RMASK; h->n = (u32)n;
+    float bx = TX(s, j0) - TX(s, j0 + 2u), by = TY(s, j0) - TY(s, j0 + 2u), hA = k->ang;
+    if (bx * bx + by * by > 0.01f) { float bA = atan2f_(by, bx); hA = bA + maxf(-0.6f, minf(0.6f, wrapa(k->ang - bA))); }
+    h->ang = hA; h->W = W; h->row = (u32)s; h->newest = (k->pc - 1u - j0) & RMASK; h->n = (u32)n;
     h->info = (u32)k->skin | ((u32)(k->boost | (s == 0 ? 2 : 0) | (legend ? 4 : 0)) << 8);
     trailSync(s);
     k->seen = 1;

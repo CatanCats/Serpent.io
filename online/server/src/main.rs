@@ -92,8 +92,8 @@ impl Sim {
                           u16 when it was made (the page's clock, ms): how late each input arrives, see on_input,
                           u16 the server step it was made at (low 16 bits; optional): a time-aligned page
                           (see DELAY) draws its snake at the server's present, so the input takes effect at
-                          that step (replayed, as splix.io does with turns): at most the player's one-way
-                          delay + 4 steps back, and never more than 24
+                          that step (replayed, as splix.io does with turns): at most 24 steps back
+                          (400 ms: the one-way delay plus a lag spike)
                     3 VIEW  u16 aspect*1000
                     4 LEAVE (back to the menu)
                     5 PING  u8 id   (answered at once with PONG, by the connection, not the game loop)
@@ -325,13 +325,13 @@ impl Game {
     /// waits, after a hit, for an input still on its way.
     /// A time-aligned page (as splix.io): the input was made with the page showing server step
     /// `meant` (low 16 bits), so it takes effect there: this many steps back from the step it
-    /// would apply at now. At most the player's one-way delay + 4 steps (its own measured round
-    /// trip), never more than 24: nobody can steer further into the past. The usual lateness
+    /// would apply at now. At most 24 steps (400 ms: the one-way delay plus a lag spike; less let
+    /// a turn held up by a stall land late, and the paths split): nobody steers further back. The usual lateness
     /// (90th percentile + 1) is also how long a crash waits for inputs still on their way.
     fn input_meant(c: &mut Client, meant: u16) -> i32 {
         let now = unsafe { sim_tick() }.wrapping_add(1);
         let back = (now as u16).wrapping_sub(meant) as i16 as i32;
-        let allowed = ((c.rtt_ms as f32 * 0.03).ceil() as i32 + 4).min(24);
+        let allowed = 24; // 400 ms: a turn held up by a lag spike (TCP stalls 100-300 ms here) still lands where it was made; at one-way + 4 it was applied late and the paths split (the page then pulled the snake over: jumps, odd arcs)
         let late = back.clamp(0, allowed);
         c.late_max = c.late_max.max(late);
         c.lates.push_back(late as u8); if c.lates.len() > 180 { c.lates.pop_front(); }

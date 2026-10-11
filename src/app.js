@@ -172,7 +172,7 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const miniEl = $("mini");
   function resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, QUAL[quality] || 2);  // always full sharpness: never lowered automatically
-    vw = Math.round(innerWidth * dpr); vh = Math.round(innerHeight * dpr);
+    vw = Math.max(1, Math.round(innerWidth * dpr)); vh = Math.max(1, Math.round(innerHeight * dpr)); // at least 1: a page opened in a background tab has no size yet, and a 0x0 canvas made WebGPU fail to start
     if (cv.width !== vw || cv.height !== vh) { cv.width = vw; cv.height = vh; }
     R.resize(vw, vh);
     const r = miniEl.getBoundingClientRect();
