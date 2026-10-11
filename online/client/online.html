@@ -88,6 +88,11 @@
   /* phones / touch screens below full size: the level as one coloured letter, so whole snake names fit */
   #board.short .tg { width: 16px; padding: 0; text-align: center; font-size: 10px; font-weight: 800; letter-spacing: 0; line-height: 15px; border-radius: 5px; }
   #board.short .tg::after { content: attr(data-s); }
+  /* made narrow by hand (tgS, tgX): the same one letter, then no badge at all, so the names keep the room */
+  #board.tgS .tg { width: 16px; padding: 0; text-align: center; font-size: 10px; font-weight: 800; letter-spacing: 0; line-height: 15px; border-radius: 5px; }
+  #board.tgS .tg::after { content: attr(data-s); }
+  #board.tgX .tg { display: none; }
+  #board.tgX li .sc { min-width: 0; }
   #board { z-index: 5; } /* above the start page: usable there too */
   @media (max-width: 640px) { /* start page on a phone: the card starts below the open leaderboard */
     body.lbOpen:not(.playing) .screen { overflow-y: auto; padding-top: 150px; place-items: start center; }

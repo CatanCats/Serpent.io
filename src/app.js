@@ -314,6 +314,8 @@ const BOT_NAMES = ["Noodle", "Slinky", "Viper", "Kaa", "Mamba", "Wiggles", "Nagi
   const applyLbSize = () => {
     boardEl.style.width = lbW ? lbW + "px" : ""; lbOl.style.maxHeight = lbH ? lbH + "px" : "";
     boardEl.classList.toggle("sized", !!(lbW || lbH));
+    // made narrow by hand: the level badges shrink to one coloured letter, then go, so the room shows names
+    boardEl.classList.toggle("tgS", lbW > 0 && lbW < 250); boardEl.classList.toggle("tgX", lbW > 0 && lbW < 190);
   };
   const setLbClosed = (c) => { boardEl.classList.toggle("closed", c); document.body.classList.toggle("lbOpen", !c); lbX.textContent = c ? "▾" : "×"; lbX.title = c ? "Show the leaderboard" : "Hide the leaderboard"; };
   applyLbSize(); setLbClosed(store.get("serpent.lbclosed") === "1");
